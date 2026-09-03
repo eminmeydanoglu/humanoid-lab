@@ -15,6 +15,7 @@ scripts/verify-pins.sh
 scripts/fetch-models.sh
 scripts/doctor-report.py
 scripts/render-lock-env.py
+scripts/record-provenance.py
 **/__pycache__
 **/*.pyc
 **/.pytest_cache
