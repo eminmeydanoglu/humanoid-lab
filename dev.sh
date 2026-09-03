@@ -7,6 +7,7 @@
 #   ./dev.sh sonic-sim     MuJoCo environment shell
 #   ./dev.sh groot         GR00T environment shell
 #   ./dev.sh doctor        container + host validation (doctor.sh)
+#   ./dev.sh smoke         hard smoke tests inside the running container
 #   ./dev.sh fetch-models  download pinned models into the persistent dir
 #   ./dev.sh hf-login      login to host-persistent HF cache (token never written to image/Git)
 #   ./dev.sh stop          stop the container; keeps data
@@ -46,6 +47,10 @@ case "${1:-}" in
   doctor)
     ./doctor.sh
     ;;
+  smoke)
+    up_once
+    DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && /opt/humanoid-lab/smoke-test.sh'
+    ;;
   fetch-models)
     up_once
     DC exec dev bash -lc "source /opt/humanoid-lab/entrypoint.sh && scripts/fetch-models.sh"
@@ -66,7 +71,7 @@ case "${1:-}" in
     exit 2
     ;;
   *)
-    echo "usage: $0 [isaac|sonic-sim|groot|doctor|fetch-models|hf-login|stop|rebuild|foxy]" >&2
+    echo "usage: $0 [isaac|sonic-sim|groot|doctor|smoke|fetch-models|hf-login|stop|rebuild|foxy]" >&2
     exit 2
     ;;
 esac
