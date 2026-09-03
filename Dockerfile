@@ -81,13 +81,13 @@ COPY scripts/smoke-test.sh /opt/humanoid-lab/smoke-test.sh
 # lock.  `fetch <sha>` is intentional: no branch or tag is checked out.
 RUN set -eux; \
     checkout() { \
-      url="$$1"; commit="$$2"; target="$$3"; \
-      git init "$$target"; \
-      git -C "$$target" remote add origin "$$url"; \
-      git -C "$$target" fetch --depth=1 origin "$$commit"; \
-      git -C "$$target" checkout --detach FETCH_HEAD; \
-      test "$$(git -C "$$target" rev-parse HEAD)" = "$$commit"; \
-      test -z "$$(git -C "$$target" status --porcelain)"; \
+      url="$1"; commit="$2"; target="$3"; \
+      git init "$target"; \
+      git -C "$target" remote add origin "$url"; \
+      git -C "$target" fetch --depth=1 origin "$commit"; \
+      git -C "$target" checkout --detach FETCH_HEAD; \
+      test "$(git -C "$target" rev-parse HEAD)" = "$commit"; \
+      test -z "$(git -C "$target" status --porcelain)"; \
     }; \
     mkdir -p /opt/src /opt/venvs /opt/humanoid-lab /opt/assets /workspace/humanoid-lab; \
     checkout https://github.com/isaac-sim/IsaacLab.git "${ISAAC_LAB_COMMIT}" /opt/src/isaaclab; \
@@ -109,10 +109,10 @@ RUN set -eux; \
     mv /opt/assets/g1-mujoco-binary /opt/src/sonic/gear_sonic/data/robot_model/model_data/g1; \
     checkout https://github.com/NVIDIA/Isaac-GR00T.git "${ISAAC_GROOT_COMMIT}" /opt/src/isaac-groot; \
     git -C /opt/src/isaac-groot submodule update --init --recursive; \
-    test "$$(git -C /opt/src/isaac-groot/external_dependencies/LIBERO rev-parse HEAD)" = 8f1084e3132a39270c3a13ebe37270a43ece2a01; \
-    test "$$(git -C /opt/src/isaac-groot/external_dependencies/SimplerEnv rev-parse HEAD)" = 8a2d286c926c1371927caa7651a412b4cc331756; \
-    test "$$(git -C /opt/src/isaac-groot/external_dependencies/robocasa rev-parse HEAD)" = d89d481ce9c76da7f179466981676e268aa842e5; \
-    test "$$(git -C /opt/src/isaac-groot/external_dependencies/robocasa-gr1-tabletop-tasks rev-parse HEAD)" = 4840e671596f93ca03651524b9f72ffb1aadfeff; \
+    test "$(git -C /opt/src/isaac-groot/external_dependencies/LIBERO rev-parse HEAD)" = 8f1084e3132a39270c3a13ebe37270a43ece2a01; \
+    test "$(git -C /opt/src/isaac-groot/external_dependencies/SimplerEnv rev-parse HEAD)" = 8a2d286c926c1371927caa7651a412b4cc331756; \
+    test "$(git -C /opt/src/isaac-groot/external_dependencies/robocasa rev-parse HEAD)" = d89d481ce9c76da7f179466981676e268aa842e5; \
+    test "$(git -C /opt/src/isaac-groot/external_dependencies/robocasa-gr1-tabletop-tasks rev-parse HEAD)" = 4840e671596f93ca03651524b9f72ffb1aadfeff; \
     chown -R "${DEVELOPER_UID}:${DEVELOPER_GID}" /opt/src /opt/venvs /opt/humanoid-lab /opt/assets /workspace
 
 # `isaac-sonic` and `sonic-sim` use project-owned resolved uv locks.  The
