@@ -8,6 +8,9 @@ cd "$(dirname "$0")"
 ROOT="$(pwd)"
 LOG="$ROOT/setup.log"
 
+# Everything (console + durable log) streams into hersey.log for live tracking.
+exec > >(tee -a "$ROOT/hersey.log") 2>&1
+
 say() { printf '\n== %s ==\n' "$*"; }
 die() { printf 'setup.sh: error: %s\n' "$*" >&2; exit 2; }
 
@@ -194,5 +197,9 @@ echo "  ./dev.sh fetch-models   # downloads pinned models (gated: needs HF licen
 say "result"
 echo "  dev container:  docker compose exec dev bash"
 echo "  doctor:         ./doctor.sh   (report: $DATA_ROOT/diagnostics/)"
-echo "  setup.log:      $LOG"
+echo "  log:            $LOG + hersey.log"
 echo "SETUP COMPLETE (model and ROS stages are separate steps)"
+
+# exec > >(tee ...) can swallow the exit status at shutdown; flush first.
+sleep 0.2 2>/dev/null || true
+exit 0
