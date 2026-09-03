@@ -125,7 +125,21 @@ RUN set -eux; \
     test -x /isaac-sim/kit/python/bin/python3; \
     uv venv --python /isaac-sim/kit/python/bin/python3 /opt/venvs/isaac-sonic; \
     UV_PROJECT_ENVIRONMENT=/opt/venvs/isaac-sonic uv sync --frozen --no-dev --project /opt/locks/isaac-sonic; \
-    /opt/venvs/isaac-sonic/bin/python -c 'import torch; assert torch.__version__.startswith("2.7.0"); import isaaclab, gear_sonic'; \
+    # The Isaac Lab and SONIC source distributions ship no MANIFEST.in / \
+    # package_data, so archive-built wheels lack config/extension.toml and \
+    # every data file (import isaaclab fails; gear_sonic has no G1 assets). \
+    # The pinned source trees fetched above are the authoritative install \
+    # source: replace the archive dists with editable installs from those \
+    # exact commits. Dependency closure still comes from the frozen lock. \
+    uv pip uninstall --python /opt/venvs/isaac-sonic/bin/python \
+      isaaclab isaaclab-assets isaaclab-tasks isaaclab-rl gear-sonic || true; \
+    uv pip install --python /opt/venvs/isaac-sonic/bin/python --no-deps \
+      -e /opt/src/isaaclab/source/isaaclab \
+      -e /opt/src/isaaclab/source/isaaclab_assets \
+      -e /opt/src/isaaclab/source/isaaclab_tasks \
+      -e /opt/src/isaaclab/source/isaaclab_rl \
+      -e '/opt/src/sonic/gear_sonic[training]'; \
+    /opt/venvs/isaac-sonic/bin/python -c 'import torch; assert torch.__version__.startswith("2.7.0"); import isaaclab, gear_sonic; print("isaaclab", isaaclab.__version__)'; \
     uv venv --python 3.11 /opt/venvs/sonic-sim; \
     UV_PROJECT_ENVIRONMENT=/opt/venvs/sonic-sim uv sync --frozen --no-dev --project /opt/locks/sonic-sim; \
     # G1 sim-loop transport (same contract as the previously validated
@@ -137,13 +151,16 @@ RUN set -eux; \
     test -d /opt/src/sonic/external_dependencies/unitree_sdk2_python/unitree_sdk2py; \
     cp -a /opt/src/sonic/external_dependencies/unitree_sdk2_python/unitree_sdk2py \
       /opt/venvs/sonic-sim/lib/python3.11/site-packages/; \
+    uv pip uninstall --python /opt/venvs/sonic-sim/bin/python gear-sonic || true; \
+    uv pip install --python /opt/venvs/sonic-sim/bin/python --no-deps \
+      -e '/opt/src/sonic/gear_sonic[sim]'; \
     /opt/venvs/sonic-sim/bin/python -c 'import mujoco, gear_sonic'; \
     /opt/venvs/sonic-sim/bin/python -c 'import unitree_sdk2py, gear_sonic.scripts.run_sim_loop'; \
     uv venv --python 3.12 /opt/venvs/groot-n17; \
     UV_PROJECT_ENVIRONMENT=/opt/venvs/groot-n17 uv sync --frozen --no-dev --project /opt/src/isaac-groot; \
     /opt/venvs/groot-n17/bin/python -c 'import torch, flash_attn, gr00t; assert torch.__version__.startswith("2.9.0")'; \
     chmod 0755 /opt/humanoid-lab/*.sh; \
-    chown -R "${DEVELOPER_UID}:${DEVELOPER_GID}" /opt/venvs /opt/humanoid-lab
+    chown -R "${DEVELOPER_UID}:${DEVELOPER_GID}" /opt/venvs /opt/humanoid-lab /opt/src
 
 LABEL org.opencontainers.image.source="git@github.com:eminmeydanoglu/humanoid-lab.git" \
       org.opencontainers.image.revision="unknown" \
