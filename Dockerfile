@@ -128,7 +128,17 @@ RUN set -eux; \
     /opt/venvs/isaac-sonic/bin/python -c 'import torch; assert torch.__version__.startswith("2.7.0"); import isaaclab, gear_sonic'; \
     uv venv --python 3.11 /opt/venvs/sonic-sim; \
     UV_PROJECT_ENVIRONMENT=/opt/venvs/sonic-sim uv sync --frozen --no-dev --project /opt/locks/sonic-sim; \
+    # G1 sim-loop transport (same contract as the previously validated
+    # standalone sonic-sim-loop image): cyclonedds 0.10.2 has no cp311 wheel,
+    # so it is built from source against the /opt/cyclonedds prefix above;
+    # unitree_sdk2py is the vendored pure-Python SDK from the pinned SONIC
+    # tree, installed venv-scoped (no global PYTHONPATH contamination).
+    uv pip install --python /opt/venvs/sonic-sim/bin/python cyclonedds==0.10.2; \
+    test -d /opt/src/sonic/external_dependencies/unitree_sdk2_python/unitree_sdk2py; \
+    cp -a /opt/src/sonic/external_dependencies/unitree_sdk2_python/unitree_sdk2py \
+      /opt/venvs/sonic-sim/lib/python3.11/site-packages/; \
     /opt/venvs/sonic-sim/bin/python -c 'import mujoco, gear_sonic'; \
+    /opt/venvs/sonic-sim/bin/python -c 'import unitree_sdk2py, gear_sonic.scripts.run_sim_loop'; \
     uv venv --python 3.12 /opt/venvs/groot-n17; \
     UV_PROJECT_ENVIRONMENT=/opt/venvs/groot-n17 uv sync --frozen --no-dev --project /opt/src/isaac-groot; \
     /opt/venvs/groot-n17/bin/python -c 'import torch, flash_attn, gr00t; assert torch.__version__.startswith("2.9.0")'; \
