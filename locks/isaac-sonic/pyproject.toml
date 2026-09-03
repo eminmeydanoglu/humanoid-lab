@@ -1,0 +1,38 @@
+[project]
+name = "humanoid-lab-isaac-sonic"
+version = "0.0.0"
+description = "Isaac Lab 2.3.2 and SONIC, resolved for the Kit Python 3.11 runtime"
+requires-python = "==3.11.*"
+dependencies = [
+    "torch==2.7.0",
+    "torchvision==0.22.0",
+    "numpy==1.26.4",
+    "scipy==1.15.3",
+    "isaaclab @ https://github.com/isaac-sim/IsaacLab/archive/37ddf626871758333d6ed89cf64ad702aef127d0.tar.gz#subdirectory=source/isaaclab",
+    "isaaclab-assets @ https://github.com/isaac-sim/IsaacLab/archive/37ddf626871758333d6ed89cf64ad702aef127d0.tar.gz#subdirectory=source/isaaclab_assets",
+    "isaaclab-tasks @ https://github.com/isaac-sim/IsaacLab/archive/37ddf626871758333d6ed89cf64ad702aef127d0.tar.gz#subdirectory=source/isaaclab_tasks",
+    "isaaclab-rl @ https://github.com/isaac-sim/IsaacLab/archive/37ddf626871758333d6ed89cf64ad702aef127d0.tar.gz#subdirectory=source/isaaclab_rl",
+    "gear_sonic[training] @ https://github.com/NVlabs/GR00T-WholeBodyControl/archive/a0732b642c0333077e127a2f56ab0014c196bca4.tar.gz#subdirectory=gear_sonic",
+]
+
+[tool.uv]
+package = false
+override-dependencies = [
+    "smpl-sim @ https://github.com/ZhengyiLuo/SMPLSim/archive/b5c08720503ad5fff64050c4d289c42d947fcf8d.tar.gz",
+    "smplx @ https://github.com/ZhengyiLuo/smplx/archive/a5b8e4ac14f79f3f33fd2cf2a16e6f507146b813.tar.gz",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+# SONIC's training extra declares SMPLSim as a floating VCS dependency.  This
+# override converts it to the verified immutable archive below; uv records the
+# archive hash in uv.lock and never follows SMPLSim HEAD during frozen builds.
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.extra-build-dependencies]
+flatdict = ["setuptools==80.9.0"]

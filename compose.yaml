@@ -1,0 +1,86 @@
+# compose.yaml — the single main development container.
+#
+# Usage:
+#   ./setup.sh            # host preflight + image build + start + smoke
+#   ./dev.sh              # create/start container + interactive shell
+#
+# Invariants:
+# - network_mode: host  -> DDS multicast/unicast discovery and robot NIC access.
+# - ipc: host           -> fewer Isaac/PyTorch shared-memory issues.
+# - No privileged, no Docker socket mount, no named volumes.
+# - GPU via device reservation (needs host driver — doctor.sh validates).
+# - All persistent data is host bind-mounted (no data on the writable layer).
+
+name: ${COMPOSE_PROJECT_NAME:-humanoid-lab}
+
+services:
+  dev:
+    # Image name comes only from the lock; "latest"/"main" tags are not used.
+    image: humanoid-lab/dev:${ISAAC_SIM_TAG:-5.1.0}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        ISAAC_SIM_IMAGE: ${ISAAC_SIM_IMAGE:-nvcr.io/nvidia/isaac-sim}
+        ISAAC_SIM_TAG: ${ISAAC_SIM_TAG:-5.1.0}
+        ISAAC_SIM_DIGEST: ${ISAAC_SIM_DIGEST:-UNSET_DIGEST}
+        UV_VERSION: ${UV_VERSION:-0.12.9}
+        UV_SHA256: ${UV_SHA256:-UNSET_UV_SHA256}
+        ISAAC_LAB_COMMIT: ${REPOSITORIES_ISAAC_LAB_COMMIT:?render versions.lock.yaml first}
+        SONIC_COMMIT: ${REPOSITORIES_SONIC_COMMIT:?render versions.lock.yaml first}
+        ISAAC_GROOT_COMMIT: ${REPOSITORIES_ISAAC_GROOT_COMMIT:?render versions.lock.yaml first}
+        DEVELOPER_UID: ${DEVELOPER_UID:-1000}
+        DEVELOPER_GID: ${DEVELOPER_GID:-1000}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    container_name: ${COMPOSE_PROJECT_NAME:-humanoid-lab}-dev
+    hostname: humanoid-lab-dev
+    # X11 (only if GUI needed; headless default)
+    environment:
+      - ACCEPT_EULA=${ACCEPT_EULA:-N}
+      - PRIVACY_CONSENT=${PRIVACY_CONSENT:-N}
+      - DISPLAY=${DISPLAY:-:0}
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}
+      - HUMANOID_DATA_ROOT=/data
+      - HUMANOID_SOURCE_ROOT=/workspace/humanoid-lab
+      # HF/uv/Isaac caches are always host bind mounts.
+      - HF_HOME=/cache/huggingface
+      - HUGGINGFACE_HUB_CACHE=/cache/huggingface/hub
+      - UV_CACHE_DIR=/cache/uv
+      - ISAAC_CACHE_PATH=/cache/isaac
+      - OV_CACHE_PATH=/cache/isaac/ov
+      - PIP_CACHE_DIR=/cache/isaac/pip
+      - GL_CACHE_PATH=/cache/isaac/glcache
+      - COMPUTE_CACHE_PATH=/cache/isaac/computecache
+    volumes:
+      - ${HUMANOID_SOURCE_ROOT:-/dev/null}:/workspace/humanoid-lab
+      - ${HUMANOID_DATA_ROOT:-/dev/null}/datasets:/data/datasets
+      - ${HUMANOID_DATA_ROOT:-/dev/null}/checkpoints:/data/checkpoints
+      - ${HUMANOID_DATA_ROOT:-/dev/null}/models:/data/models
+      - ${HUMANOID_DATA_ROOT:-/dev/null}/hf-cache:/cache/huggingface
+      - ${HUMANOID_DATA_ROOT:-/dev/null}/uv-cache:/cache/uv
+      - ${HUMANOID_DATA_ROOT:-/dev/null}/isaac-cache:/cache/isaac
+      - ${HUMANOID_DATA_ROOT:-/dev/null}/rosbags:/data/rosbags
+      - ${HUMANOID_DATA_ROOT:-/dev/null}/outputs:/outputs
+      - ${HUMANOID_DATA_ROOT:-/dev/null}/diagnostics:/data/diagnostics
+      - ${HUMANOID_DATA_ROOT:-/dev/null}/runtime:/data/runtime:ro
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    network_mode: host
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - |
+        set -e
+        exec /opt/humanoid-lab/shell.sh
+    init: true
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    stop_grace_period: 30s

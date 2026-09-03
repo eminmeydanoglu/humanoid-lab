@@ -1,0 +1,21 @@
+# Keep the image context lean (host data never enters the image).
+# Dockerfile, containers/ and scripts/smoke-test.sh are COPYed — not excluded below.
+.git
+.env
+.generated
+README.md
+plan.md
+plan_2.md
+ros
+doctor.sh
+dev.sh
+setup.sh
+scripts/ci-lint.sh
+scripts/verify-pins.sh
+scripts/fetch-models.sh
+scripts/doctor-report.py
+scripts/render-lock-env.py
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+diagnostics/

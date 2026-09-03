@@ -1,0 +1,22 @@
+# secret / local state (never commit)
+.env
+setup.log
+# local design notes (not tracked)
+plan.md
+plan_2.md
+# generated (lock render output; not committed)
+.generated/
+# python build artifacts (uv sync byproducts in locks/)
+*.egg-info/
+# python leftovers
+__pycache__/
+*.pyc
+# local diagnostics and accidental data symlinks
+diagnostics/
+*.local.json
+# editor / OS
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/

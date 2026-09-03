@@ -1,0 +1,24 @@
+[project]
+name = "humanoid-lab-sonic-sim"
+version = "0.0.0"
+description = "Python 3.11 MuJoCo simulator environment for the pinned SONIC release"
+requires-python = "==3.11.*"
+dependencies = [
+    "numpy==1.26.4",
+    "scipy==1.15.3",
+    "torch==2.7.0",
+    "torchvision==0.22.0",
+    "gear_sonic[sim] @ https://github.com/NVlabs/GR00T-WholeBodyControl/archive/a0732b642c0333077e127a2f56ab0014c196bca4.tar.gz#subdirectory=gear_sonic",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
