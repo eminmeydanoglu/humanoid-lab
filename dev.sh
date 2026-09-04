@@ -53,11 +53,15 @@ case "${1:-}" in
     ;;
   fetch-models)
     up_once
-    DC exec dev bash -lc "source /opt/humanoid-lab/entrypoint.sh && scripts/fetch-models.sh"
+    # The HF CLI lives in the venvs, not the base image — select one first.
+    DC exec dev bash -lc "source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && scripts/fetch-models.sh"
     ;;
   hf-login)
     up_once
-    DC exec dev bash -lc "source /opt/humanoid-lab/entrypoint.sh && huggingface-cli login"
+    # Token is written to HF_HOME (/cache/huggingface — host bind mount),
+    # shared by every env; 'hf' is the modern CLI (huggingface-cli is
+    # deprecated upstream and removed in huggingface_hub >= 1.0).
+    DC exec dev bash -lc "source /opt/humanoid-lab/entrypoint.sh && use-groot && hf login || use-groot && huggingface-cli login"
     ;;
   stop)
     DC stop
