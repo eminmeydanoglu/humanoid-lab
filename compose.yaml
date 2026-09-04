@@ -67,6 +67,10 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
     network_mode: host
     ipc: host
+    # /isaac-sim is group-readable only (750 isaac-sim) — compose exec does
+    # not resolve supplementary groups from /etc/group, so add it explicitly.
+    group_add:
+      - isaac-sim
     deploy:
       resources:
         reservations:
