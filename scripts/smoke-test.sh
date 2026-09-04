@@ -151,19 +151,24 @@ if [ "$HAVE_GROOT" = 1 ]; then
     note BLOCKED "GR00T N1.7 weights missing at $GROOT_MODEL_DIR — run ./dev.sh fetch-models"
     BLOCK=$((BLOCK+1))
   else
-    # 6a. local checkpoint metadata (no network, not gated): config.json +
-    # registered Gr00tN1d7Config must load from the local dir alone.
+    # 6a. local checkpoint metadata (no network, not gated): the pinned
+    # Gr00tN1d7Config must load from the local dir alone, and every shard in
+    # model.safetensors.index.json must exist on disk.
     if timeout 120 "$PY_GROOT" - "$GROOT_MODEL_DIR" >/dev/null 2>&1 <<'PY'; then
-import sys
-from transformers import AutoConfig
-config = AutoConfig.from_pretrained(sys.argv[1], trust_remote_code=True)
-assert config.model_type.lower() in ("gr00tn1d7", "gr00t_n1d7"), config.model_type
-print(f"local config OK: model_type={config.model_type}")
+import json, os, sys
+from gr00t.configs.model.gr00t_n1d7 import Gr00tN1d7Config
+config = Gr00tN1d7Config.from_pretrained(sys.argv[1])
+assert config.model_name == "nvidia/Cosmos-Reason2-2B", config.model_name
+idx = json.load(open(os.path.join(sys.argv[1], "model.safetensors.index.json")))
+shards = set(idx["weight_map"].values())
+missing = [s for s in shards if not os.path.isfile(os.path.join(sys.argv[1], s))]
+assert not missing, f"missing shards: {missing}"
+print(f"config OK ({config.model_name}), shards={len(shards)} complete")
 PY
-      note PASS "groot-n17: N1.7 local checkpoint metadata loads (config.json + registry)"
+      note PASS "groot-n17: N1.7 local checkpoint config + shard integrity OK"
       PASS=$((PASS+1))
     else
-      note FAIL "groot-n17: N1.7 local checkpoint metadata failed to load from $GROOT_MODEL_DIR"
+      note FAIL "groot-n17: N1.7 local checkpoint config/shard check failed at $GROOT_MODEL_DIR"
       FAIL=$((FAIL+1))
     fi
     # 6b. full model load — instantiates the Qwen3-VL backbone from the
