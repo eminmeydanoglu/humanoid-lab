@@ -15,7 +15,7 @@ import mujoco
 import mujoco.viewer
 
 
-root = Path(os.environ.get("G1_ASSET_ROOT", "/runtime/g1-mujoco-real"))
+root = Path(os.environ.get("G1_ASSET_ROOT", "/data/runtime/g1-mujoco-real"))
 xml = root / "scene_43dof.xml"
 if not xml.is_file():
     raise SystemExit(f"real G1 scene is missing: {xml}")
