@@ -1,6 +1,7 @@
 # secret / local state (never commit)
 .env
 setup.log
+hersey.log
 # local design notes (not tracked)
 plan.md
 plan_2.md
