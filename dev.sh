@@ -59,9 +59,14 @@ case "${1:-}" in
   hf-login)
     up_once
     # Token is written to HF_HOME (/cache/huggingface — host bind mount),
-    # shared by every env; 'hf' is the modern CLI (huggingface-cli is
-    # deprecated upstream and removed in huggingface_hub >= 1.0).
-    DC exec dev bash -lc "source /opt/humanoid-lab/entrypoint.sh && use-groot && hf login || use-groot && huggingface-cli login"
+    # shared by every env.  The login subcommand moved between CLI
+    # generations: huggingface-cli login -> hf auth login (hub 0.34+) ->
+    # hf login (hub >= 1.0).  Probe, then exec the one that exists.
+    DC exec dev bash -lc '
+      source /opt/humanoid-lab/entrypoint.sh && use-groot
+      if hf auth login --help >/dev/null 2>&1; then exec hf auth login; fi
+      if hf login --help >/dev/null 2>&1; then exec hf login; fi
+      exec huggingface-cli login'
     ;;
   stop)
     DC stop
