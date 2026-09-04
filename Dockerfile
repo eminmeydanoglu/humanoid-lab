@@ -67,7 +67,11 @@ RUN set -eux; \
     uv --version | grep -F "${UV_VERSION}"
 
 ENV CYCLONEDDS_HOME=/opt/cyclonedds \
-    CMAKE_PREFIX_PATH=/opt/cyclonedds
+    CMAKE_PREFIX_PATH=/opt/cyclonedds \
+    UV_PYTHON_INSTALL_DIR=/opt/uv/python
+# UV_PYTHON_INSTALL_DIR: uv-managed interpreters (3.11 for sonic-sim; the
+# Isaac base ships no system 3.11) must live in a world-readable location —
+# the default under /root would make the venv symlinks dead for `developer`.
 
 # Build inputs are copied before the fetch layer: the G1 asset preparation
 # script below runs inside it.  Locks are build inputs, not runtime bind-mounted
@@ -171,6 +175,13 @@ LABEL org.opencontainers.image.source="git@github.com:eminmeydanoglu/humanoid-la
       org.humanoid-lab.groot="1a1837f20538b7d7e21f977a11a5aee14f99803c" \
       org.humanoid-lab.uv="${UV_VERSION}" \
       org.humanoid-lab.build-date="${BUILD_DATE}"
+
+# The Isaac Sim base keeps /isaac-sim at 750 isaac-sim:isaac-sim; grant the
+# developer user read/traverse via group membership (Kit python + extensions
+# are required by the isaac-sonic venv at runtime).
+RUN set -eux; \
+    getent group isaac-sim >/dev/null && usermod -aG isaac-sim developer; \
+    id developer
 
 USER ${DEVELOPER_UID}:${DEVELOPER_GID}
 WORKDIR /workspace/humanoid-lab
