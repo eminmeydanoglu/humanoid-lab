@@ -9,6 +9,7 @@ dependencies = [
     "torch==2.7.0",
     "torchvision==0.22.0",
     "gear_sonic[sim] @ https://github.com/NVlabs/GR00T-WholeBodyControl/archive/a0732b642c0333077e127a2f56ab0014c196bca4.tar.gz#subdirectory=gear_sonic",
+    "pygame==2.6.1",
 ]
 
 [tool.uv]

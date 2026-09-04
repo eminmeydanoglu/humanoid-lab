@@ -3,7 +3,7 @@
 ARG ISAAC_SIM_IMAGE=nvcr.io/nvidia/isaac-sim
 ARG ISAAC_SIM_TAG=5.1.0
 ARG ISAAC_SIM_DIGEST=UNSET_DIGEST
-FROM ${ISAAC_SIM_IMAGE}:${ISAAC_SIM_TAG}@sha256:${ISAAC_SIM_DIGEST}
+FROM ${ISAAC_SIM_IMAGE}:${ISAAC_SIM_TAG}@sha256:${ISAAC_SIM_DIGEST} AS sources
 
 ARG UV_VERSION=0.12.9
 ARG UV_SHA256=ec7a99cd05e0cd7f80243f135ce1361c76835cb0ee60055d14d20eba8eba1460
@@ -53,12 +53,9 @@ RUN set -eux; \
 ENV CYCLONEDDS_HOME=/opt/cyclonedds \
     CMAKE_PREFIX_PATH=/opt/cyclonedds \
     UV_PYTHON_INSTALL_DIR=/opt/uv/python
-# UV_PYTHON_INSTALL_DIR world-readable olmali; /root default'i developer icin dead symlink uretir
+# Runtime bootstrap overrides this image default with the persistent uv cache.
 
-COPY locks/ /opt/locks/
-COPY containers/entrypoint.sh containers/shell.sh containers/isaac-sim-env.sh /opt/humanoid-lab/
 COPY containers/prepare-g1-assets.py /opt/humanoid-lab/
-COPY scripts/smoke-test.sh /opt/humanoid-lab/smoke-test.sh
 
 RUN set -eux; \
     checkout() { \
@@ -92,40 +89,20 @@ RUN set -eux; \
     test "$(git -C /opt/src/isaac-groot/external_dependencies/robocasa-gr1-tabletop-tasks rev-parse HEAD)" = 4840e671596f93ca03651524b9f72ffb1aadfeff; \
     chown -R "${DEVELOPER_UID}:${DEVELOPER_GID}" /opt/src /opt/venvs /opt/humanoid-lab /opt/assets /workspace
 
+FROM sources AS dev
+
+# Runtime code is deliberately copied after the expensive source layer.  A
+# change to a shell helper therefore makes only this small final layer dirty.
+COPY locks/ /opt/locks/
+COPY containers/bootstrap-venvs.sh containers/entrypoint.sh containers/shell.sh containers/isaac-sim-env.sh containers/cyclonedds-sim.xml /opt/humanoid-lab/
+COPY patches/sonic-sim-dds-isolation.patch /opt/humanoid-lab/
+COPY scripts/smoke-test.sh /opt/humanoid-lab/smoke-test.sh
+
 RUN set -eux; \
-    test -f /opt/locks/isaac-sonic/uv.lock; \
-    test -f /opt/locks/sonic-sim/uv.lock; \
-    test -f /opt/src/isaac-groot/uv.lock; \
-    test -x /isaac-sim/kit/python/bin/python3; \
-    uv venv --python /isaac-sim/kit/python/bin/python3 /opt/venvs/isaac-sonic; \
-    UV_PROJECT_ENVIRONMENT=/opt/venvs/isaac-sonic uv sync --frozen --no-dev --project /opt/locks/isaac-sonic; \
-    # archive dists data dosyalari eksik; pinned source tree'den editable install
-    uv pip uninstall --python /opt/venvs/isaac-sonic/bin/python \
-      isaaclab isaaclab-assets isaaclab-tasks isaaclab-rl gear-sonic || true; \
-    uv pip install --python /opt/venvs/isaac-sonic/bin/python --no-deps \
-      -e /opt/src/isaaclab/source/isaaclab \
-      -e /opt/src/isaaclab/source/isaaclab_assets \
-      -e /opt/src/isaaclab/source/isaaclab_tasks \
-      -e /opt/src/isaaclab/source/isaaclab_rl \
-      -e '/opt/src/sonic/gear_sonic[training]'; \
-    /opt/venvs/isaac-sonic/bin/python -c 'import torch; assert torch.__version__.startswith("2.7.0"); import isaaclab, gear_sonic; print("isaaclab", isaaclab.__version__)'; \
-    uv venv --python 3.11 /opt/venvs/sonic-sim; \
-    UV_PROJECT_ENVIRONMENT=/opt/venvs/sonic-sim uv sync --frozen --no-dev --project /opt/locks/sonic-sim; \
-    # cyclonedds cp311 wheel yok -> /opt/cyclonedds prefix'ine source build
-    uv pip install --python /opt/venvs/sonic-sim/bin/python cyclonedds==0.10.2; \
-    test -d /opt/src/sonic/external_dependencies/unitree_sdk2_python/unitree_sdk2py; \
-    cp -a /opt/src/sonic/external_dependencies/unitree_sdk2_python/unitree_sdk2py \
-      /opt/venvs/sonic-sim/lib/python3.11/site-packages/; \
-    uv pip uninstall --python /opt/venvs/sonic-sim/bin/python gear-sonic || true; \
-    uv pip install --python /opt/venvs/sonic-sim/bin/python --no-deps \
-      -e '/opt/src/sonic/gear_sonic[sim]'; \
-    /opt/venvs/sonic-sim/bin/python -c 'import mujoco, gear_sonic'; \
-    /opt/venvs/sonic-sim/bin/python -c 'import unitree_sdk2py, gear_sonic.scripts.run_sim_loop'; \
-    uv venv --python 3.12 /opt/venvs/groot-n17; \
-    UV_PROJECT_ENVIRONMENT=/opt/venvs/groot-n17 uv sync --frozen --no-dev --project /opt/src/isaac-groot; \
-    /opt/venvs/groot-n17/bin/python -c 'import torch, flash_attn, gr00t; assert torch.__version__.startswith("2.9.0")'; \
+    git -C /opt/src/sonic apply --check /opt/humanoid-lab/sonic-sim-dds-isolation.patch; \
+    git -C /opt/src/sonic apply /opt/humanoid-lab/sonic-sim-dds-isolation.patch; \
     chmod 0755 /opt/humanoid-lab/*.sh; \
-    chown -R "${DEVELOPER_UID}:${DEVELOPER_GID}" /opt/venvs /opt/humanoid-lab /opt/src
+    chown -R "${DEVELOPER_UID}:${DEVELOPER_GID}" /opt/humanoid-lab /opt/src
 
 LABEL org.opencontainers.image.source="git@github.com:eminmeydanoglu/humanoid-lab.git" \
       org.opencontainers.image.revision="unknown" \

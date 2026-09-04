@@ -56,6 +56,24 @@ else
   FAIL=$((FAIL+1))
 fi
 
+if [ "$HAVE_ISAAC" = 1 ]; then
+  if (
+    # shellcheck disable=SC1091 # Exists only in the dev container.
+    source /opt/humanoid-lab/entrypoint.sh
+    use-isaac-sonic
+    test "$ISAAC_PATH" = /isaac-sim
+    test "$CARB_APP_PATH" = /isaac-sim/kit
+    test "$EXP_PATH" = /isaac-sim/apps
+    python -c 'import rsl_rl'
+  ) >/dev/null 2>&1; then
+    note PASS "isaac-sonic: AppLauncher paths + rsl_rl demo dependency"
+    PASS=$((PASS+1))
+  else
+    note FAIL "isaac-sonic: AppLauncher paths or rsl_rl demo dependency missing"
+    FAIL=$((FAIL+1))
+  fi
+fi
+
 if [ "$HAVE_SIM" = 1 ]; then
   if MUJOCO_GL=egl PYOPENGL_PLATFORM=egl "$PY_SIM" - <<'PY' >/dev/null 2>&1; then
 import pathlib
@@ -128,8 +146,11 @@ if [ "$HAVE_GROOT" = 1 ]; then
   else
     if timeout 120 "$PY_GROOT" - "$GROOT_MODEL_DIR" >/dev/null 2>&1 <<'PY'; then
 import json, os, sys
-from gr00t.configs.model.gr00t_n1d7 import Gr00tN1d7Config
-config = Gr00tN1d7Config.from_pretrained(sys.argv[1])
+# Importing GR00T registers its custom Transformers config with AutoConfig.
+import gr00t.model
+from transformers import AutoConfig
+config = AutoConfig.from_pretrained(sys.argv[1], trust_remote_code=True)
+assert config.model_type == "Gr00tN1d7", config.model_type
 assert config.model_name == "nvidia/Cosmos-Reason2-2B", config.model_name
 idx = json.load(open(os.path.join(sys.argv[1], "model.safetensors.index.json")))
 shards = set(idx["weight_map"].values())

@@ -93,6 +93,7 @@ PY
 if [ -n "$PENDING" ]; then
   echo
   echo "  verified-later fields (required:false — verify on machine, then write to lock):"
+  # shellcheck disable=SC2001 # Prefixing every reported field is more readable here.
   echo "$PENDING" | sed 's/^/    - /'
   if [ "$STRICT" = 1 ]; then RC=2; fi
 fi

@@ -3,17 +3,30 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 RC=0
 
-SCRIPTS=$(find . -path ./.git -prune -o -path ./.generated -prune -o -type f \( -name '*.sh' -o -name 'setup.sh' -o -name 'dev.sh' -o -name 'doctor.sh' \) -print)
+mapfile -d '' -t SCRIPTS < <(
+  find . \
+    -path ./.git -prune -o \
+    -path ./.generated -prune -o \
+    -path ./data -prune -o \
+    -type f -name '*.sh' -print0
+)
+
 echo "== bash -n =="
-for f in $SCRIPTS; do
-  bash -n "$f" && echo "  ok: $f" || { echo "  FAIL: $f"; RC=2; }
+for f in "${SCRIPTS[@]}"; do
+  if bash -n "$f"; then
+    echo "  ok: $f"
+  else
+    echo "  FAIL: $f"
+    RC=2
+  fi
 done
 
 if command -v shellcheck >/dev/null 2>&1; then
   echo "== shellcheck =="
-  shellcheck -x $SCRIPTS || RC=1
+  shellcheck -x "${SCRIPTS[@]}" || RC=2
 else
-  echo "== shellcheck missing (skipping; install: apt install shellcheck) =="
+  echo "  FAIL: shellcheck is required (install: apt install shellcheck)"
+  RC=2
 fi
 
 echo "== python/yaml =="

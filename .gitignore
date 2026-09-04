@@ -7,6 +7,8 @@ plan.md
 plan_2.md
 # lock render cikti
 .generated/
+# kalici veri (dataset, cache, venv, model): repo icinde ama git disi
+data/
 # python build artiklari
 *.egg-info/
 __pycache__/
@@ -20,6 +22,8 @@ diagnostics/
 *~
 .idea/
 .vscode/
-# .pi / docs
+# yerel notlar ve agent durumu
 .pi/
 docs/
+# buyuk model dosyalari
+.pretrained_checkpoints/

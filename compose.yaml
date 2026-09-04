@@ -24,8 +24,12 @@ services:
       - ACCEPT_EULA=${ACCEPT_EULA:-N}
       - PRIVACY_CONSENT=${PRIVACY_CONSENT:-N}
       - DISPLAY=${DISPLAY:-:0}
-      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      # Host networking is needed for Isaac, but simulation DDS is separately
+      # constrained to loopback by cyclonedds-sim.xml and the SONIC patch.
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-42}
       - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}
+      - CYCLONEDDS_URI=file:///opt/humanoid-lab/cyclonedds-sim.xml
+      - HUMANOID_SIM_DDS_DOMAIN_ID=42
       - HUMANOID_DATA_ROOT=/data
       - HUMANOID_SOURCE_ROOT=/workspace/humanoid-lab
       - HF_HOME=/cache/huggingface
@@ -37,17 +41,32 @@ services:
       - GL_CACHE_PATH=/cache/isaac/glcache
       - COMPUTE_CACHE_PATH=/cache/isaac/computecache
     volumes:
-      - ${HUMANOID_SOURCE_ROOT:-/dev/null}:/workspace/humanoid-lab
-      - ${HUMANOID_DATA_ROOT:-/dev/null}/datasets:/data/datasets
-      - ${HUMANOID_DATA_ROOT:-/dev/null}/checkpoints:/data/checkpoints
-      - ${HUMANOID_DATA_ROOT:-/dev/null}/models:/data/models
-      - ${HUMANOID_DATA_ROOT:-/dev/null}/hf-cache:/cache/huggingface
-      - ${HUMANOID_DATA_ROOT:-/dev/null}/uv-cache:/cache/uv
-      - ${HUMANOID_DATA_ROOT:-/dev/null}/isaac-cache:/cache/isaac
-      - ${HUMANOID_DATA_ROOT:-/dev/null}/rosbags:/data/rosbags
-      - ${HUMANOID_DATA_ROOT:-/dev/null}/outputs:/outputs
-      - ${HUMANOID_DATA_ROOT:-/dev/null}/diagnostics:/data/diagnostics
-      - ${HUMANOID_DATA_ROOT:-/dev/null}/runtime:/data/runtime:ro
+      - ${HUMANOID_SOURCE_ROOT:?set HUMANOID_SOURCE_ROOT in .env}:/workspace/humanoid-lab
+      - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/datasets:/data/datasets
+      - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/checkpoints:/data/checkpoints
+      - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/models:/data/models
+      - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/hf-cache:/cache/huggingface
+      - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/uv-cache:/cache/uv
+      # Lock-pinned venvs persist outside the image.  bootstrap-venvs.sh
+      # provisions a missing env and updates only the env whose fingerprint changed.
+      - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/venvs:/opt/venvs
+      - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/isaac-cache:/cache/isaac
+      # Isaac Sim 5.1 writes these under its install prefix.  The base image is
+      # root-owned, so bind-mount every mutable location for the dev user.
+      - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/isaac-cache/main:/isaac-sim/.cache:rw
+      - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/isaac-cache/computecache:/isaac-sim/.nv/ComputeCache:rw
+      - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/isaac-cache/logs:/isaac-sim/.nvidia-omniverse/logs:rw
+      - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/isaac-cache/config:/isaac-sim/.nvidia-omniverse/config:rw
+      - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/isaac-cache/data:/isaac-sim/.local/share/ov/data:rw
+      - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/isaac-cache/pkg:/isaac-sim/.local/share/ov/pkg:rw
+      # Isaac Lab's Python Kit experience also persists state below CARB_APP_PATH.
+      - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/isaac-cache/kit-data:/isaac-sim/kit/data:rw
+      - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/isaac-cache/kit-cache:/isaac-sim/kit/cache:rw
+      - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/isaac-cache/kit-logs:/isaac-sim/kit/logs:rw
+      - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/rosbags:/data/rosbags
+      - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/outputs:/outputs
+      - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/diagnostics:/data/diagnostics
+      - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/runtime:/data/runtime:ro
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
     network_mode: host
     ipc: host

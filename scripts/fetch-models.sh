@@ -2,11 +2,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-: "${HF_HOME:=${HUMANOID_DATA_ROOT:-$HOME/humanoid-lab-data}/hf-cache}"
-MODEL_ROOT="${HUMANOID_DATA_ROOT:-$HOME/humanoid-lab-data}/models"
+: "${HF_HOME:=${HUMANOID_DATA_ROOT:-/workspace/humanoid-lab/data}/hf-cache}"
+MODEL_ROOT="${HUMANOID_DATA_ROOT:-/workspace/humanoid-lab/data}/models"
 export HF_HOME MODEL_ROOT
 
-eval "$(python3 scripts/render-lock-env.py --root . >/dev/null && cat .generated/versions.env | grep '^MODELS_' )"
+eval "$(python3 scripts/render-lock-env.py --root . >/dev/null && grep '^MODELS_' .generated/versions.env)"
 python3 - <<'PY'
 import json, subprocess, sys, os, hashlib, time, shutil
 import yaml

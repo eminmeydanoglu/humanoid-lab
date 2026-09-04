@@ -11,7 +11,7 @@ dependencies = [
     "isaaclab @ https://github.com/isaac-sim/IsaacLab/archive/37ddf626871758333d6ed89cf64ad702aef127d0.tar.gz#subdirectory=source/isaaclab",
     "isaaclab-assets @ https://github.com/isaac-sim/IsaacLab/archive/37ddf626871758333d6ed89cf64ad702aef127d0.tar.gz#subdirectory=source/isaaclab_assets",
     "isaaclab-tasks @ https://github.com/isaac-sim/IsaacLab/archive/37ddf626871758333d6ed89cf64ad702aef127d0.tar.gz#subdirectory=source/isaaclab_tasks",
-    "isaaclab-rl @ https://github.com/isaac-sim/IsaacLab/archive/37ddf626871758333d6ed89cf64ad702aef127d0.tar.gz#subdirectory=source/isaaclab_rl",
+    "isaaclab-rl[rsl-rl] @ https://github.com/isaac-sim/IsaacLab/archive/37ddf626871758333d6ed89cf64ad702aef127d0.tar.gz#subdirectory=source/isaaclab_rl",
     "gear_sonic[training] @ https://github.com/NVlabs/GR00T-WholeBodyControl/archive/a0732b642c0333077e127a2f56ab0014c196bca4.tar.gz#subdirectory=gear_sonic",
 ]
 

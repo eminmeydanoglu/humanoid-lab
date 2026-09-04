@@ -1,0 +1,30 @@
+diff --git a/gear_sonic/scripts/run_sim_loop.py b/gear_sonic/scripts/run_sim_loop.py
+index 9115e77..5e93c74 100644
+--- a/gear_sonic/scripts/run_sim_loop.py
++++ b/gear_sonic/scripts/run_sim_loop.py
+@@ -34,7 +34,18 @@ class SimWrapper:
+
+
+ def main(config: ArgsConfig):
++    # This entry point publishes simulated Unitree topics. It must never share
++    # a domain or network interface with a physical robot merely because the
++    # development container uses host networking for Isaac.
++    if config.env_type != "sim" or config.interface != "lo":
++        raise ValueError(
++            "run_sim_loop is simulation-only: use --interface sim (loopback). "
++            "Physical-robot DDS is intentionally not available from this entry point."
++        )
++
+     wbc_config = config.load_wbc_yaml()
++    wbc_config["DOMAIN_ID"] = 42
++    wbc_config["INTERFACE"] = "lo"
+     # NOTE: we will override the interface to local if it is not specified
+     wbc_config["ENV_NAME"] = config.env_name
+
+@@ -65,4 +76,4 @@ def main(config: ArgsConfig):
+
+ if __name__ == "__main__":
+     config = tyro.cli(ArgsConfig)
+-    main(config)
+\ No newline at end of file
++    main(config)

@@ -16,6 +16,7 @@ _hl_require_env() {
 use-isaac-sonic() {
   _hl_require_env "$HL_VENVS_ROOT/isaac-sonic" || return 1
   # Kit python shared-lib/extension path'leri sadece bu env'e
+  # shellcheck source=containers/isaac-sim-env.sh
   source /opt/humanoid-lab/isaac-sim-env.sh
   export HL_ACTIVE_ENV="isaac-sonic"
   export PATH="$HL_VENVS_ROOT/isaac-sonic/bin:$PATH"
@@ -56,6 +57,5 @@ show-env() {
 
 # global python alias yok; aktif env prompt'ta gorunur
 if [ -n "${PS1:-}" ] && [ -n "${BASH_VERSION:-}" ]; then
-  PS1='\u@\h [\e[1;34m${HL_ACTIVE_ENV:-none}\e[0m] \w\$ '
+  PS1='\u@\h [\[\e[1;34m\]${HL_ACTIVE_ENV:-none}\[\e[0m\]] \w\$ '
 fi
-

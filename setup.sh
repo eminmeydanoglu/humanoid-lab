@@ -27,7 +27,7 @@ fi
 say "host preflight"
 OS_ID="$(. /etc/os-release && echo "$ID")"
 OS_VER="$(. /etc/os-release && echo "$VERSION_ID")"
-[ "$OS_ID" = "ubuntu" ] && [ "$OS_VER" = "24.04" ] || die "Ubuntu 24.04 required (current: $OS_ID $OS_VER)"
+[ "$OS_ID" = "ubuntu" ] || die "Ubuntu 24.04 required (current: $OS_ID $OS_VER)"; [ "$OS_VER" = "24.04" ] || die "Ubuntu 24.04 required (current: $OS_ID $OS_VER)"
 [ "$(uname -m)" = "x86_64" ] || die "x86_64 required (current: $(uname -m))"
 
 DISK_KB=$(df -Pk . | awk 'NR==2 {print $4}')
@@ -138,22 +138,21 @@ fi
 
 say ".env and data dirs"
 if [ ! -f .env ]; then
-  sed -e "s|/home/USER/humanoid-lab-data|$HOME/humanoid-lab-data|" \
-      -e "s|/home/USER/code/humanoid-lab|$ROOT|" \
-      .env.example > .env
-  echo ".env created (default: $HOME/humanoid-lab-data)"
+  cp .env.example .env
+  sed -i "s|/home/USER/code/humanoid-lab|$ROOT|g" .env
+  echo ".env created (default data root: $ROOT/data)"
 else
   echo ".env exists — unchanged"
 fi
 set -a; source .env; set +a
-DATA_ROOT="${HUMANOID_DATA_ROOT:-$HOME/humanoid-lab-data}"
+DATA_ROOT="${HUMANOID_DATA_ROOT:-$ROOT/data}"
 SOURCE_ROOT="${HUMANOID_SOURCE_ROOT:-$ROOT}"
 [ "$SOURCE_ROOT" = "$ROOT" ] || die "HUMANOID_SOURCE_ROOT in .env is $SOURCE_ROOT; repo is $ROOT — mismatch"
 
 UID_NUM=$(id -u); GID_NUM=$(id -g)
 mkdir -p \
-  "$DATA_ROOT"/{datasets,checkpoints,models,hf-cache,uv-cache,rosbags,diagnostics,outputs,runtime} \
-  "$DATA_ROOT/isaac-cache"/{kit,ov,pip,glcache,computecache,logs,data,documents}
+  "$DATA_ROOT"/{datasets,checkpoints,models,hf-cache,uv-cache,venvs,rosbags,diagnostics,outputs,runtime} \
+  "$DATA_ROOT/isaac-cache"/{main,computecache,logs,config,data,pkg,kit-data,kit-cache,kit-logs,pip,glcache}
 chmod 700 "$DATA_ROOT/hf-cache"
 echo "data root: $DATA_ROOT (UID/GID: $UID_NUM/$GID_NUM)"
 

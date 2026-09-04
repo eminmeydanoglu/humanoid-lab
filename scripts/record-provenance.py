@@ -12,7 +12,7 @@ import yaml
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 lock = yaml.safe_load(open(os.path.join(ROOT, "versions.lock.yaml")))
-data_root = os.environ.get("HUMANOID_DATA_ROOT", os.path.expanduser("~/humanoid-lab-data"))
+data_root = os.environ.get("HUMANOID_DATA_ROOT", "/workspace/humanoid-lab/data")
 models_root = os.path.join(data_root, "models")
 
 

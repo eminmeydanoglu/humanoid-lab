@@ -2,10 +2,14 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-ENV_FILE=""
-[ -f .env ] && { set -a; source .env; set +a; ENV_FILE=".env"; }
+if [ -f .env ]; then
+  set -a
+  # shellcheck source=/dev/null
+  source .env
+  set +a
+fi
 
-DATA_ROOT="${HUMANOID_DATA_ROOT:-$HOME/humanoid-lab-data}"
+DATA_ROOT="${HUMANOID_DATA_ROOT:-$PWD/data}"
 DIAG="$DATA_ROOT/diagnostics"
 mkdir -p "$DIAG"
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -16,14 +20,29 @@ LOG="$DIAG/doctor-$STAMP.log"
 exec > >(tee -a "$LOG") 2>&1
 
 rc=0
-warn() { echo "  [warn] $*"; [ "$rc" -lt 1 ] && rc=1; return 0; }
+warn() {
+  echo "  [warn] $*"
+  if [ "$rc" -lt 1 ]; then
+    rc=1
+  fi
+  return 0
+}
 err()  { echo "  [fail] $*"; rc=2; return 0; }
+os_name() {
+  if [ -r /etc/os-release ]; then
+    # shellcheck source=/dev/null
+    source /etc/os-release
+    printf '%s' "${PRETTY_NAME:-unknown}"
+  else
+    printf '%s' unknown
+  fi
+}
 
 echo "humanoid-lab doctor — $STAMP"
 echo "================================================"
 
 echo; echo "== HOST =="
-echo "OS: $(. /etc/os-release && echo "$PRETTY_NAME") ($(uname -m))"
+echo "OS: $(os_name) ($(uname -m))"
 echo "kernel: $(uname -r)"
 echo "hostname: $(hostname)"
 echo "RAM: $(free -g | awk '/Mem:/{print $2" GiB"}')  CPU: $(nproc) logical"
@@ -52,7 +71,11 @@ echo; echo "== DOCKER TOOLCHAIN =="
 for c in docker "docker compose" "docker buildx" nvidia-ctk containerd; do
   if command -v "$c" >/dev/null 2>&1 || command -v "${c%% *}" >/dev/null 2>&1; then
     v=$( (eval "$c version" 2>/dev/null || eval "$c --version" 2>/dev/null) | head -1 ) || true
-    [ -n "$v" ] && echo "$c: $v" || warn "$c version unreadable"
+    if [ -n "$v" ]; then
+      echo "$c: $v"
+    else
+      warn "$c version unreadable"
+    fi
   else
     warn "$c not found"
   fi
@@ -86,7 +109,7 @@ if [ -n "$CID" ] && command -v docker >/dev/null 2>&1 && [ -n "$(docker ps -q --
   echo "-- mount table (critical paths) --"
   docker inspect "$CID" --format '{{range .Mounts}}{{.Source}} -> {{.Destination}} ({{.Type}}, {{if .RW}}rw{{else}}ro{{end}}){{println}}{{end}}' | tee /tmp/hl-mounts.txt
   MISS=0
-  for p in /data/datasets /data/checkpoints /data/models /data/rosbags /outputs /cache/huggingface /cache/uv /cache/isaac /data/diagnostics /data/runtime; do
+  for p in /data/datasets /data/checkpoints /data/models /data/rosbags /outputs /cache/huggingface /cache/uv /opt/venvs /cache/isaac /isaac-sim/.cache /isaac-sim/.nv/ComputeCache /isaac-sim/.nvidia-omniverse/logs /isaac-sim/.nvidia-omniverse/config /isaac-sim/.local/share/ov/data /isaac-sim/.local/share/ov/pkg /isaac-sim/kit/data /isaac-sim/kit/cache /data/diagnostics /data/runtime; do
     grep -q " -> $p " /tmp/hl-mounts.txt || { err "critical mount missing: $p"; MISS=1; }
   done
   [ "$MISS" = 0 ] && echo "all critical mounts present"
@@ -98,7 +121,10 @@ fi
 echo; echo "== DISK =="
 df -h "$DATA_ROOT" | tail -1
 for d in datasets checkpoints models hf-cache uv-cache isaac-cache rosbags outputs diagnostics; do
-  [ -d "$DATA_ROOT/$d" ] && du -sh "$DATA_ROOT/$d" 2>/dev/null | sed "s|$DATA_ROOT/||"
+  if [ -d "$DATA_ROOT/$d" ]; then
+    du -sh "$DATA_ROOT/$d" 2>/dev/null | sed "s|$DATA_ROOT/||" || true
+  fi
+  :
 done
 
 if [ -n "$CID" ] && command -v docker >/dev/null 2>&1; then
@@ -146,6 +172,12 @@ fi
 
 echo; echo "== ROS/DDS (info) =="
 echo "ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-unset}  RMW: ${RMW_IMPLEMENTATION:-unset}"
+if [ "${ROS_DOMAIN_ID:-42}" = "0" ]; then
+  warn "ROS_DOMAIN_ID=0 can collide with a physical robot on host networking; use the isolated simulation default (42)."
+fi
+if [ "${CYCLONEDDS_URI:-}" != "file:///opt/humanoid-lab/cyclonedds-sim.xml" ]; then
+  warn "CYCLONEDDS_URI is not the loopback-only simulation profile; do not launch the SONIC sim bridge until it is restored."
+fi
 for ipath in /sys/class/net/*; do
   dev=$(basename "$ipath")
   [ "$dev" = "lo" ] && continue
@@ -155,7 +187,7 @@ done
 
 TMPD="${TMPDIR:-/tmp}"
 cat > "$TMPD/hl-host.json" <<EOF
-{"os": "$( (. /etc/os-release && echo "$PRETTY_NAME") 2>/dev/null || echo unknown)",
+{"os": "$(os_name)",
  "kernel": "$(uname -r)", "hostname": "$(hostname)",
  "gpu": "$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || true)",
  "driver": "$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || true)",
@@ -181,10 +213,10 @@ if [ -n "$CID" ] && [ "$DOCKER_OK" = 1 ]; then
   if [ -n "$M" ]; then MOUNTS="[$M]"; fi
   docker inspect "$CID" --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>/dev/null | sort > "$TMPD/hl-dests.txt" || true
   MISS=""
-  for p in /data/datasets /data/checkpoints /data/models /data/rosbags /outputs /cache/huggingface /cache/uv /cache/isaac /data/diagnostics /data/runtime; do
+  for p in /data/datasets /data/checkpoints /data/models /data/rosbags /outputs /cache/huggingface /cache/uv /opt/venvs /cache/isaac /isaac-sim/.cache /isaac-sim/.nv/ComputeCache /isaac-sim/.nvidia-omniverse/logs /isaac-sim/.nvidia-omniverse/config /isaac-sim/.local/share/ov/data /isaac-sim/.local/share/ov/pkg /isaac-sim/kit/data /isaac-sim/kit/cache /data/diagnostics /data/runtime; do
     grep -qx "$p" "$TMPD/hl-dests.txt" || MISS="$MISS\"$p\","
   done
-  MISS=$(echo "$MISS" | sed 's/,$//')
+  MISS=${MISS%,}
   if [ -n "$MISS" ]; then MISSING="[$MISS]"; else MISSING="[]"; fi
 fi
 cat > "$TMPD/hl-container.json" <<EOF
@@ -214,7 +246,7 @@ for ipath in /sys/class/net/*; do
   st=$(cat "$ipath/operstate" 2>/dev/null || echo "?")
   NICS="$NICS{\"name\":\"$dev\",\"state\":\"$st\"},"
 done
-NICS=$(echo "$NICS" | sed 's/,$//')
+NICS=${NICS%,}
 [ -z "$NICS" ] && NICS="[]" || NICS="[$NICS]"
 cat > "$TMPD/hl-dds.json" <<EOF
 {"ros_domain_id": "${ROS_DOMAIN_ID:-unset}", "rmw": "${RMW_IMPLEMENTATION:-unset}", "nics": $NICS}
