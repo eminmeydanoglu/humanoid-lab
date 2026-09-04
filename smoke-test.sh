@@ -1,15 +1,4 @@
 #!/usr/bin/env bash
-# In-container smoke tests (run by setup.sh after build, doctor.sh on demand).
-#
-# Every image-provided environment is tested explicitly by its own interpreter:
-#   isaac-sonic  -> CUDA matmul, isaaclab + gear_sonic imports
-#   sonic-sim    -> MuJoCo headless render, real G1 asset step, sim-loop import
-#   groot-n17    -> torch/flash_attn/gr00t imports, N1.7 model load attempt
-#
-# Statuses: PASS / WARN / BLOCKED / FAIL.
-# - Missing OPTIONAL artifacts (models behind a gated HF license) = BLOCKED.
-# - Anything MANDATORY that is present but broken = FAIL (non-zero exit).
-# There is no "wrong env selected" escape: every check names its own venv.
 set -uo pipefail
 
 PASS=0; WARN=0; BLOCK=0; FAIL=0
@@ -23,7 +12,6 @@ PY_GROOT=/opt/venvs/groot-n17/bin/python
 MODEL_ROOT="${HUMANOID_DATA_ROOT:-/data}/models"
 GROOT_MODEL_DIR="${GROOT_MODEL_DIR:-$MODEL_ROOT/groot_n17_base}"
 
-# ---------------------------------------------------------------- 1. NVIDIA
 if have_cmd nvidia-smi && nvidia-smi -L >/dev/null 2>&1; then
   note PASS "nvidia-smi: $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
   PASS=$((PASS+1))
@@ -32,7 +20,6 @@ else
   FAIL=$((FAIL+1))
 fi
 
-# --------------------------------------------------- 2. env interpreters
 for env_name in isaac-sonic sonic-sim groot-n17; do
   venv="/opt/venvs/$env_name"
   if [ -x "$venv/bin/python" ]; then
@@ -47,7 +34,6 @@ HAVE_ISAAC=$([ -x "$PY_ISAAC" ] && echo 1 || echo 0)
 HAVE_SIM=$([ -x "$PY_SIM" ] && echo 1 || echo 0)
 HAVE_GROOT=$([ -x "$PY_GROOT" ] && echo 1 || echo 0)
 
-# ------------------------------------- 3. isaac-sonic: CUDA + Isaac Lab + SONIC
 if [ "$HAVE_ISAAC" = 1 ]; then
   if "$PY_ISAAC" - <<'PY' >/dev/null 2>&1; then
 import torch
@@ -70,13 +56,11 @@ else
   FAIL=$((FAIL+1))
 fi
 
-# ----------------------------------- 4. sonic-sim: MuJoCo EGL + G1 + sim loop
 if [ "$HAVE_SIM" = 1 ]; then
   if MUJOCO_GL=egl PYOPENGL_PLATFORM=egl "$PY_SIM" - <<'PY' >/dev/null 2>&1; then
 import pathlib
 import mujoco
 import gear_sonic
-# headless EGL render on the synthetic probe model
 probe = mujoco.MjModel.from_xml_string(
     '<mujoco model="sonic-smoke"><worldbody><body name="g1_probe" pos="0 0 1">'
     '<freejoint/><geom type="sphere" size="0.05"/></body></worldbody></mujoco>')
@@ -87,7 +71,6 @@ mujoco.mj_forward(probe, data)
 renderer.update_scene(data)
 _ = renderer.render()
 renderer.close()
-# real G1 asset: binary STL meshes ship converted inside the pinned source tree
 g1 = pathlib.Path(gear_sonic.__file__).parent / "data/robot_model/model_data/g1/scene_43dof.xml"
 assert g1.is_file(), f"missing G1 scene: {g1}"
 g1_model = mujoco.MjModel.from_xml_path(str(g1))
@@ -107,7 +90,6 @@ g1 = pathlib.Path(gear_sonic.__file__).parent / "data/robot_model/model_data/g1/
 m = mujoco.MjModel.from_xml_path(str(g1))' 2>&1 | tail -5 | sed 's/^/           /'
     FAIL=$((FAIL+1))
   fi
-  # upstream sim-loop transport import (unitree_sdk2py + cyclonedds binding)
   if "$PY_SIM" -c 'import gear_sonic.scripts.run_sim_loop' >/dev/null 2>&1; then
     note PASS "sonic-sim: gear_sonic.scripts.run_sim_loop import OK"
     PASS=$((PASS+1))
@@ -120,7 +102,6 @@ else
   FAIL=$((FAIL+1))
 fi
 
-# ------------------------------------------------------- 5. groot-n17 imports
 if [ "$HAVE_GROOT" = 1 ]; then
   if "$PY_GROOT" - <<'PY' >/dev/null 2>&1; then
 import torch, flash_attn
@@ -140,19 +121,11 @@ else
   FAIL=$((FAIL+1))
 fi
 
-# -------------------------------- 6. GR00T N1.7 model load (needs weights)
-# Optional-by-design: weights are a separate pinned fetch, and the Qwen3-VL
-# backbone (nvidia/Cosmos-Reason2-2B) is gated:auto on the HF hub — without a
-# token + license acceptance the load cannot run. That decision gate is
-# reported as BLOCKED. Weights present but broken, or any non-gated error,
-# is a hard FAIL.
 if [ "$HAVE_GROOT" = 1 ]; then
   if [ ! -f "$GROOT_MODEL_DIR/config.json" ]; then
     note BLOCKED "GR00T N1.7 weights missing at $GROOT_MODEL_DIR — run ./dev.sh fetch-models"
     BLOCK=$((BLOCK+1))
   else
-    # 6a. local checkpoint metadata (no network, not gated): config.json +
-    # registered Gr00tN1d7Config must load from the local dir alone.
     if timeout 120 "$PY_GROOT" - "$GROOT_MODEL_DIR" >/dev/null 2>&1 <<'PY'; then
 import sys
 from transformers import AutoConfig
@@ -166,8 +139,6 @@ PY
       note FAIL "groot-n17: N1.7 local checkpoint metadata failed to load from $GROOT_MODEL_DIR"
       FAIL=$((FAIL+1))
     fi
-    # 6b. full model load — instantiates the Qwen3-VL backbone from the
-    # gated HF repo (nvidia/Cosmos-Reason2-2B); needs token + license.
     LOAD_LOG=$(mktemp)
     if timeout 900 "$PY_GROOT" - "$GROOT_MODEL_DIR" >"$LOAD_LOG" 2>&1 <<'PY'; then
 import sys, torch
@@ -198,7 +169,6 @@ PY
   fi
 fi
 
-# ------------------------------------------------------------ 7. SONIC models
 if [ -f "$MODEL_ROOT/sonic/MODEL_PROVENANCE.json" ] && compgen -G "$MODEL_ROOT/sonic/sonic_v1_1/*.onnx" >/dev/null; then
   note PASS "SONIC model files present ($(find "$MODEL_ROOT/sonic" -type f | wc -l) files)"
   PASS=$((PASS+1))
@@ -207,7 +177,6 @@ else
   BLOCK=$((BLOCK+1))
 fi
 
-# ------------------------------------- 8. FFmpeg line (torchcodec 0.8.0; 8 forbidden)
 if have_cmd ffmpeg; then
   FF=$(ffmpeg -version 2>/dev/null | head -1 | grep -oE 'ffmpeg version [0-9]+' | grep -oE '[0-9]+' || true)
   if [ -n "$FF" ] && [ "$FF" -lt 8 ]; then

@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# Validate lock pins against upstream sources (read-only).
-# Usage: ./scripts/verify-pins.sh [--strict]  (--strict: exit 2 on verified-later pins)
-# Exit: 0 = all required pins valid; 1 = warnings; 2 = error/missing tool.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

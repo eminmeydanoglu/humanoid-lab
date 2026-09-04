@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""On-screen real-time viewer for the real SONIC G1 MuJoCo asset copy.
-
-This is deliberately a visual/physics runner only. The full SONIC v1.1 policy
-is a separate TensorRT process and must be connected before keyboard motion
-commands can safely be forwarded to the robot controller.
-"""
+"""Gercek G1 MuJoCo asset'i icin gorsel viewer; policy baglantisi ayri process."""
 from __future__ import annotations
 
 import os
@@ -13,7 +8,6 @@ from pathlib import Path
 
 import mujoco
 import mujoco.viewer
-
 
 root = Path(os.environ.get("G1_ASSET_ROOT", "/data/runtime/g1-mujoco-real"))
 xml = root / "scene_43dof.xml"
@@ -34,10 +28,7 @@ print(
 with mujoco.viewer.launch_passive(model, data, show_left_ui=show_ui, show_right_ui=show_ui) as viewer:
     next_physics_step = time.perf_counter()
     while viewer.is_running():
-        # viewer.sync() is typically display-vsync-bound (240 Hz on Raider),
-        # while G1 physics uses a smaller timestep.  Advance all due physics
-        # steps before one redraw so real-time simulation never slows to the
-        # display rate.
+        # sync() display-vsync-bound; physics adimlari once yetisir
         now = time.perf_counter()
         steps = 0
         while next_physics_step <= now and steps < max_catchup_steps:
@@ -45,7 +36,6 @@ with mujoco.viewer.launch_passive(model, data, show_left_ui=show_ui, show_right_
             next_physics_step += dt / realtime
             steps += 1
         if steps == max_catchup_steps:
-            # Do not allow an overloaded desktop to spin forever catching up.
             next_physics_step = now
         viewer.sync()
         delay = next_physics_step - time.perf_counter()

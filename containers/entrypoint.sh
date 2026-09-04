@@ -1,14 +1,11 @@
 #!/usr/bin/env bash
-# entrypoint.sh — environment selectors for the dev container.
 set -u
 
-# Active environment variables (recomputed in each shell).
 export HL_ACTIVE_ENV="${HL_ACTIVE_ENV:-none}"
 export HL_SOURCE_ROOT="/workspace/humanoid-lab"
 export HL_VENVS_ROOT="/opt/venvs"
 
 _hl_require_env() {
-  # Prevent running the wrong tool in the wrong env: PATH always points at the active env's venv.
   local venv="$1"
   if [ ! -x "$venv/bin/python" ]; then
     echo "error: environment not installed: $venv (image build may be incomplete)" >&2
@@ -18,10 +15,7 @@ _hl_require_env() {
 
 use-isaac-sonic() {
   _hl_require_env "$HL_VENVS_ROOT/isaac-sonic" || return 1
-  # Isaac Lab imports require the Kit Python shared-library and extension
-  # paths.  Keep these variables scoped to the explicitly selected env so
-  # they cannot contaminate GR00T or the standalone MuJoCo interpreter.
-  # shellcheck source=/dev/null
+  # Kit python shared-lib/extension path'leri sadece bu env'e
   source /opt/humanoid-lab/isaac-sim-env.sh
   export HL_ACTIVE_ENV="isaac-sonic"
   export PATH="$HL_VENVS_ROOT/isaac-sonic/bin:$PATH"
@@ -60,9 +54,8 @@ show-env() {
   fi
 }
 
-# No global python alias: implicit env selection is blocked. Prompt shows the active env.
+# global python alias yok; aktif env prompt'ta gorunur
 if [ -n "${PS1:-}" ] && [ -n "${BASH_VERSION:-}" ]; then
   PS1='\u@\h [\e[1;34m${HL_ACTIVE_ENV:-none}\e[0m] \w\$ '
 fi
 
-# Safe default for every sourced shell: no venv selected.

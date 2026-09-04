@@ -1,18 +1,17 @@
-# secret / local state (never commit)
+# secret / yerel durum
 .env
 setup.log
 hersey.log
-# local design notes (not tracked)
+# yerel notlar
 plan.md
 plan_2.md
-# generated (lock render output; not committed)
+# lock render cikti
 .generated/
-# python build artifacts (uv sync byproducts in locks/)
+# python build artiklari
 *.egg-info/
-# python leftovers
 __pycache__/
 *.pyc
-# local diagnostics and accidental data symlinks
+# yerel tanalama
 diagnostics/
 *.local.json
 # editor / OS

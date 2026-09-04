@@ -1,18 +1,4 @@
 #!/usr/bin/env bash
-# dev.sh — manages the development container.
-# No container is created per call: docker compose exec is used.
-#
-#   ./dev.sh               create/start main container + interactive shell
-#   ./dev.sh isaac         isaac-sonic environment shell
-#   ./dev.sh sonic-sim     MuJoCo environment shell
-#   ./dev.sh groot         GR00T environment shell
-#   ./dev.sh doctor        container + host validation (doctor.sh)
-#   ./dev.sh smoke         hard smoke tests inside the running container
-#   ./dev.sh fetch-models  download pinned models into the persistent dir
-#   ./dev.sh hf-login      login to host-persistent HF cache (token never written to image/Git)
-#   ./dev.sh stop          stop the container; keeps data
-#   ./dev.sh rebuild       rebuild image with the same lock
-#   ./dev.sh foxy          Foxy shell when the profile is enabled (not yet)
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -22,7 +8,6 @@ set -a; source .env; set +a
 DC() { docker compose --env-file .env "$@"; }
 
 up_once() {
-  # Create/start if missing, else exec (compose exec does not auto-start).
   if ! docker compose --env-file .env ps -q dev >/dev/null 2>&1; then
     DC up -d dev
   else
@@ -53,15 +38,10 @@ case "${1:-}" in
     ;;
   fetch-models)
     up_once
-    # The HF CLI lives in the venvs, not the base image — select one first.
     DC exec dev bash -lc "source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && scripts/fetch-models.sh"
     ;;
   hf-login)
     up_once
-    # Token is written to HF_HOME (/cache/huggingface — host bind mount),
-    # shared by every env.  The login subcommand moved between CLI
-    # generations: huggingface-cli login -> hf auth login (hub 0.34+) ->
-    # hf login (hub >= 1.0).  Probe, then exec the one that exists.
     DC exec dev bash -lc '
       source /opt/humanoid-lab/entrypoint.sh && use-groot
       if hf auth login --help >/dev/null 2>&1; then exec hf auth login; fi

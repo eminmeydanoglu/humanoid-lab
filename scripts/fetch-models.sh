@@ -1,10 +1,4 @@
 #!/usr/bin/env bash
-# Downloads pinned HF models into the persistent data dir.
-# - Always `--revision <full sha>` + explicit `--local-dir`.
-# - Writes MODEL_PROVENANCE.json per model (repo, revision, time, files, SHA-256s). Idempotent.
-# - Gated models: report "blocked" on 401/403. Token never written to image/Git.
-# Usage: ./dev.sh fetch-models (in container, after hf-login) |
-#        scripts/fetch-models.sh (direct; HF_HOME must be set)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -13,7 +7,6 @@ MODEL_ROOT="${HUMANOID_DATA_ROOT:-$HOME/humanoid-lab-data}/models"
 export HF_HOME MODEL_ROOT
 
 eval "$(python3 scripts/render-lock-env.py --root . >/dev/null && cat .generated/versions.env | grep '^MODELS_' )"
-# The python block below re-reads the lock structurally; env output is loaded for compatibility only.
 python3 - <<'PY'
 import json, subprocess, sys, os, hashlib, time, shutil
 import yaml
@@ -23,7 +16,6 @@ models = lock['models']
 root = os.environ['MODEL_ROOT']
 os.makedirs(root, exist_ok=True)
 
-# Modern HF CLI: `hf` (huggingface_hub>=0.26). Legacy `huggingface-cli` is removed upstream.
 CLI = shutil.which('hf') or shutil.which('huggingface-cli')
 if not CLI:
     print('[blocked] HF CLI not found. Install inside the container: '

@@ -1,5 +1,3 @@
-# Keep the image context lean (host data never enters the image).
-# Dockerfile, containers/ and scripts/smoke-test.sh are COPYed — not excluded below.
 .git
 .env
 .generated

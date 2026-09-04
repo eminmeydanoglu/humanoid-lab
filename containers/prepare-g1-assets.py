@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Create a MuJoCo-compatible G1 asset copy by converting ASCII STL meshes.
-
-The pinned SONIC source distributes several G1 meshes as ASCII STL. MuJoCo
-expects binary STL, so this tool copies an asset tree and converts only those
-ASCII meshes in the copy. The immutable source tree is never modified.
-"""
+"""ASCII STL meshleri binary STL'e cevirip G1 asset kopyasi uretir (kaynak agac degismez)."""
 from __future__ import annotations
 
 import argparse
@@ -13,15 +8,12 @@ import shutil
 import struct
 from pathlib import Path
 
-
 VERTEX = re.compile(r"^\s*vertex\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)\s*$")
 NORMAL = re.compile(r"^\s*facet\s+normal\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)\s*$")
 
 
 def is_ascii_stl(path: Path) -> bool:
-    # Binary STLs legitimately start with a "solid " header (many exporters
-    # ignore the spec), so the marker alone is not decisive.  A real ASCII STL
-    # decodes as UTF-8 for its whole length; a binary file does not.
+    # binary STL de "solid " baslayabilir -> tam UTF-8 decode decisive
     try:
         text = path.read_text(encoding="utf-8", errors="strict")
     except UnicodeDecodeError:

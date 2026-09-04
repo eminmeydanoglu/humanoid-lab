@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""render-lock-env.py — versions.lock.yaml -> .generated/versions.env.
-
-Single source of truth: Compose/Dockerfile/setup.sh read values from this render.
-Outputs (not committed): versions.env, versions.json, verify-report.txt.
-Usage: python3 scripts/render-lock-env.py [--root DIR]
-"""
+"""versions.lock.yaml -> .generated/versions.env render."""
 from __future__ import annotations
 
 import argparse
@@ -35,7 +30,6 @@ def load_lock(path: Path) -> dict:
 
 
 def collect_required_false(data: dict, prefix: str = "") -> list[str]:
-    """Collect required:false (to-be-verified-on-machine) fields."""
     out: list[str] = []
     for key, val in data.items():
         here = f"{prefix}.{key}" if prefix else key
@@ -53,7 +47,6 @@ def collect_required_false(data: dict, prefix: str = "") -> list[str]:
 
 
 def flatten(data: dict, prefix: str = "") -> dict:
-    """Flatten value/required dicts: {'value': X, 'required': bool} -> X."""
     out: dict = {}
     for key, val in data.items():
         here = f"{prefix}.{key}" if prefix else key
@@ -124,7 +117,6 @@ def main() -> int:
 
 
 def quote(val: object) -> str:
-    """shell-dotenv safe value: single-quote if it contains spaces/special chars."""
     s = str(val)
     if s and all(c.isalnum() or c in "._/:@+-~=" for c in s):
         return s

@@ -1,11 +1,7 @@
 #!/usr/bin/env bash
-# doctor.sh — host + container validation report.
-# Human-readable summary + timestamped JSON/YAML under ${HUMANOID_DATA_ROOT}/diagnostics.
-# Exit: 0 = pass, 1 = warnings (usable), 2 = blocking error.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# Host-only mode when .env is missing (report is still produced).
 ENV_FILE=""
 [ -f .env ] && { set -a; source .env; set +a; ENV_FILE=".env"; }
 
@@ -87,7 +83,6 @@ if [ -n "$CID" ] && command -v docker >/dev/null 2>&1 && [ -n "$(docker ps -q --
   echo "container: $CID"
   docker image inspect "$IMG" --format 'RepoDigests: {{.RepoDigests}}' 2>/dev/null || true
   docker image inspect "$IMG" --format 'labels: {{json .Config.Labels}}' 2>/dev/null || true
-  # mount contract: critical paths must be bind mounts (not named volumes / container layer)
   echo "-- mount table (critical paths) --"
   docker inspect "$CID" --format '{{range .Mounts}}{{.Source}} -> {{.Destination}} ({{.Type}}, {{if .RW}}rw{{else}}ro{{end}}){{println}}{{end}}' | tee /tmp/hl-mounts.txt
   MISS=0
@@ -140,7 +135,6 @@ git -C . rev-parse --short HEAD 2>/dev/null || echo "no git repo"
 git -C . status --porcelain 2>/dev/null | head -5 || true
 echo "dirty: $(git -C . status --porcelain 2>/dev/null | wc -l) files"
 
-# Token never written to the report.
 echo; echo "== MODEL PROVENANCE =="
 if [ -d "$DATA_ROOT/models" ]; then
   find "$DATA_ROOT/models" -maxdepth 2 -name MODEL_PROVENANCE.json | while read -r f; do
@@ -150,7 +144,6 @@ else
   echo "no model dir"
 fi
 
-# Informational only; never writes to the robot network.
 echo; echo "== ROS/DDS (info) =="
 echo "ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-unset}  RMW: ${RMW_IMPLEMENTATION:-unset}"
 for ipath in /sys/class/net/*; do
@@ -159,9 +152,6 @@ for ipath in /sys/class/net/*; do
   state=$(cat "$ipath/operstate" 2>/dev/null || echo "?")
   echo "NIC $dev: $state"
 done
-
-# NOTE: `exit $rc` can be lost under the tee subprocess; close the stream first,
-# then exit normally at the very end (and give tee a moment).
 
 TMPD="${TMPDIR:-/tmp}"
 cat > "$TMPD/hl-host.json" <<EOF
@@ -184,7 +174,6 @@ CID=""
 [ "$DOCKER_OK" = 1 ] && CID=$(docker compose --env-file .env ps -q dev 2>/dev/null || true)
 IMG=""
 [ -n "$CID" ] && IMG=$(docker inspect "$CID" --format '{{.Image}}' 2>/dev/null || true)
-# mounts is null (not an empty list) when there is no container — "not audited".
 MOUNTS="null"
 MISSING="null"
 if [ -n "$CID" ] && [ "$DOCKER_OK" = 1 ]; then
@@ -249,5 +238,6 @@ python3 scripts/doctor-report.py \
   if [ "$rc" = 0 ]; then echo "doctor: PASS"; elif [ "$rc" = 1 ]; then echo "doctor: PASS (with warnings)"; else echo "doctor: FAIL"; fi
 } 2>/dev/null
 
+# tee subprocess exit status'u yutmasin
 sleep 0.2 2>/dev/null || true
 exit "$rc"

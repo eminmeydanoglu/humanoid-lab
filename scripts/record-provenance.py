@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Record MODEL_PROVENANCE.json for existing pinned model downloads.
-
-Hashes every file (SHA-256) under <data-root>/models/<name> and writes
-MODEL_PROVENANCE.json next to it, with repo/revision from versions.lock.yaml.
-Idempotent; existing large weights are NOT re-downloaded.
-"""
+"""Mevcut pinli model indirmeleri icin MODEL_PROVENANCE.json uretir (sha256, idempotent)."""
 from __future__ import annotations
 
 import hashlib
@@ -28,7 +23,6 @@ def sha256_of(path: str, chunk: int = 1 << 20) -> str:
             h.update(b)
     return h.hexdigest()
 
-
 failed = 0
 for name, m in lock["models"].items():
     dest = os.path.join(models_root, name)
@@ -41,7 +35,6 @@ for name, m in lock["models"].items():
         "revision": m["revision"],
         "variant": m.get("variant", ""),
         "recorded_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "note": "hashed locally from pre-existing pinned download; regenerate by re-running scripts/fetch-models.sh",
         "files": [],
     }
     try:

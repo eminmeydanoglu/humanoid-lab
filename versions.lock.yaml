@@ -1,22 +1,12 @@
-# versions.lock.yaml — single human-readable version source (single source of truth).
-# Values are never hand-copied into Compose/Dockerfile/scripts; render-lock-env.py
-# renders them into .generated/versions.env. "commit" fields are always full 40-char SHAs.
-# required:false = verify on the machine during setup, then write into the lock (not an EXACT pin yet).
-
 schema: 1
 
 host:
   os: ubuntu-24.04
   arch: x86_64
-  # Driver baseline: doctor only fails below it (never downgrades a newer one).
   nvidia_driver_tested_baseline: "580.65.06"
-  # EULA-gated: no anonymous token (401). setup.sh --verify-digests fills this once NGC access exists.
   nvidia_container_toolkit_min: "1.17.0"
 
 docker:
-  # Compatible set from one apt snapshot (noble/stable/binary-amd64, 2026-09-03).
-  # docker-ce 5:29.7.2 needs containerd.io>=2.1.5, so the 2.x line was chosen, not 1.6.x.
-  # EXACT values: re-verified on Raider before install; setup.sh refuses unverified versions.
   ce:
     value: "5:29.7.2-1~ubuntu.24.04~noble"
     required: false
@@ -34,7 +24,6 @@ docker:
     required: false
 
 nvidia_container_toolkit:
-  # Latest from the official apt repo (stable/deb/amd64, 2026-09-03); EXACT values after Raider verification.
   version:
     value: "1.20.0-1"
     required: false
@@ -45,7 +34,6 @@ nvidia_container_toolkit:
 container:
   isaac_sim_image: nvcr.io/nvidia/isaac-sim
   isaac_sim_tag: "5.1.0"
-  # NGC digest; a placeholder/unverified digest is never used — setup.sh refuses to build until verified.
   isaac_sim_digest:
     value: "f3563cb2ba0c18af0b2fb321360dcb73a917b899f879e3213623d6bee484fa54"
     required: true
@@ -53,8 +41,6 @@ container:
   ffmpeg_line: "6"   # torchcodec==0.8.0: FFmpeg 8 forbidden
 
 tools:
-  # sha256 from the official release asset (uv-x86_64-unknown-linux-gnu.tar.gz.sha256);
-  # identical to the Dockerfile default. Re-verified before install.
   uv:
     value: "0.12.9"
     required: false
@@ -73,17 +59,9 @@ repositories:
     url: https://github.com/NVlabs/GR00T-WholeBodyControl.git
     commit: a0732b642c0333077e127a2f56ab0014c196bca4   # HEAD == commit (verified)
     submodules: []           # none in root tree
-    # Git deps (unitree_sdk2_python, lerobot@a445d9c9, Isaac-GR00T@HEAD, smpl_sim@HEAD)
-    # get locked when the SONIC env lock is produced (required: false).
   isaac_groot:
     url: https://github.com/NVIDIA/Isaac-GR00T.git
-    # VERIFIED (2026-09-03): commit exists upstream. No tag matches this
-    # commit (the real tag "n1.7-release" points at an older commit, 23ace64f),
-    # so the commit pin alone is the source of truth for this release.
     commit: 1a1837f20538b7d7e21f977a11a5aee14f99803c
-    # VERIFIED (2026-09-03): commit exists, but upstream has no "N1.7-GA" tag
-    # (real tag "n1.7-release" = older 23ace64f) — commit pin stays; verify-pins.sh warns on the tag.
-    # Submodule gitlinks and commits, verified from the 2026-09-03 tree:
     submodules:
       - path: external_dependencies/LIBERO
         url: https://github.com/Lifelong-Robot-Learning/LIBERO.git
@@ -97,7 +75,6 @@ repositories:
       - path: external_dependencies/robocasa-gr1-tabletop-tasks
         url: https://github.com/robocasa/robocasa-gr1-tabletop-tasks
         commit: 4840e671596f93ca03651524b9f72ffb1aadfeff
-    # gear_sonic[inference] pulls Isaac-GR00T @git+HEAD; resolved in this repo's own lock.
 
 python_environments:
   isaac_sonic:
@@ -122,8 +99,6 @@ models:
     variant: sonic_v1_1
     revision: 9c0ff22b4ffec27c5392e8e284eb2f2df7a5b4e2
     gated: false
-    # Verified 2026-09-03: revision exists; 6 files under sonic_v1_1/.
-    # Training bundle (last.pt + config.yaml + model_config.yaml) only if requested.
     files:
       - sonic_v1_1/model_encoder.onnx
       - sonic_v1_1/model_decoder.onnx
@@ -135,13 +110,7 @@ models:
     repo: nvidia/GR00T-N1.7-3B
     revision: 2fc962b973bccdd5d8ce4f67cc63b264d6886495
     gated: false
-    # Verified 2026-09-03: HF snapshot sha == lock revision.
-    # NOTE: the model config references nvidia/Cosmos-Reason2-2B (gated:auto)
-    # as its VLM backbone; a full model-load smoke test needs an HF token with
-    # that license accepted (otherwise: BLOCKED, not FAIL).
   cosmos_reason_backbone:
     repo: nvidia/Cosmos-Reason2-2B
     revision: 9ce19a195e423419c349abfc86fd07178b230561
     gated: auto
-    # Verified 2026-09-03: gated:auto; snapshot sha == lock revision.
-    # License acceptance required in the HF account.

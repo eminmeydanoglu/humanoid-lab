@@ -1,14 +1,4 @@
 # syntax=docker/dockerfile:1.7
-#
-# Immutable Isaac Sim base + three deliberately isolated Python environments:
-#   /opt/venvs/isaac-sonic  Python 3.11 / Torch cu128 / Isaac Lab + SONIC
-#   /opt/venvs/sonic-sim    Python 3.11 / MuJoCo + SONIC simulation client
-#   /opt/venvs/groot-n17    Python 3.12 / upstream frozen Isaac-GR00T N1.7
-#
-# All external repositories are fetched only by immutable full commits.  Python
-# dependency resolution is performed before this file is accepted into the
-# repository: every `uv sync` below is frozen and will fail on a missing/stale
-# lock rather than silently resolving a new dependency graph.
 
 ARG ISAAC_SIM_IMAGE=nvcr.io/nvidia/isaac-sim
 ARG ISAAC_SIM_TAG=5.1.0
@@ -31,8 +21,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-# FFmpeg 6 from the Isaac Sim base distribution remains compatible with
-# torchcodec==0.8.0.  Do not add a rolling third-party FFmpeg repository here.
 RUN set -eux; \
     for commit in "${ISAAC_LAB_COMMIT}" "${SONIC_COMMIT}" "${ISAAC_GROOT_COMMIT}"; do \
       printf '%s' "$commit" | grep -Eq '^[0-9a-f]{40}$'; \
@@ -44,9 +32,7 @@ RUN set -eux; \
         libglib2.0-0 libsm6 libxext6 libxrender1 libvulkan1 net-tools \
         ninja-build pkg-config python3 tcpdump cyclonedds-dev; \
     rm -rf /var/lib/apt/lists/*; \
-    # unitree_sdk2py (in gear_sonic.scripts.run_sim_loop) builds its CycloneDDS
-    # Python binding against this prefix (same contract as the validated
-    # standalone sonic-sim-loop image).
+    # cyclonedds build prefix (unitree_sdk2py binding)
     mkdir -p /opt/cyclonedds; \
     ln -sfn /usr/include /opt/cyclonedds/include; \
     ln -sfn /usr/bin /opt/cyclonedds/bin; \
@@ -55,8 +41,6 @@ RUN set -eux; \
     if ! getent group "${DEVELOPER_GID}" >/dev/null; then groupadd --gid "${DEVELOPER_GID}" developer; fi; \
     if ! getent passwd "${DEVELOPER_UID}" >/dev/null; then useradd --uid "${DEVELOPER_UID}" --gid "${DEVELOPER_GID}" --create-home --shell /bin/bash developer; fi
 
-# Install one verified uv executable; never execute a network-provided shell
-# installer.  The checksum is checked before extraction.
 RUN set -eux; \
     curl --fail --location --show-error --silent \
       "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz" \
@@ -69,20 +53,13 @@ RUN set -eux; \
 ENV CYCLONEDDS_HOME=/opt/cyclonedds \
     CMAKE_PREFIX_PATH=/opt/cyclonedds \
     UV_PYTHON_INSTALL_DIR=/opt/uv/python
-# UV_PYTHON_INSTALL_DIR: uv-managed interpreters (3.11 for sonic-sim; the
-# Isaac base ships no system 3.11) must live in a world-readable location —
-# the default under /root would make the venv symlinks dead for `developer`.
+# UV_PYTHON_INSTALL_DIR world-readable olmali; /root default'i developer icin dead symlink uretir
 
-# Build inputs are copied before the fetch layer: the G1 asset preparation
-# script below runs inside it.  Locks are build inputs, not runtime bind-mounted
-# project files — a `.dockerignore` must therefore never exclude locks/.
 COPY locks/ /opt/locks/
 COPY containers/entrypoint.sh containers/shell.sh containers/isaac-sim-env.sh /opt/humanoid-lab/
 COPY containers/prepare-g1-assets.py /opt/humanoid-lab/
 COPY scripts/smoke-test.sh /opt/humanoid-lab/smoke-test.sh
 
-# Fetch source trees at exactly the commits supplied from the single version
-# lock.  `fetch <sha>` is intentional: no branch or tag is checked out.
 RUN set -eux; \
     checkout() { \
       url="$1"; commit="$2"; target="$3"; \
@@ -98,10 +75,6 @@ RUN set -eux; \
     test -d /isaac-sim; \
     ln -s /isaac-sim /opt/src/isaaclab/_isaac_sim; \
     checkout https://github.com/NVlabs/GR00T-WholeBodyControl.git "${SONIC_COMMIT}" /opt/src/sonic; \
-    # Real G1 MuJoCo meshes: upstream ships them as Git LFS pointers.  Pull the
-    # pinned commit's mesh objects and convert ASCII STL to binary (MuJoCo
-    # requirement) inside the tree the sim loop resolves (see base_sim.py:
-    # ROBOT_SCENE = gear_sonic/data/robot_model/model_data/g1/scene_43dof.xml).
     git -C /opt/src/sonic lfs pull \
       --include "gear_sonic/data/robot_model/model_data/g1/meshes/*"; \
     test -f /opt/src/sonic/gear_sonic/data/robot_model/model_data/g1/meshes/head_link.STL; \
@@ -119,9 +92,6 @@ RUN set -eux; \
     test "$(git -C /opt/src/isaac-groot/external_dependencies/robocasa-gr1-tabletop-tasks rev-parse HEAD)" = 4840e671596f93ca03651524b9f72ffb1aadfeff; \
     chown -R "${DEVELOPER_UID}:${DEVELOPER_GID}" /opt/src /opt/venvs /opt/humanoid-lab /opt/assets /workspace
 
-# `isaac-sonic` and `sonic-sim` use project-owned resolved uv locks.  The
-# Isaac Sim Kit Python is the 3.11 interpreter used to create the first env;
-# the runtime setup is sourced only by use-isaac-sonic (not groot).
 RUN set -eux; \
     test -f /opt/locks/isaac-sonic/uv.lock; \
     test -f /opt/locks/sonic-sim/uv.lock; \
@@ -129,12 +99,7 @@ RUN set -eux; \
     test -x /isaac-sim/kit/python/bin/python3; \
     uv venv --python /isaac-sim/kit/python/bin/python3 /opt/venvs/isaac-sonic; \
     UV_PROJECT_ENVIRONMENT=/opt/venvs/isaac-sonic uv sync --frozen --no-dev --project /opt/locks/isaac-sonic; \
-    # The Isaac Lab and SONIC source distributions ship no MANIFEST.in / \
-    # package_data, so archive-built wheels lack config/extension.toml and \
-    # every data file (import isaaclab fails; gear_sonic has no G1 assets). \
-    # The pinned source trees fetched above are the authoritative install \
-    # source: replace the archive dists with editable installs from those \
-    # exact commits. Dependency closure still comes from the frozen lock. \
+    # archive dists data dosyalari eksik; pinned source tree'den editable install
     uv pip uninstall --python /opt/venvs/isaac-sonic/bin/python \
       isaaclab isaaclab-assets isaaclab-tasks isaaclab-rl gear-sonic || true; \
     uv pip install --python /opt/venvs/isaac-sonic/bin/python --no-deps \
@@ -146,11 +111,7 @@ RUN set -eux; \
     /opt/venvs/isaac-sonic/bin/python -c 'import torch; assert torch.__version__.startswith("2.7.0"); import isaaclab, gear_sonic; print("isaaclab", isaaclab.__version__)'; \
     uv venv --python 3.11 /opt/venvs/sonic-sim; \
     UV_PROJECT_ENVIRONMENT=/opt/venvs/sonic-sim uv sync --frozen --no-dev --project /opt/locks/sonic-sim; \
-    # G1 sim-loop transport (same contract as the previously validated
-    # standalone sonic-sim-loop image): cyclonedds 0.10.2 has no cp311 wheel,
-    # so it is built from source against the /opt/cyclonedds prefix above;
-    # unitree_sdk2py is the vendored pure-Python SDK from the pinned SONIC
-    # tree, installed venv-scoped (no global PYTHONPATH contamination).
+    # cyclonedds cp311 wheel yok -> /opt/cyclonedds prefix'ine source build
     uv pip install --python /opt/venvs/sonic-sim/bin/python cyclonedds==0.10.2; \
     test -d /opt/src/sonic/external_dependencies/unitree_sdk2_python/unitree_sdk2py; \
     cp -a /opt/src/sonic/external_dependencies/unitree_sdk2_python/unitree_sdk2py \
@@ -176,11 +137,7 @@ LABEL org.opencontainers.image.source="git@github.com:eminmeydanoglu/humanoid-la
       org.humanoid-lab.uv="${UV_VERSION}" \
       org.humanoid-lab.build-date="${BUILD_DATE}"
 
-# The Isaac Sim base keeps /isaac-sim at 750 isaac-sim:isaac-sim; grant the
-# developer account read/traverse via group membership (Kit python +
-# extensions are required by the isaac-sonic venv at runtime).  The uid-1000
-# account may be the base image's default user (e.g. `ubuntu`) when
-# DEVELOPER_UID collides — resolve the actual name from the uid.
+# /isaac-sim 750 isaac-sim:isaac-sim -> developer group uyeligi
 RUN set -eux; \
     DEV_USER="$(getent passwd "${DEVELOPER_UID}" | cut -d: -f1)"; \
     test -n "${DEV_USER}"; \

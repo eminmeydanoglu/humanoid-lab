@@ -1,14 +1,9 @@
 #!/usr/bin/env bash
-# setup.sh — host bootstrap + render + image build + smoke (idempotent).
-# Usage: ./setup.sh | ./setup.sh --verify-digests (fetch Isaac Sim digest from NGC into the lock)
-# Safety: never auto-installs driver/toolkit/Docker; never builds with unverified
-# pins/digests; never overwrites an existing .env; no secrets written.
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(pwd)"
 LOG="$ROOT/setup.log"
 
-# Everything (console + durable log) streams into hersey.log for live tracking.
 exec > >(tee -a "$ROOT/hersey.log") 2>&1
 
 say() { printf '\n== %s ==\n' "$*"; }
@@ -25,7 +20,6 @@ command -v git >/dev/null || die "git required"
 say "preflight (lock render)"
 python3 scripts/render-lock-env.py --root . >/dev/null
 
-# Load lock values into env (single source).
 if [ -f .generated/versions.env ]; then
   set -a; source .generated/versions.env; set +a
 fi
@@ -36,7 +30,6 @@ OS_VER="$(. /etc/os-release && echo "$VERSION_ID")"
 [ "$OS_ID" = "ubuntu" ] && [ "$OS_VER" = "24.04" ] || die "Ubuntu 24.04 required (current: $OS_ID $OS_VER)"
 [ "$(uname -m)" = "x86_64" ] || die "x86_64 required (current: $(uname -m))"
 
-# At least ~100 GiB free (image + caches).
 DISK_KB=$(df -Pk . | awk 'NR==2 {print $4}')
 [ "${DISK_KB:-0}" -gt 104857600 ] || die "insufficient disk space (${DISK_KB:-?} KB free)"
 
@@ -57,8 +50,6 @@ else
 fi
 
 docker_install_hint() {
-  # Instructions use EXACT versions from the lock (single source -> .generated/versions.env);
-  # only verified versions are installed (these fields are required:false until validated).
   echo "docker missing — install instructions (versions from lock):"
   cat <<EOF
   # Official Docker apt repo:
@@ -107,7 +98,6 @@ say "base image digest verification"
 ISAAC_SIM_DIGEST="${CONTAINER_ISAAC_SIM_DIGEST:-}"
 
 if [ "$VERIFY_DIGESTS" = 1 ]; then
-  # Fetch the digest from NGC and write it into the lock (idempotent). Requires docker + NGC login.
   command -v docker >/dev/null 2>&1 || die "--verify-digests needs docker"
   docker info >/dev/null 2>&1 || die "--verify-digests needs a running docker daemon + 'docker login nvcr.io'"
   echo "Fetching digest from NGC (requires docker login nvcr.io)..."
@@ -167,7 +157,6 @@ mkdir -p \
 chmod 700 "$DATA_ROOT/hf-cache"
 echo "data root: $DATA_ROOT (UID/GID: $UID_NUM/$GID_NUM)"
 
-# Generated .env entries (idempotent append); feed both compose build args and doctor.sh.
 append_env() { grep -q "^$1=" .env || printf '%s=%s\n' "$1" "$2" >> .env; }
 append_env DEVELOPER_UID "$UID_NUM"
 append_env DEVELOPER_GID "$GID_NUM"
@@ -186,8 +175,6 @@ docker compose --env-file .env build --progress=plain dev
 say "starting dev container"
 docker compose --env-file .env up -d dev
 echo "running smoke tests in container (short)..."
-# Smoke failure does not invalidate the build (model/gated steps report blocked),
-# but output and exit code must stay visible — no silent pass.
 docker compose --env-file .env exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && /opt/humanoid-lab/smoke-test.sh' \
   && echo "smoke: PASS" || echo "smoke: WARN/BLOCKED — details above (continuing)"
 
@@ -200,6 +187,6 @@ echo "  doctor:         ./doctor.sh   (report: $DATA_ROOT/diagnostics/)"
 echo "  log:            $LOG + hersey.log"
 echo "SETUP COMPLETE (model and ROS stages are separate steps)"
 
-# exec > >(tee ...) can swallow the exit status at shutdown; flush first.
+# tee subprocess exit status'u yutmasin
 sleep 0.2 2>/dev/null || true
 exit 0

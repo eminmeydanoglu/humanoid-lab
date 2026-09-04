@@ -25,9 +25,7 @@ override-dependencies = [
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
-# SONIC's training extra declares SMPLSim as a floating VCS dependency.  This
-# override converts it to the verified immutable archive below; uv records the
-# archive hash in uv.lock and never follows SMPLSim HEAD during frozen builds.
+# SMPLSim/smplx floating VCS dep -> immutable archive override
 
 [[tool.uv.index]]
 name = "pytorch-cu128"

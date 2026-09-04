@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# In-repo static checks (bash syntax, shellcheck, compose, lock/pin).
-# Usage: scripts/ci-lint.sh   (exit 0/1/2)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 RC=0

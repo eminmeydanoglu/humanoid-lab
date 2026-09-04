@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""doctor-report.py — timestamped JSON/YAML report for doctor.sh.
-
-Sections: host, docker, container (mount audit), git, models, dds, disk, exit_rc.
-Written under ${HUMANOID_DATA_ROOT}/diagnostics; details stay in the doctor.sh log.
-"""
+"""doctor.sh icin timestamped JSON/YAML rapor."""
 import argparse
 import datetime
 import json

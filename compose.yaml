@@ -1,21 +1,7 @@
-# compose.yaml — the single main development container.
-#
-# Usage:
-#   ./setup.sh            # host preflight + image build + start + smoke
-#   ./dev.sh              # create/start container + interactive shell
-#
-# Invariants:
-# - network_mode: host  -> DDS multicast/unicast discovery and robot NIC access.
-# - ipc: host           -> fewer Isaac/PyTorch shared-memory issues.
-# - No privileged, no Docker socket mount, no named volumes.
-# - GPU via device reservation (needs host driver — doctor.sh validates).
-# - All persistent data is host bind-mounted (no data on the writable layer).
-
 name: ${COMPOSE_PROJECT_NAME:-humanoid-lab}
 
 services:
   dev:
-    # Image name comes only from the lock; "latest"/"main" tags are not used.
     image: humanoid-lab/dev:${ISAAC_SIM_TAG:-5.1.0}
     build:
       context: .
@@ -34,7 +20,6 @@ services:
         BUILD_DATE: ${BUILD_DATE:-unknown}
     container_name: ${COMPOSE_PROJECT_NAME:-humanoid-lab}-dev
     hostname: humanoid-lab-dev
-    # X11 (only if GUI needed; headless default)
     environment:
       - ACCEPT_EULA=${ACCEPT_EULA:-N}
       - PRIVACY_CONSENT=${PRIVACY_CONSENT:-N}
@@ -43,7 +28,6 @@ services:
       - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}
       - HUMANOID_DATA_ROOT=/data
       - HUMANOID_SOURCE_ROOT=/workspace/humanoid-lab
-      # HF/uv/Isaac caches are always host bind mounts.
       - HF_HOME=/cache/huggingface
       - HUGGINGFACE_HUB_CACHE=/cache/huggingface/hub
       - UV_CACHE_DIR=/cache/uv
@@ -67,8 +51,7 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
     network_mode: host
     ipc: host
-    # /isaac-sim is group-readable only (750 isaac-sim) — compose exec does
-    # not resolve supplementary groups from /etc/group, so add it explicitly.
+    # /isaac-sim 750 isaac-sim; compose exec /etc/group supplemental group'ları çözmez
     group_add:
       - isaac-sim
     deploy:
