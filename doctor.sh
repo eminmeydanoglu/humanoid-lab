@@ -53,7 +53,7 @@ else
 fi
 
 echo; echo "== DOCKER TOOLCHAIN =="
-for c in docker "docker compose" docker-buildx nvidia-ctk containerd; do
+for c in docker "docker compose" "docker buildx" nvidia-ctk containerd; do
   if command -v "$c" >/dev/null 2>&1 || command -v "${c%% *}" >/dev/null 2>&1; then
     v=$( (eval "$c version" 2>/dev/null || eval "$c --version" 2>/dev/null) | head -1 ) || true
     [ -n "$v" ] && echo "$c: $v" || warn "$c version unreadable"
