@@ -177,11 +177,15 @@ LABEL org.opencontainers.image.source="git@github.com:eminmeydanoglu/humanoid-la
       org.humanoid-lab.build-date="${BUILD_DATE}"
 
 # The Isaac Sim base keeps /isaac-sim at 750 isaac-sim:isaac-sim; grant the
-# developer user read/traverse via group membership (Kit python + extensions
-# are required by the isaac-sonic venv at runtime).
+# developer account read/traverse via group membership (Kit python +
+# extensions are required by the isaac-sonic venv at runtime).  The uid-1000
+# account may be the base image's default user (e.g. `ubuntu`) when
+# DEVELOPER_UID collides — resolve the actual name from the uid.
 RUN set -eux; \
-    getent group isaac-sim >/dev/null && usermod -aG isaac-sim developer; \
-    id developer
+    DEV_USER="$(getent passwd "${DEVELOPER_UID}" | cut -d: -f1)"; \
+    test -n "${DEV_USER}"; \
+    if getent group isaac-sim >/dev/null; then usermod -aG isaac-sim "${DEV_USER}"; fi; \
+    id "${DEV_USER}"
 
 USER ${DEVELOPER_UID}:${DEVELOPER_GID}
 WORKDIR /workspace/humanoid-lab
