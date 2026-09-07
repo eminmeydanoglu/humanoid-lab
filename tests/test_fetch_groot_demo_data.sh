@@ -82,12 +82,18 @@ pass 'pinned demo dataset and provenance are stored under the persistent dataset
 
 grep -Fq "git -c http.version=HTTP/1.1 -C \"\$target\" fetch --depth=1 origin \"\$commit\"" "$ROOT/Dockerfile" || \
   fail 'Dockerfile must use the container-compatible pinned Git fetch transport'
-grep -Fq "git -C /opt/src/isaac-groot lfs pull --include 'demo_data/cube_to_bowl_5/**'" "$ROOT/Dockerfile" || \
-  fail 'Dockerfile must materialize only the pinned GR00T demo fixture'
-grep -Fq "test \"\$(head -c 42 \"\$asset\")\" != 'version https://git-lfs.github.com/spec/v1'" "$ROOT/Dockerfile" || \
-  fail 'Dockerfile must reject unresolved LFS fixture assets'
+grep -Fq 'COPY scripts/validate-groot-demo-fixture.sh /opt/humanoid-lab/' "$ROOT/Dockerfile" || \
+  fail 'Dockerfile must copy the shared fixture validator before the source build stage'
+grep -Fq '/opt/humanoid-lab/validate-groot-demo-fixture.sh "$groot_demo"' "$ROOT/Dockerfile" || \
+  fail 'Dockerfile must invoke the shared fixture validator after the LFS pull'
+grep -Fq 'validate_dataset() {' "$ROOT/scripts/fetch-groot-demo-data.sh" || \
+  fail 'fetcher must retain its fixture validation path'
+grep -Fq '"$FIXTURE_VALIDATOR" "$1"' "$ROOT/scripts/fetch-groot-demo-data.sh" || \
+  fail 'fetcher must invoke the shared fixture validator'
+grep -Fq '"$FIXTURE_VALIDATOR" "$DATASET_DIR"' "$ROOT/scripts/groot-finetune-smoke.sh" || \
+  fail 'smoke script must invoke the shared fixture validator'
 if grep -Fq 'GIT_LFS_SKIP_SMUDGE=1 git -C /opt/src/isaac-groot checkout' "$ROOT/Dockerfile" || \
   grep -Fq 'rm -rf /opt/src/isaac-groot/.git/lfs/objects' "$ROOT/Dockerfile"; then
   fail 'Dockerfile must retain the validated fixture payload in the final image'
 fi
-pass 'Docker build retains a validated, materialized GR00T fixture in the final image'
+pass 'Docker, fetcher, and smoke use the shared materialized-fixture validator'

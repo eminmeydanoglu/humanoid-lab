@@ -12,6 +12,7 @@ readonly JSON_PYTHON="${GROOT_JSON_PYTHON:-python3}"
 readonly MODEL_DIR="${GROOT_MODEL_DIR:-${HUMANOID_DATA_ROOT:-/data}/models/groot_n17_base}"
 readonly OUTPUT_ROOT="${GROOT_OUTPUT_ROOT:-/outputs/gr00t-n17-finetune-smoke}"
 readonly DATASET_DIR="${GROOT_DATASET_DIR:-$SOURCE_DIR/demo_data/cube_to_bowl_5}"
+readonly FIXTURE_VALIDATOR="${GROOT_FIXTURE_VALIDATOR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/validate-groot-demo-fixture.sh}"
 readonly MODALITY_CONFIG="${GROOT_MODALITY_CONFIG:-$SOURCE_DIR/examples/SO100/so100_config.py}"
 
 MODE="pipeline"
@@ -76,25 +77,6 @@ require_directory() {
   [[ -d "$path" ]] || fail "$description is missing: $path"
 }
 
-contains_lfs_pointer() {
-  local path="$1"
-  head -c 42 "$path" 2>/dev/null | cmp -s - <(printf '%s' 'version https://git-lfs.github.com/spec/v1')
-}
-
-require_non_pointer_assets() {
-  local pattern="$1"
-  local description="$2"
-  local first
-  local asset
-
-  first="$(find "$DATASET_DIR" -type f -name "$pattern" -print -quit)"
-  [[ -n "$first" ]] || fail "$description is missing below $DATASET_DIR"
-  while IFS= read -r asset; do
-    contains_lfs_pointer "$asset" && fail "$description is an unresolved Git LFS pointer: $asset"
-  done < <(find "$DATASET_DIR" -type f -name "$pattern" -print)
-  return 0
-}
-
 json_field_equals() {
   local path="$1"
   local field="$2"
@@ -145,10 +127,8 @@ validate_model() {
 }
 
 validate_dataset() {
-  require_directory "$DATASET_DIR" "GR00T demo dataset in the pinned source image"
-  require_file "$DATASET_DIR/meta/modality.json" "GR00T dataset modality metadata"
-  require_non_pointer_assets '*.parquet' 'GR00T demo parquet data'
-  require_non_pointer_assets '*.mp4' 'GR00T demo video data'
+  [[ -x "$FIXTURE_VALIDATOR" ]] || fail "GR00T fixture validator is missing or not executable: $FIXTURE_VALIDATOR"
+  "$FIXTURE_VALIDATOR" "$DATASET_DIR"
   require_file "$MODALITY_CONFIG" "GR00T modality config"
 }
 

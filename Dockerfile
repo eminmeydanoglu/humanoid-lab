@@ -56,6 +56,7 @@ ENV CYCLONEDDS_HOME=/opt/cyclonedds \
 # Runtime bootstrap overrides this image default with the persistent uv cache.
 
 COPY containers/prepare-g1-assets.py /opt/humanoid-lab/
+COPY scripts/validate-groot-demo-fixture.sh /opt/humanoid-lab/
 
 RUN set -eux; \
     checkout() { \
@@ -86,12 +87,7 @@ RUN set -eux; \
     # Materialize and validate the pinned fine-tuning fixture in the final image. \
     git -C /opt/src/isaac-groot lfs pull --include 'demo_data/cube_to_bowl_5/**'; \
     groot_demo=/opt/src/isaac-groot/demo_data/cube_to_bowl_5; \
-    test -f "$groot_demo/meta/modality.json"; \
-    for pattern in '*.parquet' '*.mp4'; do \
-      asset="$(find "$groot_demo" -type f -name "$pattern" -print -quit)"; \
-      test -n "$asset"; \
-      test "$(head -c 42 "$asset")" != 'version https://git-lfs.github.com/spec/v1'; \
-    done; \
+    /opt/humanoid-lab/validate-groot-demo-fixture.sh "$groot_demo"; \
     test "$(git -C /opt/src/isaac-groot/external_dependencies/LIBERO rev-parse HEAD)" = 8f1084e3132a39270c3a13ebe37270a43ece2a01; \
     test "$(git -C /opt/src/isaac-groot/external_dependencies/SimplerEnv rev-parse HEAD)" = 8a2d286c926c1371927caa7651a412b4cc331756; \
     test "$(git -C /opt/src/isaac-groot/external_dependencies/robocasa rev-parse HEAD)" = d89d481ce9c76da7f179466981676e268aa842e5; \

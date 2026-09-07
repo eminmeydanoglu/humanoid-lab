@@ -6,6 +6,7 @@ readonly SOURCE_REPO="${GROOT_DATASET_REPO:-https://github.com/NVIDIA/Isaac-GR00
 readonly SOURCE_COMMIT="${GROOT_DATASET_REVISION:-1a1837f20538b7d7e21f977a11a5aee14f99803c}"
 readonly DATA_ROOT="${HUMANOID_DATA_ROOT:-/data}/datasets/groot"
 readonly DATASET_DIR="${GROOT_DATASET_DIR:-$DATA_ROOT/cube_to_bowl_5}"
+readonly FIXTURE_VALIDATOR="${GROOT_FIXTURE_VALIDATOR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/validate-groot-demo-fixture.sh}"
 FORCE=0
 STAGING_DIR=""
 
@@ -26,31 +27,9 @@ fail() {
   exit 2
 }
 
-contains_lfs_pointer() {
-  local path="$1"
-  head -c 42 "$path" 2>/dev/null | cmp -s - <(printf '%s' 'version https://git-lfs.github.com/spec/v1')
-}
-
-require_non_pointer_assets() {
-  local root="$1"
-  local pattern="$2"
-  local description="$3"
-  local first
-  local asset
-
-  first="$(find "$root" -type f -name "$pattern" -print -quit)"
-  [[ -n "$first" ]] || fail "$description is missing below $root"
-  while IFS= read -r asset; do
-    contains_lfs_pointer "$asset" && fail "$description is an unresolved Git LFS pointer: $asset"
-  done < <(find "$root" -type f -name "$pattern" -print)
-  return 0
-}
-
 validate_dataset() {
-  local root="$1"
-  [[ -f "$root/meta/modality.json" ]] || fail "GR00T dataset modality metadata is missing: $root/meta/modality.json"
-  require_non_pointer_assets "$root" '*.parquet' 'GR00T demo parquet data'
-  require_non_pointer_assets "$root" '*.mp4' 'GR00T demo video data'
+  [[ -x "$FIXTURE_VALIDATOR" ]] || fail "GR00T fixture validator is missing or not executable: $FIXTURE_VALIDATOR"
+  "$FIXTURE_VALIDATOR" "$1"
 }
 
 while (($#)); do
