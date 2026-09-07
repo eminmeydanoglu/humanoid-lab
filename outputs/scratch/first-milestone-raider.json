@@ -1,0 +1,33 @@
+{
+  "generated_on": "2026-09-07",
+  "environment": "Raider / humanoid-lab-dev / Isaac Sim 5.1",
+  "scene": {
+    "camera_frame": "scene-final-raider.jpg",
+    "resolution": [640, 480],
+    "table": {"height_m": 0.75, "position_world_m": [0.35, 0.0, 0.375], "appearance": "warm brown"},
+    "bottle": {"upright": true, "height_m": 0.207, "radius_m": 0.055, "position_world_m": [0.35, 0.1, 0.8535], "appearance": "dark teal", "physics": "RigidObjectCfg CylinderCfg"}
+  },
+  "hand_validation": {
+    "asset": "g1_29dof_inspire_hand.usd",
+    "joint": "R_thumb_proximal_yaw_joint",
+    "limits_rad": [-0.030000030994415283, 1.2299997806549072],
+    "normalized_direction": "0=open=lower limit; 1=closed=upper limit",
+    "evidence": "Raider right-thumb-sign-probe runtime record"
+  },
+  "integration_repetitions": [
+    {"run": 1, "log": "raider-rollouts/closed-loop-1.log", "frame": "raider-rollouts/closed-loop-1.jpg", "status": "pipeline_pass"},
+    {"run": 2, "log": "raider-rollouts/closed-loop-2.log", "frame": "raider-rollouts/closed-loop-2.jpg", "status": "pipeline_pass"}
+  ],
+  "nominal_rollouts": [
+    {"run": 1, "log": "raider-rollouts/closed-loop-2.log", "frame": "raider-rollouts/closed-loop-2.jpg", "status": "pipeline_pass", "task_outcome": "unassessed"},
+    {"run": 2, "log": "raider-rollouts/closed-loop-3.log", "frame": "raider-rollouts/closed-loop-3.jpg", "status": "pipeline_pass", "task_outcome": "unassessed"},
+    {"run": 3, "log": "raider-rollouts/closed-loop-4.log", "frame": "raider-rollouts/closed-loop-4.jpg", "status": "pipeline_pass", "task_outcome": "unassessed"},
+    {"run": 4, "log": "raider-rollouts/closed-loop-5.log", "frame": "raider-rollouts/closed-loop-5.jpg", "status": "pipeline_pass", "task_outcome": "unassessed"},
+    {"run": 5, "log": "raider-rollouts/closed-loop-6.log", "frame": "raider-rollouts/closed-loop-6.jpg", "status": "pipeline_pass", "task_outcome": "unassessed"}
+  ],
+  "failure_classification": {
+    "pipeline_failures": [],
+    "task_success": "not claimed",
+    "reason": "The runner captures only a final RGB JPEG and has no contact, bottle-pose, or lift-success metric. No videos were emitted; final frames and durable logs are retained instead."
+  }
+}
