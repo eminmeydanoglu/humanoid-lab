@@ -5,10 +5,14 @@ set -euo pipefail
 : "${ONNXRUNTIME_ROOT:=/opt/onnxruntime-linux-x64-1.20.1}"
 : "${PROJECT_ROOT:=/workspace/humanoid-lab}"
 
-source_file="$PROJECT_ROOT/tests/native/sonic_isolated_harness.cpp"
+harness=${SONIC_NATIVE_HARNESS:-isolated}
+case "$harness" in
+  isolated) source_file="$PROJECT_ROOT/tests/native/sonic_isolated_harness.cpp"; output=/tmp/sonic-isolated-native ;;
+  closed-loop) source_file="$PROJECT_ROOT/tests/native/sonic_closed_loop_harness.cpp"; output=/tmp/sonic-closed-loop-native ;;
+  *) echo "unsupported SONIC_NATIVE_HARNESS: $harness" >&2; exit 2 ;;
+esac
 subscriber="$SONIC_ROOT/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/input_interface/zmq_packed_message_subscriber.hpp"
 compiler=/opt/cyclonedds/bin/c++
-output=/tmp/sonic-isolated-native
 
 [[ -f "$source_file" && -f "$subscriber" && -x "$compiler" ]]
 [[ -f "$ONNXRUNTIME_ROOT/include/onnxruntime_cxx_api.h" && -f "$ONNXRUNTIME_ROOT/lib/libonnxruntime.so" ]]

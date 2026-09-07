@@ -114,3 +114,18 @@ models:
     repo: nvidia/Cosmos-Reason2-2B
     revision: 9ce19a195e423419c349abfc86fd07178b230561
     gated: auto
+  cloudwalk_g1_grab_bottle_v10:
+    repo: cloudwalk-research/gr00t-n17-g1-grab-bottle-rh-371ep-v10-finetune
+    revision: f980fd880c92b984d65dcc3f9dc82b98bc8009c
+    checkpoint: checkpoint-30000
+    metadata_sha256:
+      config_json: 7d06d0da7baf0873016f2172fd2df5478f52a92e1c90e94ce2585e10f170e249
+      processor_config_json: c0ea0f1e830dfd25238dff8baaad80d1551bf324dc1e53076b3349fabe3d6540
+    embodiment: UNITREE_G1_SONIC
+    prompt: "grab the bottle"
+  cloudwalk_g1_grab_bottle_dataset_v10:
+    repo: cloudwalk-research/gr00t-g1-grab-bottle-right-hand-v10
+    content_sha256:
+      meta_info_json: 4167742a5dcadbda4ea53b6ad806da4f6ec3d541386f5b65fbcad9c68ebb33a0
+      modality_json: 45ff0cd3e2d1221147588957b0fb788bf321599dcebc396cf1a71d97e5f6da5b
+    total_episodes: 371
