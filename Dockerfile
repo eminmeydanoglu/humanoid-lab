@@ -92,9 +92,13 @@ RUN set -eux; \
       test -n "$asset"; \
       test "$(head -c 42 "$asset")" != 'version https://git-lfs.github.com/spec/v1'; \
     done; \
-    GIT_LFS_SKIP_SMUDGE=1 git -C /opt/src/isaac-groot reset --hard HEAD; \
+    find "$groot_demo" -type f \( -name '*.parquet' -o -name '*.mp4' \) -print | while IFS= read -r asset; do \
+      relative="${asset#/opt/src/isaac-groot/}"; \
+      git -C /opt/src/isaac-groot show "HEAD:$relative" > "$asset"; \
+    done; \
     rm -rf /opt/src/isaac-groot/.git/lfs/objects; \
     test "$(head -c 42 "$(find "$groot_demo" -type f -name '*.mp4' -print -quit)")" = 'version https://git-lfs.github.com/spec/v1'; \
+    test -z "$(git -C /opt/src/isaac-groot status --porcelain)"; \
     test "$(git -C /opt/src/isaac-groot/external_dependencies/LIBERO rev-parse HEAD)" = 8f1084e3132a39270c3a13ebe37270a43ece2a01; \
     test "$(git -C /opt/src/isaac-groot/external_dependencies/SimplerEnv rev-parse HEAD)" = 8a2d286c926c1371927caa7651a412b4cc331756; \
     test "$(git -C /opt/src/isaac-groot/external_dependencies/robocasa rev-parse HEAD)" = d89d481ce9c76da7f179466981676e268aa842e5; \

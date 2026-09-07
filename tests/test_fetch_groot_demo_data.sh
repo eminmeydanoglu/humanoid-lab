@@ -82,7 +82,7 @@ pass 'pinned demo dataset and provenance are stored under the persistent dataset
 
 grep -Fq "git -C /opt/src/isaac-groot lfs pull --include 'demo_data/cube_to_bowl_5/**'" "$ROOT/Dockerfile" || \
   fail 'Dockerfile must validate only the pinned GR00T demo fixture'
-grep -Fq 'GIT_LFS_SKIP_SMUDGE=1 git -C /opt/src/isaac-groot reset --hard HEAD' "$ROOT/Dockerfile" || \
+grep -Fq 'git -C /opt/src/isaac-groot show "HEAD:$relative" > "$asset"' "$ROOT/Dockerfile" || \
   fail 'Dockerfile must restore the pointer-only GR00T source checkout'
 grep -Fq 'rm -rf /opt/src/isaac-groot/.git/lfs/objects' "$ROOT/Dockerfile" || \
   fail 'Dockerfile must remove transient GR00T LFS objects'
