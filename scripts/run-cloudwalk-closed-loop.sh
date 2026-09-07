@@ -7,6 +7,8 @@ container=${CLOUDWALK_CONTAINER:-humanoid-lab-dev}
 project=${CLOUDWALK_PROJECT_ROOT:-/workspace/humanoid-lab}
 log=${CLOUDWALK_LOG:-$root/outputs/isaac-closed-loop.log}
 steps=${CLOUDWALK_STEPS:-250}
+metrics=${CLOUDWALK_ROLLOUT_METRICS:-$project/outputs/nominal-rollout.json}
+video=${CLOUDWALK_ROLLOUT_VIDEO:-$project/outputs/nominal-rollout.mp4}
 mkdir -p "$(dirname "$log")"
 : >"$log"
 
@@ -33,4 +35,4 @@ start "source /opt/humanoid-lab/entrypoint.sh && use-groot && PYTHONPATH=/opt/sr
 start "source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && SONIC_NATIVE_HARNESS=closed-loop PROJECT_ROOT=$project SONIC_ROOT=/opt/src/sonic $project/scripts/build-sonic-isolated-native.sh && exec env CLOUDWALK_ACTION_PORT=56114 CLOUDWALK_STATE_PORT=56112 CLOUDWALK_BODY_PORT=56113 DECODER_MODEL=/data/runtime/sonic-deploy-models/sonic_v1_1/model_decoder.onnx LD_LIBRARY_PATH=/opt/onnxruntime-linux-x64-1.20.1/lib:/usr/local/cuda-12.8/lib64 /tmp/sonic-closed-loop-native"
 
 # Isaac is the foreground owner of the closed loop. Its stdout is the durable run record.
-docker exec "$container" bash -lc "source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && exec /opt/venvs/isaac-sonic/bin/python $project/scripts/run-cloudwalk-isaac.py --headless --closed-loop --steps $steps --capture-path $project/outputs/isaac-closed-loop.jpg" 2>&1 | tee -a "$log"
+docker exec "$container" bash -lc "source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && exec /opt/venvs/isaac-sonic/bin/python $project/scripts/run-cloudwalk-isaac.py --headless --closed-loop --steps $steps --capture-path $project/outputs/isaac-closed-loop.jpg --rollout-metrics-path $metrics --video-path $video" 2>&1 | tee -a "$log"

@@ -81,6 +81,8 @@ def main() -> int:
     parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
     parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
     parser.add_argument("--capture-path", type=Path, required=True)
+    parser.add_argument("--rollout-metrics-path", type=Path)
+    parser.add_argument("--video-path", type=Path)
     parser.add_argument("--steps", type=int, default=250)
     parser.add_argument("--table-position", type=float, nargs=3, default=(0.35, 0.0, 0.375))
     parser.add_argument("--table-size", type=float, nargs=3, default=(0.9, 0.6, 0.75))
@@ -166,6 +168,14 @@ def main() -> int:
         mapper = InspireFTPGripMapper(dataset_channel_order_verified=True, right_thumb_yaw_closes_at_upper=True)
         open_targets = default_pos.clone()
         open_targets[:, inspire_ids] = torch.tensor(mapper.targets(V4Action((0.0,) * 64, (0.0,) * 7, (0.0,) * 7), hand_limits), device=default_pos.device).unsqueeze(0)
+        bottle = scene["bottle"]
+        right_hand_body_ids = [index for index, name in enumerate(robot.body_names) if name.startswith("R_") and ("hand" in name.lower() or "finger" in name.lower() or "thumb" in name.lower())]
+        if not right_hand_body_ids:
+            right_hand_body_ids = [index for index, name in enumerate(robot.body_names) if name.startswith("R_")]
+        rollout_samples: list[dict[str, object]] = []
+        video_frames: list[object] = []
+        initial_bottle_z = float(bottle.data.root_pos_w[0, 2])
+        stable_grasp_frames = 0
         events: list[str] = ["initial_pose", "gravity_settle", "hand_open"]
         if args.hand_sign_probe:
             closed = mapper.targets(V4Action((0.0,) * 64, (1.0,) * 7, (1.0,) * 7), hand_limits)
@@ -251,6 +261,17 @@ def main() -> int:
                 targets[:, inspire_ids] = torch.tensor(mapper.targets(last_hand_action, hand_limits), device=targets.device).unsqueeze(0)
                 robot.set_joint_position_target(targets)
                 scene.write_data_to_sim(); sim.step(); scene.update(sim.get_physics_dt())
+                bottle_pos = bottle.data.root_pos_w[0]
+                hand_pos = robot.data.body_pos_w[0, right_hand_body_ids]
+                distances = torch.linalg.vector_norm(hand_pos - bottle_pos, dim=1)
+                closest_hand_index = int(torch.argmin(distances))
+                distance = float(distances[closest_hand_index])
+                closure = float(sum(last_hand_action.right_hand[:6]) / 6.0)
+                contact_proxy = distance < 0.12
+                stable_grasp_frames = stable_grasp_frames + 1 if contact_proxy and closure >= 0.6 else 0
+                rollout_samples.append({"step": step, "bottle_pos_w": [float(value) for value in bottle_pos.tolist()], "closest_hand_body": robot.body_names[right_hand_body_ids[closest_hand_index]], "closest_hand_pos_w": [float(value) for value in hand_pos[closest_hand_index].tolist()], "hand_object_distance_m": distance, "right_hand_closure": closure, "contact_proxy": contact_proxy, "stable_grasp_frames": stable_grasp_frames, "lift_m": float(bottle_pos[2]) - initial_bottle_z})
+                if args.video_path is not None and step % 5 == 0:
+                    video_frames.append(camera.data.output["rgb"][0].cpu().numpy())
             request.send_json({"op": "stop"}); request.recv_json()
             request.close(); state_pub.close(); action_pub.close(); body_sub.close(); context.term()
             if not inference_frames or not body_frames:
@@ -273,7 +294,17 @@ def main() -> int:
         rgb = camera.data.output["rgb"][0].cpu().numpy()
         args.capture_path.parent.mkdir(parents=True, exist_ok=True)
         iio.imwrite(args.capture_path, rgb)
-        result = {"asset_cfg": "G1_INSPIRE_FTP_CFG", "usd": "Robots/Unitree/G1/g1_29dof_inspire_hand.usd", "joints": robot.num_joints, "bodies": robot.num_bodies, "camera_shape": list(rgb.shape), "capture": str(args.capture_path), "events": events, "prompt": PROMPT, "embodiment": EMBODIMENT, "scene_parameters": {"table_height_m": args.table_size[2], "table_position": args.table_position, "bottle_position": args.bottle_position, "bottle_height_m": 0.207, "camera_focal_length_mm": 15.15}, "isaac_target_dofs": {"body": list(body_joint_names), "inspire": list(INSPIRE_HAND_JOINTS)}, "vla_connection": "upstream_policy_native_sonic_connected" if args.closed_loop else "not_connected", "hand_application": "verified_24_joint_normalized_mapper" if args.closed_loop else "scene_only"}
+        rollout_metrics = None
+        if args.rollout_metrics_path is not None:
+            args.rollout_metrics_path.parent.mkdir(parents=True, exist_ok=True)
+            max_stable = max((int(sample["stable_grasp_frames"]) for sample in rollout_samples), default=0)
+            max_lift = max((float(sample["lift_m"]) for sample in rollout_samples), default=0.0)
+            rollout_metrics = {"initial_bottle_z_m": initial_bottle_z, "samples": rollout_samples, "approach": any(float(sample["hand_object_distance_m"]) < 0.20 for sample in rollout_samples), "contact_proxy": any(bool(sample["contact_proxy"]) for sample in rollout_samples), "hand_close": any(float(sample["right_hand_closure"]) >= 0.6 for sample in rollout_samples), "stable_grasp": max_stable >= 10, "stable_grasp_frames": max_stable, "lift": max_lift >= 0.05, "max_lift_m": max_lift, "video": str(args.video_path) if args.video_path else None}
+            args.rollout_metrics_path.write_text(json.dumps(rollout_metrics, sort_keys=True) + "\n")
+        if args.video_path is not None and video_frames:
+            args.video_path.parent.mkdir(parents=True, exist_ok=True)
+            iio.imwrite(args.video_path, video_frames, fps=10, codec="libx264")
+        result = {"asset_cfg": "G1_INSPIRE_FTP_CFG", "usd": "Robots/Unitree/G1/g1_29dof_inspire_hand.usd", "joints": robot.num_joints, "bodies": robot.num_bodies, "camera_shape": list(rgb.shape), "capture": str(args.capture_path), "events": events, "prompt": PROMPT, "embodiment": EMBODIMENT, "scene_parameters": {"table_height_m": args.table_size[2], "table_position": args.table_position, "bottle_position": args.bottle_position, "bottle_height_m": 0.207, "camera_focal_length_mm": 15.15}, "isaac_target_dofs": {"body": list(body_joint_names), "inspire": list(INSPIRE_HAND_JOINTS)}, "vla_connection": "upstream_policy_native_sonic_connected" if args.closed_loop else "not_connected", "hand_application": "verified_24_joint_normalized_mapper" if args.closed_loop else "scene_only", "rollout_metrics": rollout_metrics}
         # Flush before close(): Kit's teardown can discard buffered stdout.
         print(json.dumps(result, sort_keys=True), flush=True)
         _exit_code[0] = 0
