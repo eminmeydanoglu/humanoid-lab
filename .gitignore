@@ -20,3 +20,6 @@ diagnostics/
 *~
 .idea/
 .vscode/
+# .pi / docs
+.pi/
+docs/

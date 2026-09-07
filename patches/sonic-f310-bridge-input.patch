@@ -1,0 +1,286 @@
+diff --git a/src/g1/g1_deploy_onnx_ref/include/input_interface/f310_bridge_gamepad.hpp b/src/g1/g1_deploy_onnx_ref/include/input_interface/f310_bridge_gamepad.hpp
+new file mode 100644
+--- /dev/null
++++ b/src/g1/g1_deploy_onnx_ref/include/input_interface/f310_bridge_gamepad.hpp
+@@ -0,0 +1,197 @@
++#ifndef F310_BRIDGE_GAMEPAD_HPP
++#define F310_BRIDGE_GAMEPAD_HPP
++
++// Private, loopback-only input adapter for the local f310_unitree_bridge.py.
++// It never publishes DDS and it never accepts a packet until the sender sets
++// the explicit ARMED bit. A stale/disconnected armed sender synthesizes the
++// existing Gamepad Select emergency-stop input exactly once.
++
++#include <array>
++#include <chrono>
++#include <cstdint>
++#include <cstring>
++#include <cerrno>
++#include <iostream>
++
++#include <arpa/inet.h>
++#include <fcntl.h>
++#include <netinet/in.h>
++#include <sys/socket.h>
++#include <unistd.h>
++
++#include "gamepad.hpp"
++
++namespace unitree::common {
++
++class F310BridgeGamepad final : public Gamepad {
++ public:
++  static constexpr uint16_t kDefaultPort = 49051;
++  static constexpr size_t kFrameSize = 56;  // !4sBBHQ40s from Python bridge
++  static constexpr int kStaleTimeoutMs = 250;
++
++  explicit F310BridgeGamepad(uint16_t port = kDefaultPort) : port_(port) {
++    std::memset(gamepad_data.buff, 0, sizeof(gamepad_data.buff));
++    OpenListener();
++  }
++
++  ~F310BridgeGamepad() override {
++    CloseClient();
++    if (listener_fd_ >= 0) {
++      close(listener_fd_);
++    }
++  }
++
++  void update() override {
++    PollTransport();
++    if (stop_pending_) {
++      // Make the inherited edge detector emit Select.on_press this frame.
++      std::memset(gamepad_data.buff, 0, sizeof(gamepad_data.buff));
++      gamepad_data.RF_RX.btn.components.select = 1;
++      stop_pending_ = false;
++    }
++    Gamepad::update();
++    if (F1.on_press) {
++      std::cout << "[F310Bridge] F1 accepted; planner is "
++                << (use_planner ? "ON" : "OFF") << std::endl;
++    }
++  }
++
++  bool listening() const { return listener_fd_ >= 0; }
++
++ private:
++  using Clock = std::chrono::steady_clock;
++
++  void OpenListener() {
++    listener_fd_ = socket(AF_INET, SOCK_STREAM, 0);
++    if (listener_fd_ < 0) {
++      std::cerr << "[F310Bridge] socket failed: " << std::strerror(errno) << std::endl;
++      return;
++    }
++    const int one = 1;
++    setsockopt(listener_fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
++    if (fcntl(listener_fd_, F_SETFL, fcntl(listener_fd_, F_GETFL, 0) | O_NONBLOCK) < 0) {
++      std::cerr << "[F310Bridge] cannot make listener non-blocking" << std::endl;
++      close(listener_fd_);
++      listener_fd_ = -1;
++      return;
++    }
++    sockaddr_in address{};
++    address.sin_family = AF_INET;
++    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++    address.sin_port = htons(port_);
++    if (bind(listener_fd_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0 ||
++        listen(listener_fd_, 1) < 0) {
++      std::cerr << "[F310Bridge] cannot bind 127.0.0.1:" << port_
++                << ": " << std::strerror(errno) << std::endl;
++      close(listener_fd_);
++      listener_fd_ = -1;
++      return;
++    }
++    std::cout << "[F310Bridge] listening only on 127.0.0.1:" << port_
++              << "; packets require explicit sender arming" << std::endl;
++  }
++
++  void PollTransport() {
++    const auto now = Clock::now();
++    if (listener_fd_ >= 0 && client_fd_ < 0) {
++      const int candidate = accept(listener_fd_, nullptr, nullptr);
++      if (candidate >= 0) {
++        const int flags = fcntl(candidate, F_GETFL, 0);
++        if (flags < 0 || fcntl(candidate, F_SETFL, flags | O_NONBLOCK) < 0) {
++          close(candidate);
++        } else {
++          client_fd_ = candidate;
++          rx_size_ = 0;
++          last_sequence_ = 0;
++          have_sequence_ = false;
++          std::cout << "[F310Bridge] local sender connected" << std::endl;
++        }
++      }
++    }
++
++    if (client_fd_ >= 0) {
++      while (rx_size_ < kFrameSize) {
++        const ssize_t received = recv(client_fd_, rx_.data() + rx_size_, kFrameSize - rx_size_, 0);
++        if (received > 0) {
++          rx_size_ += static_cast<size_t>(received);
++          continue;
++        }
++        if (received == 0) {
++          std::cout << "[F310Bridge] sender disconnected; requesting stop" << std::endl;
++          CloseClient();
++          FailSafe();
++          break;
++        }
++        if (errno == EAGAIN || errno == EWOULDBLOCK) {
++          break;
++        }
++        if (errno == EINTR) {
++          continue;
++        }
++        std::cerr << "[F310Bridge] receive error; requesting stop: " << std::strerror(errno) << std::endl;
++        CloseClient();
++        FailSafe();
++        break;
++      }
++      if (client_fd_ >= 0 && rx_size_ == kFrameSize) {
++        ConsumeFrame(now);
++        rx_size_ = 0;
++      }
++    }
++
++    if (armed_ && now - last_armed_frame_ > std::chrono::milliseconds(kStaleTimeoutMs)) {
++      std::cerr << "[F310Bridge] sender stale; requesting stop" << std::endl;
++      FailSafe();
++    }
++  }
++
++  void ConsumeFrame(const Clock::time_point& now) {
++    static constexpr std::array<uint8_t, 4> kMagic{{'F', '3', '1', 'B'}};
++    const bool header_ok = std::memcmp(rx_.data(), kMagic.data(), kMagic.size()) == 0 &&
++                           rx_[4] == 1 && rx_[6] == 0 && rx_[7] == 0 &&
++                           (rx_[5] & ~uint8_t{1}) == 0;
++    uint64_t sequence = 0;
++    for (size_t i = 8; i < 16; ++i) {
++      sequence = (sequence << 8) | rx_[i];
++    }
++    if (!header_ok || (have_sequence_ && sequence <= last_sequence_)) {
++      std::cerr << "[F310Bridge] rejected malformed or replayed frame" << std::endl;
++      return;
++    }
++    have_sequence_ = true;
++    last_sequence_ = sequence;
++    if ((rx_[5] & 1) == 0) {
++      // An unarmed packet is intentionally treated as a disarm/stop event.
++      FailSafe();
++      return;
++    }
++    std::memcpy(gamepad_data.buff, rx_.data() + 16, sizeof(gamepad_data.buff));
++    const uint16_t buttons = static_cast<uint16_t>(gamepad_data.buff[2]) |
++                             (static_cast<uint16_t>(gamepad_data.buff[3]) << 8);
++    if (!have_reported_buttons_ || buttons != last_reported_buttons_) {
++      std::cout << "[F310Bridge] accepted armed frame seq=" << sequence
++                << " buttons=0x" << std::hex << buttons << std::dec << std::endl;
++      have_reported_buttons_ = true;
++      last_reported_buttons_ = buttons;
++    }
++    armed_ = true;
++    last_armed_frame_ = now;
++  }
++
++  void FailSafe() {
++    const bool was_armed = armed_;
++    armed_ = false;
++    std::memset(gamepad_data.buff, 0, sizeof(gamepad_data.buff));
++    stop_pending_ = stop_pending_ || was_armed;
++  }
++
++  void CloseClient() {
++    if (client_fd_ >= 0) {
++      close(client_fd_);
++      client_fd_ = -1;
++    }
++    rx_size_ = 0;
++  }
++
++  uint16_t port_;
++  int listener_fd_ = -1;
++  int client_fd_ = -1;
++  std::array<uint8_t, kFrameSize> rx_{};
++  size_t rx_size_ = 0;
++  bool armed_ = false;
++  bool stop_pending_ = false;
++  bool have_sequence_ = false;
++  uint64_t last_sequence_ = 0;
++  bool have_reported_buttons_ = false;
++  uint16_t last_reported_buttons_ = 0;
++  Clock::time_point last_armed_frame_{};
++};
++
++}  // namespace unitree::common
++
++#endif  // F310_BRIDGE_GAMEPAD_HPP
+diff --git a/src/g1/g1_deploy_onnx_ref/src/g1_deploy_onnx_ref.cpp b/src/g1/g1_deploy_onnx_ref/src/g1_deploy_onnx_ref.cpp
+--- a/src/g1/g1_deploy_onnx_ref/src/g1_deploy_onnx_ref.cpp
++++ b/src/g1/g1_deploy_onnx_ref/src/g1_deploy_onnx_ref.cpp
+@@ -106,6 +106,7 @@
+ // Input interface and input handlers
+ #include "../include/input_interface/keyboard_handler.hpp"
+ #include "../include/input_interface/gamepad.hpp"
++#include "../include/input_interface/f310_bridge_gamepad.hpp"
+ #include "../include/input_interface/zmq_endpoint_interface.hpp"
+ #include "../include/input_interface/interface_manager.hpp"
+ #include "../include/input_interface/gamepad_manager.hpp"
+@@ -2453,7 +2454,12 @@ class G1Deploy {
+         input_interface_ = std::make_unique<unitree::common::Gamepad>();
+         std::cout << "Initialized gamepad input interface" << std::endl;
+         std::cout << "  Initial encoder mode: " << initial_encoder_mode_ << std::endl;
+       } 
++      else if (input_type == "f310_bridge") {
++        input_interface_ = std::make_unique<unitree::common::F310BridgeGamepad>();
++        std::cout << "Initialized F310 loopback bridge input interface (port 49051)" << std::endl;
++        std::cout << "  Input remains neutral until an explicitly armed bridge packet arrives" << std::endl;
++      }
+       else if (input_type == "gamepad_manager") {
+         input_interface_ = std::make_unique<GamepadManager>(zmq_host, zmq_port, zmq_topic, zmq_conflate, zmq_verbose);
+         std::cout << "Initialized demo gamepad manager input interface" << std::endl;
+@@ -3425,7 +3430,10 @@ class G1Deploy {
+       }
+       
+       // Update gamepad data if using gamepad interface (or manager)
+-      if (auto gamepad = dynamic_cast<unitree::common::Gamepad*>(input_interface_.get())) {
++      if (dynamic_cast<unitree::common::F310BridgeGamepad*>(input_interface_.get())) {
++        // The bridge owns its input buffer. Never overwrite it with LowState.
++      }
++      else if (auto gamepad = dynamic_cast<unitree::common::Gamepad*>(input_interface_.get())) {
+         if(low_state_data) {
+           memcpy(gamepad->gamepad_data.buff, &low_state_data->wireless_remote()[0], 40);
+         }else{
+@@ -4115,7 +4122,7 @@ void print_usage(const char* program_name) {
+     std::cout << "  motion_data_path: path to motion data directory (e.g., reference/bones_072925_test/)" << std::endl;
+     std::cout << "\nOptions:" << std::endl;
+     std::cout << "  --planner-file <path>: specify planner file (optional)" << std::endl;
+-    std::cout << "  --input-type <keyboard|gamepad|gamepad_manager|manager|zmq|zmq_manager";
++    std::cout << "  --input-type <keyboard|gamepad|f310_bridge|gamepad_manager|manager|zmq|zmq_manager";
+ #if HAS_ROS2
+     std::cout << "|ros2";
+ #endif
+@@ -4245,12 +4252,12 @@ int main(int argc, char** argv) {
+       if (i + 1 < argc) {
+         inputType = argv[i + 1];
+         // Validate input type based on what's available
+-        bool valid_input = (inputType == "keyboard" || inputType == "gamepad" || inputType == "gamepad_manager" || inputType == "zmq" || inputType == "zmq_manager" || inputType == "manager");
++        bool valid_input = (inputType == "keyboard" || inputType == "gamepad" || inputType == "f310_bridge" || inputType == "gamepad_manager" || inputType == "zmq" || inputType == "zmq_manager" || inputType == "manager");
+ #if HAS_ROS2
+         valid_input = valid_input || (inputType == "ros2");
+ #endif
+         if (!valid_input) {
+-          std::cerr << "Error: --input-type must be 'keyboard', 'gamepad', 'gamepad_manager', 'manager', 'zmq', or 'zmq_manager'";
++          std::cerr << "Error: --input-type must be 'keyboard', 'gamepad', 'f310_bridge', 'gamepad_manager', 'manager', 'zmq', or 'zmq_manager'";
+ #if HAS_ROS2
+           std::cerr << ", or 'ros2'";
+ #endif
+@@ -4260,7 +4267,7 @@ int main(int argc, char** argv) {
+         std::cout << "[INFO] Using input type: " << inputType << std::endl;
+         i++; // Skip the next argument since it's the input type
+       } else {
+-        std::cerr << "Error: --input-type requires a type argument (keyboard, gamepad, gamepad_manager, manager, zmq, zmq_manager";
++        std::cerr << "Error: --input-type requires a type argument (keyboard, gamepad, f310_bridge, gamepad_manager, manager, zmq, zmq_manager";
+ #if HAS_ROS2
+         std::cerr << ", or ros2";
+ #endif
