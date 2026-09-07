@@ -154,9 +154,10 @@ Her çalıştırma `run.log`, `command.sh`, `source_revision`, `model_provenance
 ```text
 checkpoint-2/
 checkpoint-2/experiment_cfg/
-checkpoint-2/processor/
-checkpoint-2 içindeki model/config artifact'leri
+checkpoint-2 içindeki processor config/statistics ve model/config artifact'leri
 ```
+
+Pinli N1.7 launcher, processor dosyalarını `checkpoint-2/processor/` dizinine değil `checkpoint-2/` köküne düz olarak kopyalar; ayrıca tam `processor/` dizinini run output kökünde bırakır. Smoke betiği her iki upstream yerleşimini de doğrular.
 
 Ek olarak launcher exit code'u `0` olmalı ve log iki adıma ulaştığını göstermelidir. İki adımda loss düşmesi veya robotun görevi öğrenmesi başarı ölçütü **değildir**.
 

@@ -133,9 +133,11 @@ assert_file_not_contains "$PRETRAINED_OVERRIDE_OUTPUT/command.sh" '--skip-weight
 assert_file_contains "$PRETRAINED_OVERRIDE_OUTPUT/command.sh" '--max-steps 2' 'pretrained command keeps the two-step limit'
 
 CHECKPOINT="$TMP_ROOT/checkpoint-2"
-mkdir -p "$CHECKPOINT/experiment_cfg" "$CHECKPOINT/processor" "$CHECKPOINT/model"
+mkdir -p "$CHECKPOINT/experiment_cfg" "$CHECKPOINT/model"
 printf '{}\n' >"$CHECKPOINT/model/config.json"
 printf 'weights\n' >"$CHECKPOINT/model/model.safetensors"
+printf '{}\n' >"$CHECKPOINT/processor_config.json"
+printf '{}\n' >"$CHECKPOINT/statistics.json"
 expect_rc 0 "$TMP_ROOT/training-artifacts.log" "$SCRIPT" --check-training-artifacts "$CHECKPOINT"
 
 EVAL_OUTPUT="$TMP_ROOT/eval-output"
