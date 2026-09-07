@@ -96,7 +96,8 @@ RUN set -eux; \
       find "$groot_demo" -type f -name "$pattern" -print; \
     done | while IFS= read -r asset; do \
       relative="${asset#/opt/src/isaac-groot/}"; \
-      git -C /opt/src/isaac-groot show "HEAD:$relative" > "$asset"; \
+      rm "$asset"; \
+      GIT_LFS_SKIP_SMUDGE=1 git -C /opt/src/isaac-groot checkout -- "$relative"; \
     done; \
     rm -rf /opt/src/isaac-groot/.git/lfs/objects; \
     test "$(head -c 42 "$(find "$groot_demo" -type f -name '*.mp4' -print -quit)")" = 'version https://git-lfs.github.com/spec/v1'; \
