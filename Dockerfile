@@ -92,7 +92,9 @@ RUN set -eux; \
       test -n "$asset"; \
       test "$(head -c 42 "$asset")" != 'version https://git-lfs.github.com/spec/v1'; \
     done; \
-    find "$groot_demo" -type f \( -name '*.parquet' -o -name '*.mp4' \) -print | while IFS= read -r asset; do \
+    for pattern in '*.parquet' '*.mp4'; do \
+      find "$groot_demo" -type f -name "$pattern" -print; \
+    done | while IFS= read -r asset; do \
       relative="${asset#/opt/src/isaac-groot/}"; \
       git -C /opt/src/isaac-groot show "HEAD:$relative" > "$asset"; \
     done; \
