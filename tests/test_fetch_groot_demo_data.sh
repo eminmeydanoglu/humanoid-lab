@@ -80,7 +80,10 @@ assert {item["path"] for item in provenance["files"]} >= {
 PY
 pass 'pinned demo dataset and provenance are stored under the persistent dataset mount'
 
-if grep -Fq 'demo_data/cube_to_bowl_5' "$ROOT/Dockerfile"; then
-  fail 'Dockerfile must not copy or fetch the demo dataset into the image'
-fi
-pass 'Dockerfile does not embed a second demo dataset copy'
+grep -Fq "git -C /opt/src/isaac-groot lfs pull --include 'demo_data/cube_to_bowl_5/**'" "$ROOT/Dockerfile" || \
+  fail 'Dockerfile must validate only the pinned GR00T demo fixture'
+grep -Fq 'GIT_LFS_SKIP_SMUDGE=1 git -C /opt/src/isaac-groot reset --hard HEAD' "$ROOT/Dockerfile" || \
+  fail 'Dockerfile must restore the pointer-only GR00T source checkout'
+grep -Fq 'rm -rf /opt/src/isaac-groot/.git/lfs/objects' "$ROOT/Dockerfile" || \
+  fail 'Dockerfile must remove transient GR00T LFS objects'
+pass 'Docker build validates the fixture but restores a payload-free source checkout'

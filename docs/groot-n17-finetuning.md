@@ -16,7 +16,7 @@ Bu depo GR00T N1.7 General Availability (GA) kaynak kodunu, modeli ve Python ort
 | Örnek veri | Pinli Isaac-GR00T `demo_data/cube_to_bowl_5`, mounted hedef `/data/datasets/groot/cube_to_bowl_5` |
 | Örnek embodiment | `NEW_EMBODIMENT`, `examples/SO100/so100_config.py` |
 
-`versions.lock.yaml` bu değerlerin tek kaynağıdır. Yeni bir GR00T repository, ikinci virtual environment veya ayrı bir lock dosyası oluşturulmaz. Docker image dataset içermez. Resmî örnek veri hosttaki kalıcı mount altında `/data/datasets/groot/cube_to_bowl_5` konumunda tutulur; indirme komutu pinli revision, `meta/modality.json`, Parquet/MP4 varlığı ve Git LFS pointer durumunu doğrular.
+`versions.lock.yaml` bu değerlerin tek kaynağıdır. Yeni bir GR00T repository, ikinci virtual environment veya ayrı bir lock dosyası oluşturulmaz. Docker build, pinli örnek fixture'ı geçici olarak LFS ile indirip doğrular; ardından LFS payload'ını ve objelerini silerek source checkout'ı pointer-only duruma geri döndürür. Böylece image gerçek dataset payload'ını içermez. Resmî örnek veri hosttaki kalıcı mount altında `/data/datasets/groot/cube_to_bowl_5` konumunda tutulur; indirme komutu pinli revision, `meta/modality.json`, Parquet/MP4 varlığı ve Git LFS pointer durumunu doğrular.
 
 Upstream lock x86_64 için DeepSpeed 0.17.6 içerir. Isaac Sim runtime image'ında CUDA toolkit (`nvcc`) bulunmadığından Accelerate, tek-GPU launcher DeepSpeed seçmemesine rağmen bu paketi import ederken durur. `bootstrap-venvs.sh`, lock sync'inden sonra yalnız bu kullanılmayan paketi kaldırır. Bu environment DeepSpeed dağıtık eğitim konfigürasyonlarını desteklemez; smoke komutu zaten tek GPU düz `python` yolunu kullanır.
 
