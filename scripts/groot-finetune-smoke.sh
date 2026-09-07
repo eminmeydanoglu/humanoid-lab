@@ -203,18 +203,28 @@ write_command() {
   printf '\n' >>"$output"
 }
 
+materialize_checkpoint_processor() {
+  local checkpoint="$1"
+  [[ -d "$checkpoint/processor" ]] && return 0
+
+  # The pinned N1.7 launcher writes these files at the checkpoint root.
+  require_file "$checkpoint/processor_config.json" "flattened checkpoint-2 processor config"
+  require_file "$checkpoint/statistics.json" "flattened checkpoint-2 processor statistics"
+  mkdir -p "$checkpoint/processor"
+  cp -p "$checkpoint/processor_config.json" "$checkpoint/statistics.json" "$checkpoint/processor/"
+  if [[ -f "$checkpoint/embodiment_id.json" ]]; then
+    cp -p "$checkpoint/embodiment_id.json" "$checkpoint/processor/"
+  fi
+}
+
 validate_training_artifacts() {
   local checkpoint="$1"
   require_directory "$checkpoint" "checkpoint-2"
   require_directory "$checkpoint/experiment_cfg" "checkpoint-2 experiment_cfg"
-  if [[ -d "$checkpoint/processor" ]]; then
-    require_file "$checkpoint/processor/processor_config.json" "checkpoint-2 processor config"
-    require_file "$checkpoint/processor/statistics.json" "checkpoint-2 processor statistics"
-  else
-    # Isaac-GR00T N1.7 flattens copied processor files into checkpoint-2.
-    require_file "$checkpoint/processor_config.json" "checkpoint-2 processor config"
-    require_file "$checkpoint/statistics.json" "checkpoint-2 processor statistics"
-  fi
+  materialize_checkpoint_processor "$checkpoint"
+  require_directory "$checkpoint/processor" "checkpoint-2 processor"
+  require_file "$checkpoint/processor/processor_config.json" "checkpoint-2 processor config"
+  require_file "$checkpoint/processor/statistics.json" "checkpoint-2 processor statistics"
   find "$checkpoint" -type f -name config.json -print -quit | grep -q . || \
     fail "checkpoint-2 has no model/config artifact: $checkpoint"
   find "$checkpoint" -type f \( -name '*.safetensors' -o -name '*.bin' -o -name 'pytorch_model*.pt' \) -print -quit | grep -q . || \

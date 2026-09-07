@@ -156,6 +156,11 @@ printf 'weights\n' >"$CHECKPOINT/model/model.safetensors"
 printf '{}\n' >"$CHECKPOINT/processor_config.json"
 printf '{}\n' >"$CHECKPOINT/statistics.json"
 expect_rc 0 "$TMP_ROOT/training-artifacts.log" "$SCRIPT" --check-training-artifacts "$CHECKPOINT"
+if [[ -f "$CHECKPOINT/processor/processor_config.json" && -f "$CHECKPOINT/processor/statistics.json" ]]; then
+  pass 'flattened N1.7 processor files are materialized under checkpoint-2/processor'
+else
+  fail 'flattened N1.7 processor files are materialized under checkpoint-2/processor'
+fi
 
 EVAL_OUTPUT="$TMP_ROOT/eval-output"
 expect_rc 0 "$TMP_ROOT/eval.log" run_smoke eval --dry-run --checkpoint-dir "$CHECKPOINT" --output-dir "$EVAL_OUTPUT"

@@ -11,8 +11,8 @@ Bu depo GR00T N1.7 General Availability (GA) kaynak kodunu, modeli ve Python ort
 | GR00T kaynak kodu | NVIDIA Isaac-GR00T `1a1837f20538b7d7e21f977a11a5aee14f99803c` |
 | Fine-tuning entrypoint | `gr00t/experiment/launch_finetune.py` |
 | Python environment | `groot-n17`: Python 3.12, PyTorch 2.9.0, CUDA 12.8, Flash Attention 2.8.3 |
-| Ana model | `nvidia/GR00T-N1.7-3B` revizyon `2fc962b973bccdd5d8ce4f67cc63b264d6886495` |
-| Cosmos backbone | `nvidia/Cosmos-Reason2-2B` revizyon `9ce19a195e423419c349abfc86fd07178b230561` |
+| Ana model | [nvidia/GR00T-N1.7-3B](https://huggingface.co/nvidia/GR00T-N1.7-3B) revizyon `2fc962b973bccdd5d8ce4f67cc63b264d6886495` |
+| Cosmos backbone | [nvidia/Cosmos-Reason2-2B](https://huggingface.co/nvidia/Cosmos-Reason2-2B) revizyon `9ce19a195e423419c349abfc86fd07178b230561` |
 | Örnek veri | Final image içindeki pinli Isaac-GR00T `demo_data/cube_to_bowl_5` |
 | Örnek embodiment | `NEW_EMBODIMENT`, `examples/SO100/so100_config.py` |
 
@@ -153,10 +153,13 @@ Her çalıştırma `run.log`, `command.sh`, `source_revision`, `model_provenance
 ```text
 checkpoint-2/
 checkpoint-2/experiment_cfg/
-checkpoint-2 içindeki processor config/statistics ve model/config artifact'leri
+checkpoint-2/processor/
+checkpoint-2/processor/processor_config.json
+checkpoint-2/processor/statistics.json
+checkpoint-2 içindeki model/config artifact'leri
 ```
 
-Pinli N1.7 launcher, processor dosyalarını `checkpoint-2/processor/` dizinine değil `checkpoint-2/` köküne düz olarak kopyalar; ayrıca tam `processor/` dizinini run output kökünde bırakır. Smoke betiği her iki upstream yerleşimini de doğrular.
+Pinli N1.7 launcher ham olarak processor dosyalarını `checkpoint-2/processor/` dizinine değil `checkpoint-2/` köküne düz kopyalar; ayrıca tam `processor/` dizinini run output kökünde bırakır. Smoke betiği bu upstream yerleşimini korur ve başarıyı doğrulamadan önce kökteki `processor_config.json` ile `statistics.json` dosyalarından `checkpoint-2/processor/` uyumluluk dizinini oluşturur.
 
 Ek olarak launcher exit code'u `0` olmalı ve log iki adıma ulaştığını göstermelidir. İki adımda loss düşmesi veya robotun görevi öğrenmesi başarı ölçütü **değildir**.
 
