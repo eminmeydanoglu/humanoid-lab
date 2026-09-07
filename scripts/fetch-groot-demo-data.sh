@@ -89,7 +89,7 @@ git -C "$checkout" lfs pull --include 'demo_data/cube_to_bowl_5/**'
 
 staged_dataset="$checkout/demo_data/cube_to_bowl_5"
 validate_dataset "$staged_dataset"
-"${PYTHON:-python3}" - "$staged_dataset/DATASET_PROVENANCE.json" "$SOURCE_REPO" "$SOURCE_COMMIT" <<'PY'
+"${PYTHON:-python3}" - "$staged_dataset" "$SOURCE_REPO" "$SOURCE_COMMIT" <<'PY'
 import json
 import os
 import sys
