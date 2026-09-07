@@ -57,7 +57,7 @@ ENV CYCLONEDDS_HOME=/opt/cyclonedds \
 
 COPY containers/prepare-g1-assets.py /opt/humanoid-lab/
 
-RUN set -eux; \
+RUN --network=host set -eux; \
     checkout() { \
       url="$1"; commit="$2"; target="$3"; \
       git init "$target"; \
