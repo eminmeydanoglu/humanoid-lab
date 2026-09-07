@@ -30,7 +30,7 @@ RUN set -eux; \
         bash-completion build-essential ca-certificates cmake curl file \
         ffmpeg git git-lfs iproute2 iputils-ping jq libegl1 libgl1 \
         libglib2.0-0 libsm6 libxext6 libxrender1 libvulkan1 net-tools \
-        ninja-build pkg-config python3 tcpdump cyclonedds-dev; \
+        ninja-build pkg-config python3 libpython3.12-dev tcpdump cyclonedds-dev; \
     rm -rf /var/lib/apt/lists/*; \
     # cyclonedds build prefix (unitree_sdk2py binding)
     mkdir -p /opt/cyclonedds; \
