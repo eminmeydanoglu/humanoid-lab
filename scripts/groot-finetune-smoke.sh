@@ -11,8 +11,7 @@ readonly PYTHON_BIN="${GROOT_PYTHON:-/opt/venvs/groot-n17/bin/python}"
 readonly JSON_PYTHON="${GROOT_JSON_PYTHON:-python3}"
 readonly MODEL_DIR="${GROOT_MODEL_DIR:-${HUMANOID_DATA_ROOT:-/data}/models/groot_n17_base}"
 readonly OUTPUT_ROOT="${GROOT_OUTPUT_ROOT:-/outputs/gr00t-n17-finetune-smoke}"
-readonly DATASET_DIR="${GROOT_DATASET_DIR:-${HUMANOID_DATA_ROOT:-/data}/datasets/groot/cube_to_bowl_5}"
-readonly EXPECTED_DATASET_REPO="${GROOT_EXPECTED_DATASET_REPO:-https://github.com/NVIDIA/Isaac-GR00T.git}"
+readonly DATASET_DIR="${GROOT_DATASET_DIR:-$SOURCE_DIR/demo_data/cube_to_bowl_5}"
 readonly MODALITY_CONFIG="${GROOT_MODALITY_CONFIG:-$SOURCE_DIR/examples/SO100/so100_config.py}"
 
 MODE="pipeline"
@@ -51,7 +50,7 @@ options:
 Environment overrides are provided for automated shell tests and isolated deployments:
 GROOT_SOURCE_DIR, GROOT_PYTHON, GROOT_MODEL_DIR, GROOT_OUTPUT_ROOT,
 GROOT_DATASET_DIR, GROOT_MODALITY_CONFIG, GROOT_EXPECTED_SOURCE_COMMIT,
-GROOT_EXPECTED_DATASET_REPO, GROOT_EXPECTED_MODEL_REPO, GROOT_EXPECTED_MODEL_REVISION.
+GROOT_EXPECTED_MODEL_REPO, GROOT_EXPECTED_MODEL_REVISION.
 EOF
 }
 
@@ -146,12 +145,7 @@ validate_model() {
 }
 
 validate_dataset() {
-  require_directory "$DATASET_DIR" "GR00T demo dataset (run ./dev.sh fetch-groot-demo-data)"
-  require_file "$DATASET_DIR/DATASET_PROVENANCE.json" "GR00T demo dataset provenance"
-  json_field_equals "$DATASET_DIR/DATASET_PROVENANCE.json" repo "$EXPECTED_DATASET_REPO" || \
-    fail "GR00T demo dataset provenance repository does not match the pinned source"
-  json_field_equals "$DATASET_DIR/DATASET_PROVENANCE.json" revision "$EXPECTED_SOURCE_COMMIT" || \
-    fail "GR00T demo dataset provenance revision does not match the pinned source"
+  require_directory "$DATASET_DIR" "GR00T demo dataset in the pinned source image"
   require_file "$DATASET_DIR/meta/modality.json" "GR00T dataset modality metadata"
   require_non_pointer_assets '*.parquet' 'GR00T demo parquet data'
   require_non_pointer_assets '*.mp4' 'GR00T demo video data'

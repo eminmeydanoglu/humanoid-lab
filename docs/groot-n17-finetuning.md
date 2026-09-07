@@ -13,10 +13,10 @@ Bu depo GR00T N1.7 General Availability (GA) kaynak kodunu, modeli ve Python ort
 | Python environment | `groot-n17`: Python 3.12, PyTorch 2.9.0, CUDA 12.8, Flash Attention 2.8.3 |
 | Ana model | `nvidia/GR00T-N1.7-3B` revizyon `2fc962b973bccdd5d8ce4f67cc63b264d6886495` |
 | Cosmos backbone | `nvidia/Cosmos-Reason2-2B` revizyon `9ce19a195e423419c349abfc86fd07178b230561` |
-| Örnek veri | Pinli Isaac-GR00T `demo_data/cube_to_bowl_5`, mounted hedef `/data/datasets/groot/cube_to_bowl_5` |
+| Örnek veri | Final image içindeki pinli Isaac-GR00T `demo_data/cube_to_bowl_5` |
 | Örnek embodiment | `NEW_EMBODIMENT`, `examples/SO100/so100_config.py` |
 
-`versions.lock.yaml` bu değerlerin tek kaynağıdır. Yeni bir GR00T repository, ikinci virtual environment veya ayrı bir lock dosyası oluşturulmaz. Docker build, pinli örnek fixture'ı geçici olarak LFS ile indirip doğrular; ardından LFS payload'ını ve objelerini silerek source checkout'ı pointer-only duruma geri döndürür. Böylece image gerçek dataset payload'ını içermez. Resmî örnek veri hosttaki kalıcı mount altında `/data/datasets/groot/cube_to_bowl_5` konumunda tutulur; indirme komutu pinli revision, `meta/modality.json`, Parquet/MP4 varlığı ve Git LFS pointer durumunu doğrular.
+`versions.lock.yaml` bu değerlerin tek kaynağıdır. Yeni bir GR00T repository, ikinci virtual environment veya ayrı bir lock dosyası oluşturulmaz. Docker build, pinli örnek fixture için `git lfs pull --include 'demo_data/cube_to_bowl_5/**'` çalıştırır ve `meta/modality.json` ile gerçek Parquet/MP4 payload'ını doğrular. Bu resmî fixture, final image içinde `/opt/src/isaac-groot/demo_data/cube_to_bowl_5` konumunda tutulur; LFS pointer olması build'i başarısız kılar.
 
 Upstream lock x86_64 için DeepSpeed 0.17.6 içerir. Isaac Sim runtime image'ında CUDA toolkit (`nvcc`) bulunmadığından Accelerate, tek-GPU launcher DeepSpeed seçmemesine rağmen bu paketi import ederken durur. `bootstrap-venvs.sh`, lock sync'inden sonra yalnız bu kullanılmayan paketi kaldırır. Bu environment DeepSpeed dağıtık eğitim konfigürasyonlarını desteklemez; smoke komutu zaten tek GPU düz `python` yolunu kullanır.
 
@@ -40,14 +40,13 @@ cd /home/aksoy-msi/code/humanoid-lab
 ./dev.sh sync
 ./dev.sh hf-login
 ./dev.sh fetch-models
-./dev.sh fetch-groot-demo-data
 ./dev.sh doctor
 ./dev.sh smoke
 ```
 
 `fetch-models` her başarılı model indirmesi için `/data/models/<model>/MODEL_PROVENANCE.json` yazar; dosya repo, revision ve bütün indirilen dosyaların SHA-256 bilgisini içerir. Fine-tuning smoke bu dosyada ana modelin repo ve revision değerlerini lock ile karşılaştırır; yalnız `config.json` bulunması yeterli değildir.
 
-`fetch-groot-demo-data`, yalnız `cube_to_bowl_5` içeriğini geçici sparse checkout ile indirip `/data/datasets/groot/cube_to_bowl_5` altına taşır. Böylece image katmanında ikinci bir dataset kopyası bulunmaz. Dataset kökündeki `DATASET_PROVENANCE.json`, resmî repo ve pinli GA commit bilgisini kaydeder; smoke bunu da doğrular.
+Fine-tuning smoke, image build sırasında doğrulanmış `/opt/src/isaac-groot/demo_data/cube_to_bowl_5` fixture'ını doğrudan kullanır. Script, pinli source commit'i doğruladıktan sonra `meta/modality.json` ile en az bir gerçek Parquet ve MP4 dosyasını kontrol eder; çözülmemiş Git LFS pointer'ı kabul etmez.
 
 GR00T N1.7 ağırlıklarını indirmek açık olabilir; ancak Cosmos backbone erişimi Hugging Face lisans kabulü gerektirebilir. `GatedRepoError`, HTTP 401 veya 403 bir eğitim sonucu değildir: Cosmos model sayfasında erişimi kabul edin, `./dev.sh hf-login` çalıştırın ve yeniden deneyin.
 
@@ -67,7 +66,7 @@ Smoke için ortak eğitim parametreleri şöyledir:
 
 ```text
 --base-model-path /data/models/groot_n17_base
---dataset-path /data/datasets/groot/cube_to_bowl_5
+--dataset-path /opt/src/isaac-groot/demo_data/cube_to_bowl_5
 --embodiment-tag NEW_EMBODIMENT
 --modality-config-path examples/SO100/so100_config.py
 --num-gpus 1
@@ -90,14 +89,14 @@ GR00T, [LeRobot v2](https://github.com/huggingface/lerobot) veri yerleşimini ku
 meta/modality.json
 ```
 
-Bu dosya state, action, image ve dil/embodiment alanlarının GR00T modality tanımını bağlar. İlk smoke için mounted dataset store içindeki resmî `/data/datasets/groot/cube_to_bowl_5` kullanılmalıdır; Parquet veya video dosyalarının Git LFS pointer olması geçerli veri değildir.
+Bu dosya state, action, image ve dil/embodiment alanlarının GR00T modality tanımını bağlar. İlk smoke için image içindeki resmî `/opt/src/isaac-groot/demo_data/cube_to_bowl_5` kullanılmalıdır; Parquet veya video dosyalarının Git LFS pointer olması geçerli veri değildir.
 
 Her datasetin embodiment etiketi, dataset modality metadata'sı ve `--modality-config-path` birlikte uyumlu olmalıdır. Bu smoke'un sabit üçlüsü:
 
 ```text
 NEW_EMBODIMENT
 examples/SO100/so100_config.py
-/data/datasets/groot/cube_to_bowl_5
+/opt/src/isaac-groot/demo_data/cube_to_bowl_5
 ```
 
 Hazır embodiment ve modality yapılandırmaları kaynak checkout'ın `examples/` dizininde ve `EmbodimentTag` tanımında bulunur. Hazır bir yapılandırmayı kullanırken o yapılandırmanın desteklediği tag ve modality alanlarını değiştirmeyin. Yeni robot için resmî [custom embodiment rehberindeki](https://github.com/NVIDIA/Isaac-GR00T/blob/1a1837f20538b7d7e21f977a11a5aee14f99803c/getting_started/finetune_new_embodiment.md) gibi bir Python config oluşturun; bu dosya `NEW_EMBODIMENT` için modality config'i kaydetmeli ve veri alanlarıyla bire bir eşleşmelidir.
@@ -170,7 +169,7 @@ Ek olarak launcher exit code'u `0` olmalı ve log iki adıma ulaştığını gö
 | `BLOCKED` ve 40 GiB VRAM mesajı | Pretrained mod için GPU bellek eşiği karşılanmıyor. Weightsiz `pipeline` çalıştırın; bilinçli best-effort deneme için `--allow-low-vram` ekleyin. |
 | `GatedRepoError`, 401 veya 403 | Cosmos erişimini Hugging Face'te kabul edin ve `./dev.sh hf-login` çalıştırın. |
 | `MODEL_PROVENANCE.json` veya revision hatası | `./dev.sh fetch-models` ile pinli modeli yeniden indirin; rastgele yerel checkpoint kullanmayın. |
-| Eksik Parquet/MP4, LFS pointer veya dataset provenance hatası | `./dev.sh fetch-groot-demo-data --force` ile mounted dataset kopyasını yeniden oluşturun. |
+| Eksik Parquet/MP4 veya LFS pointer | İmajı `./dev.sh rebuild` ile yeniden oluşturun; build pinli fixture'ı LFS ile indirip doğrular. |
 | `No modality config registered` | Dataset tag, `meta/modality.json` ve modality config eşleşmiyor. İlk testte sabit SO100/`NEW_EMBODIMENT` üçlüsünü kullanın. |
 | Statistics/index hatası | Action alanını veya `delta_indices` değerini değiştirdiniz; statistics'i yeniden üretin. |
 | Batch/GPU bölünebilirlik hatası | Smoke için `--global-batch-size 2 --num-gpus 1` değerlerini koruyun. |

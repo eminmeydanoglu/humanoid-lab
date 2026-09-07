@@ -109,6 +109,19 @@ run_smoke() {
   "$SCRIPT" "$@"
 }
 
+run_smoke_with_image_fixture() {
+  PATH="$FAKE_BIN:$PATH" \
+  GROOT_SOURCE_DIR="$SOURCE" \
+  GROOT_PYTHON="${GROOT_PYTHON:-$(command -v python3)}" \
+  GROOT_JSON_PYTHON="${GROOT_JSON_PYTHON:-$(command -v python3)}" \
+  GROOT_MODEL_DIR="$MODEL" \
+  GROOT_DATASET_DIR='' \
+  GROOT_OUTPUT_ROOT="$OUTPUT_ROOT" \
+  GROOT_EXPECTED_SOURCE_COMMIT="$SOURCE_COMMIT" \
+  GROOT_SMOKE_SKIP_ENV_IMPORT=1 \
+  "$SCRIPT" "$@"
+}
+
 PIPELINE_OUTPUT="$TMP_ROOT/pipeline-output"
 expect_rc 0 "$TMP_ROOT/pipeline.log" run_smoke pipeline --dry-run --output-dir "$PIPELINE_OUTPUT"
 assert_file_contains "$PIPELINE_OUTPUT/command.sh" '--num-gpus 1' 'pipeline command pins one GPU'
@@ -121,6 +134,10 @@ assert_file_contains "$PIPELINE_OUTPUT/command.sh" '--skip-weight-loading' 'pipe
 assert_file_contains "$PIPELINE_OUTPUT/run.log" 'command:' 'pipeline persists a run log'
 assert_file_contains "$PIPELINE_OUTPUT/source_revision" "$SOURCE_COMMIT" 'pipeline persists the source revision'
 assert_file_contains "$PIPELINE_OUTPUT/model_provenance.json" '2fc962b973bccdd5d8ce4f67cc63b264d6886495' 'pipeline persists model provenance'
+
+IMAGE_FIXTURE_OUTPUT="$TMP_ROOT/image-fixture-output"
+expect_rc 0 "$TMP_ROOT/image-fixture.log" run_smoke_with_image_fixture pipeline --dry-run --output-dir "$IMAGE_FIXTURE_OUTPUT"
+assert_file_contains "$IMAGE_FIXTURE_OUTPUT/command.sh" "--dataset-path $DATASET" 'pipeline defaults to the image-contained demo fixture'
 
 PRETRAINED_OUTPUT="$TMP_ROOT/pretrained-output"
 expect_rc 3 "$TMP_ROOT/pretrained-blocked.log" run_smoke pretrained --dry-run --output-dir "$PRETRAINED_OUTPUT"

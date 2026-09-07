@@ -103,7 +103,6 @@ istemci bağlanabilir.
 ```bash
 ./dev.sh hf-login       # HF token host cache'ine yazilir (image'e/.env'e girmaz)
 ./dev.sh fetch-models            # pinli model revision'lari + MODEL_PROVENANCE.json (sha256)
-./dev.sh fetch-groot-demo-data   # GR00T demo verisini kalici data/datasets mount'una indirir
 ```
 
 Not: GR00T N1.7 backbone'u `nvidia/Cosmos-Reason2-2B` gated — once HF'de lisansi kabul et.

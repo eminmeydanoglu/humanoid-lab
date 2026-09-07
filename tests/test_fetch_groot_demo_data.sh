@@ -83,9 +83,11 @@ pass 'pinned demo dataset and provenance are stored under the persistent dataset
 grep -Fq "git -c http.version=HTTP/1.1 -C \"\$target\" fetch --depth=1 origin \"\$commit\"" "$ROOT/Dockerfile" || \
   fail 'Dockerfile must use the container-compatible pinned Git fetch transport'
 grep -Fq "git -C /opt/src/isaac-groot lfs pull --include 'demo_data/cube_to_bowl_5/**'" "$ROOT/Dockerfile" || \
-  fail 'Dockerfile must validate only the pinned GR00T demo fixture'
-grep -Fq "GIT_LFS_SKIP_SMUDGE=1 git -C /opt/src/isaac-groot checkout -- \"\$relative\"" "$ROOT/Dockerfile" || \
-  fail 'Dockerfile must restore the pointer-only GR00T source checkout'
-grep -Fq 'rm -rf /opt/src/isaac-groot/.git/lfs/objects' "$ROOT/Dockerfile" || \
-  fail 'Dockerfile must remove transient GR00T LFS objects'
-pass 'Docker build validates the fixture but restores a payload-free source checkout'
+  fail 'Dockerfile must materialize only the pinned GR00T demo fixture'
+grep -Fq "test \"\$(head -c 42 \"\$asset\")\" != 'version https://git-lfs.github.com/spec/v1'" "$ROOT/Dockerfile" || \
+  fail 'Dockerfile must reject unresolved LFS fixture assets'
+if grep -Fq 'GIT_LFS_SKIP_SMUDGE=1 git -C /opt/src/isaac-groot checkout' "$ROOT/Dockerfile" || \
+  grep -Fq 'rm -rf /opt/src/isaac-groot/.git/lfs/objects' "$ROOT/Dockerfile"; then
+  fail 'Dockerfile must retain the validated fixture payload in the final image'
+fi
+pass 'Docker build retains a validated, materialized GR00T fixture in the final image'

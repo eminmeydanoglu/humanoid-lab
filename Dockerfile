@@ -83,7 +83,7 @@ RUN set -eux; \
     mv /opt/assets/g1-mujoco-binary /opt/src/sonic/gear_sonic/data/robot_model/model_data/g1; \
     checkout https://github.com/NVIDIA/Isaac-GR00T.git "${ISAAC_GROOT_COMMIT}" /opt/src/isaac-groot; \
     git -C /opt/src/isaac-groot submodule update --init --recursive; \
-    # Verify the pinned fine-tuning fixture, then restore pointer-only source files. \
+    # Materialize and validate the pinned fine-tuning fixture in the final image. \
     git -C /opt/src/isaac-groot lfs pull --include 'demo_data/cube_to_bowl_5/**'; \
     groot_demo=/opt/src/isaac-groot/demo_data/cube_to_bowl_5; \
     test -f "$groot_demo/meta/modality.json"; \
@@ -92,16 +92,6 @@ RUN set -eux; \
       test -n "$asset"; \
       test "$(head -c 42 "$asset")" != 'version https://git-lfs.github.com/spec/v1'; \
     done; \
-    for pattern in '*.parquet' '*.mp4'; do \
-      find "$groot_demo" -type f -name "$pattern" -print; \
-    done | while IFS= read -r asset; do \
-      relative="${asset#/opt/src/isaac-groot/}"; \
-      rm "$asset"; \
-      GIT_LFS_SKIP_SMUDGE=1 git -C /opt/src/isaac-groot checkout -- "$relative"; \
-    done; \
-    rm -rf /opt/src/isaac-groot/.git/lfs/objects; \
-    test "$(head -c 42 "$(find "$groot_demo" -type f -name '*.mp4' -print -quit)")" = 'version https://git-lfs.github.com/spec/v1'; \
-    test -z "$(git -C /opt/src/isaac-groot status --porcelain)"; \
     test "$(git -C /opt/src/isaac-groot/external_dependencies/LIBERO rev-parse HEAD)" = 8f1084e3132a39270c3a13ebe37270a43ece2a01; \
     test "$(git -C /opt/src/isaac-groot/external_dependencies/SimplerEnv rev-parse HEAD)" = 8a2d286c926c1371927caa7651a412b4cc331756; \
     test "$(git -C /opt/src/isaac-groot/external_dependencies/robocasa rev-parse HEAD)" = d89d481ce9c76da7f179466981676e268aa842e5; \
