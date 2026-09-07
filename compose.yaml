@@ -6,7 +6,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      network: host
       args:
         ISAAC_SIM_IMAGE: ${ISAAC_SIM_IMAGE:-nvcr.io/nvidia/isaac-sim}
         ISAAC_SIM_TAG: ${ISAAC_SIM_TAG:-5.1.0}

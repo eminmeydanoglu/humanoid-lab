@@ -62,7 +62,7 @@ RUN set -eux; \
       url="$1"; commit="$2"; target="$3"; \
       git init "$target"; \
       git -C "$target" remote add origin "$url"; \
-      git -C "$target" fetch --depth=1 origin "$commit"; \
+      git -c http.version=HTTP/1.1 -C "$target" fetch --depth=1 origin "$commit"; \
       git -C "$target" checkout --detach FETCH_HEAD; \
       test "$(git -C "$target" rev-parse HEAD)" = "$commit"; \
       test -z "$(git -C "$target" status --porcelain)"; \
