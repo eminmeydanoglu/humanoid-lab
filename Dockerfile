@@ -96,7 +96,7 @@ FROM sources AS dev
 COPY locks/ /opt/locks/
 COPY containers/bootstrap-venvs.sh containers/entrypoint.sh containers/shell.sh containers/isaac-sim-env.sh containers/cyclonedds-sim.xml /opt/humanoid-lab/
 COPY patches/sonic-sim-dds-isolation.patch /opt/humanoid-lab/
-COPY scripts/smoke-test.sh /opt/humanoid-lab/smoke-test.sh
+COPY scripts/smoke-test.sh scripts/fetch-groot-demo-data.sh scripts/groot-finetune-smoke.sh /opt/humanoid-lab/
 
 RUN set -eux; \
     git -C /opt/src/sonic apply --check /opt/humanoid-lab/sonic-sim-dds-isolation.patch; \

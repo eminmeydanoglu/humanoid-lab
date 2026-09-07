@@ -172,6 +172,10 @@ case "${1:-}" in
     up_once
     DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && /opt/humanoid-lab/smoke-test.sh'
     ;;
+  groot-finetune-smoke)
+    up_once
+    DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-groot && exec /opt/humanoid-lab/groot-finetune-smoke.sh "$@"' groot-finetune-smoke "${@:2}"
+    ;;
   sync)
     up_once
     DC exec -T dev /opt/humanoid-lab/bootstrap-venvs.sh
@@ -179,6 +183,10 @@ case "${1:-}" in
   fetch-models)
     up_once
     DC exec dev bash -lc "source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && scripts/fetch-models.sh"
+    ;;
+  fetch-groot-demo-data)
+    up_once
+    DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-groot && exec /opt/humanoid-lab/fetch-groot-demo-data.sh "$@"' fetch-groot-demo-data "${@:2}"
     ;;
   hf-login)
     up_once
@@ -200,7 +208,7 @@ case "${1:-}" in
     exit 2
     ;;
   *)
-    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|doctor|smoke|sync|fetch-models|hf-login|stop|rebuild|foxy]" >&2
+    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|doctor|smoke|groot-finetune-smoke|sync|fetch-models|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
     exit 2
     ;;
 esac

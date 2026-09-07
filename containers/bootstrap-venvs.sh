@@ -91,6 +91,16 @@ sync_sonic_sim() {
   record_current "$name" "$current"
 }
 
+remove_unusable_groot_deepspeed() {
+  local python="$VENV_ROOT/groot-n17/bin/python"
+  if "$python" -c 'import importlib.metadata; importlib.metadata.version("deepspeed")' >/dev/null 2>&1; then
+    # Accelerate imports an installed DeepSpeed package even when the GR00T
+    # single-GPU launcher does not select DeepSpeed. This Isaac Sim runtime has
+    # no CUDA toolkit/nvcc, so DeepSpeed 0.17.6 fails during that import.
+    uv pip uninstall --python "$python" deepspeed
+  fi
+}
+
 sync_groot() {
   local name=groot-n17
   local lockfile=/opt/src/isaac-groot/uv.lock
@@ -98,12 +108,14 @@ sync_groot() {
   current="$(fingerprint "$lockfile" /opt/src/isaac-groot)"
   if is_current "$name" "$current"; then
     echo "[venv] $name: lock and sources unchanged"
+    remove_unusable_groot_deepspeed
     return
   fi
 
   echo "[venv] $name: provisioning lock-pinned environment"
   uv venv --allow-existing --python 3.12 "$VENV_ROOT/$name"
   UV_PROJECT_ENVIRONMENT="$VENV_ROOT/$name" uv sync --frozen --no-dev --project /opt/src/isaac-groot
+  remove_unusable_groot_deepspeed
   "$VENV_ROOT/$name/bin/python" -c 'import flash_attn, gr00t, torch; assert torch.__version__.startswith("2.9.0")'
   record_current "$name" "$current"
 }

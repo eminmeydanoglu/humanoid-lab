@@ -23,7 +23,8 @@ Docker/NVIDIA toolkit kurulu degilse `setup.sh` lock'taki birebir versiyonlarla 
 ./dev.sh sonic-sim  # sonic-sim env    : Python 3.11, MuJoCo + G1
 ./dev.sh groot      # groot-n17 env    : Python 3.12, Isaac-GR00T N1.7
 ./dev.sh doctor     # host + container validation raporu
-./dev.sh smoke      # container icinde smoke testler
+./dev.sh smoke      # container icinde normal smoke testler
+./dev.sh groot-finetune-smoke pipeline  # istege bagli GR00T iki-adim egitim hatti smoke testi
 ./dev.sh rebuild    # image'i ayni lock ile yeniden build et
 ./dev.sh stop       # container'i durdur (veriler kalir)
 ```
@@ -101,10 +102,13 @@ istemci bağlanabilir.
 
 ```bash
 ./dev.sh hf-login       # HF token host cache'ine yazilir (image'e/.env'e girmaz)
-./dev.sh fetch-models   # pinli revision'lar + MODEL_PROVENANCE.json (sha256)
+./dev.sh fetch-models            # pinli model revision'lari + MODEL_PROVENANCE.json (sha256)
+./dev.sh fetch-groot-demo-data   # GR00T demo verisini kalici data/datasets mount'una indirir
 ```
 
 Not: GR00T N1.7 backbone'u `nvidia/Cosmos-Reason2-2B` gated — once HF'de lisansi kabul et.
+
+GR00T veri formati, embodiment config'i, iki-adim `pipeline` / `pretrained` / `eval` smoke komutlari ve 40 GiB VRAM siniri icin [GR00T N1.7 fine-tuning rehberine](docs/groot-n17-finetuning.md) bak. Bu GPU/data maliyetli akıs `setup.sh` ve normal `./dev.sh smoke` icinde otomatik calismaz.
 
 ## 4. Dogrulama / tanalama
 
