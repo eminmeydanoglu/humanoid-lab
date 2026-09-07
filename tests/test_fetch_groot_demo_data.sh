@@ -84,13 +84,13 @@ grep -Fq "git -c http.version=HTTP/1.1 -C \"\$target\" fetch --depth=1 origin \"
   fail 'Dockerfile must use the container-compatible pinned Git fetch transport'
 grep -Fq 'COPY scripts/validate-groot-demo-fixture.sh /opt/humanoid-lab/' "$ROOT/Dockerfile" || \
   fail 'Dockerfile must copy the shared fixture validator before the source build stage'
-grep -Fq '/opt/humanoid-lab/validate-groot-demo-fixture.sh "$groot_demo"' "$ROOT/Dockerfile" || \
+grep -Fq "/opt/humanoid-lab/validate-groot-demo-fixture.sh \"\$groot_demo\"" "$ROOT/Dockerfile" || \
   fail 'Dockerfile must invoke the shared fixture validator after the LFS pull'
 grep -Fq 'validate_dataset() {' "$ROOT/scripts/fetch-groot-demo-data.sh" || \
   fail 'fetcher must retain its fixture validation path'
-grep -Fq '"$FIXTURE_VALIDATOR" "$1"' "$ROOT/scripts/fetch-groot-demo-data.sh" || \
+grep -Fq "\"\$FIXTURE_VALIDATOR\" \"\$1\"" "$ROOT/scripts/fetch-groot-demo-data.sh" || \
   fail 'fetcher must invoke the shared fixture validator'
-grep -Fq '"$FIXTURE_VALIDATOR" "$DATASET_DIR"' "$ROOT/scripts/groot-finetune-smoke.sh" || \
+grep -Fq "\"\$FIXTURE_VALIDATOR\" \"\$DATASET_DIR\"" "$ROOT/scripts/groot-finetune-smoke.sh" || \
   fail 'smoke script must invoke the shared fixture validator'
 if grep -Fq 'GIT_LFS_SKIP_SMUDGE=1 git -C /opt/src/isaac-groot checkout' "$ROOT/Dockerfile" || \
   grep -Fq 'rm -rf /opt/src/isaac-groot/.git/lfs/objects' "$ROOT/Dockerfile"; then
