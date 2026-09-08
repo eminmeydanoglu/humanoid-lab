@@ -16,7 +16,7 @@ pids=()
 cleanup() {
   local pid
   for pid in "${pids[@]:-}"; do kill "$pid" 2>/dev/null || true; done
-  docker exec "$container" pkill -f 'run_gr00t_server.py.*56111|cloudwalk-vla-worker.py.*56111|sonic-closed-loop-native' 2>/dev/null || true
+  docker exec "$container" pkill -f 'run-cloudwalk-isaac.py.*--headless.*--closed-loop|run_gr00t_server.py.*56111|cloudwalk-vla-worker.py.*56111|sonic-closed-loop-native' 2>/dev/null || true
   wait "${pids[@]:-}" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM HUP
