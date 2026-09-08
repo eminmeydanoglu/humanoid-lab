@@ -81,6 +81,18 @@ def _safe_reference() -> SafeReference:
     return SafeReference(V4Action(token, (0.0,) * 7, (0.0,) * 7), "34bae8570d4a4421a5391a5c2befd745d4a02d182ec539e5f9da44c091c67509", "recorded-upstream-sonic-initial-poses.py@a0732b642c0333077e127a2f56ab0014c196bca4")
 
 
+def _open_head_camera_panel() -> object:
+    from omni import ui
+    from omni.kit.viewport.utility import create_viewport_window
+
+    panel = create_viewport_window(name="G1 Head Camera (GR00T RGB)", width=480, height=360, position_x=0, position_y=0)
+    panel.viewport_api.camera_path = "/World/envs/env_0/Robot/pelvis/head_camera"
+    dockspace = ui.Workspace.get_window("DockSpace")
+    if dockspace is not None:
+        panel.dock_in(dockspace, ui.DockPosition.RIGHT)
+    return panel
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
@@ -106,6 +118,8 @@ def main() -> int:
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
     _enable_required_camera(args)
+    if args.interactive:
+        args.kit_args = " ".join((args.kit_args, "--enable omni.anim.window.timeline --/exts/omni.anim.window.timeline/show=true")).strip()
     if args.checkpoint_revision != CHECKPOINT_REVISION:
         _fail("checkpoint revision is not the verified CloudWalk checkpoint revision")
     if args.interactive and args.closed_loop:
@@ -336,7 +350,8 @@ def main() -> int:
 
             timeline = omni.timeline.get_timeline_interface()
             timeline.stop()
-            print(json.dumps({"event": "interactive_ready", "physics": "free_base_gravity_enabled", "instruction": "Press Timeline Play to begin PhysX stepping; do not alter stage topology after Play."}, sort_keys=True), flush=True)
+            head_camera_panel = _open_head_camera_panel()
+            print(json.dumps({"event": "interactive_ready", "physics": "free_base_gravity_enabled", "head_camera_panel": "G1 Head Camera (GR00T RGB)", "instruction": "Press Timeline Play to begin PhysX stepping; do not alter stage topology after Play."}, sort_keys=True), flush=True)
             while simulation_app.is_running():
                 if timeline.is_playing():
                     robot.set_joint_position_target(standing_targets)

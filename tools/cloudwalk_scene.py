@@ -113,7 +113,7 @@ def make_scene_cfg(config: dict[str, Any], robot_cfg: Any) -> Any:
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(max_depenetration_velocity=1.0),
                 collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.003, rest_offset=0.0),
                 mass_props=sim_utils.MassPropertiesCfg(mass=bottle_data["mass_kg"]), physics_material=bottle_material,
-                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.02, 0.09, 0.12), opacity=0.02, roughness=0.18),
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=tuple(bottle_data["water_color_srgb"]), opacity=0.82, roughness=0.24),
             ),
         )
         key = AssetBaseCfg(
@@ -188,7 +188,7 @@ def decorate_scene(config: dict[str, Any]) -> None:
         stage, "/World/Looks/WarmGlossWood", tuple(config["table"]["wood_color_srgb"]),
         config["table"]["roughness"], texture=wood_texture,
     )
-    glass = _preview_material(stage, "/World/Looks/BottleGlass", (0.10, 0.34, 0.48), 0.08, 0.36, 1.49)
+    glass = _preview_material(stage, "/World/Looks/BottleGlass", (0.10, 0.34, 0.48), 0.08, 0.82, 1.49)
     water = _preview_material(stage, "/World/Looks/BlueWater", tuple(config["bottle"]["water_color_srgb"]), 0.05, 0.48, 1.333)
     black = _preview_material(stage, "/World/Looks/CapPlastic", (0.006, 0.008, 0.009), 0.18)
     metal = _preview_material(stage, "/World/Looks/TableLegMetal", (0.055, 0.065, 0.07), 0.22)

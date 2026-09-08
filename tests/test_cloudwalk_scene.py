@@ -31,7 +31,7 @@ class CloudWalkSceneContractTests(unittest.TestCase):
     def test_scene_uses_rtx_pbr_room_and_compound_bottle(self):
         source = (ROOT / "tools" / "cloudwalk_scene.py").read_text()
         self.assertEqual(self.config["render"]["renderer"], "RayTracedLighting")
-        for token in ("UsdPreviewSurface", "BottleGlass", "BlueWater", "CapPlastic", "DiskLightCfg", "DomeLightCfg", "BackWall", "WarmGlossWood", "root_joint", "GetJointEnabledAttr", "ArticulationRootAPI.Apply(pelvis)"):
+        for token in ("UsdPreviewSurface", "BottleGlass", "BlueWater", "CapPlastic", "opacity=0.82", "DiskLightCfg", "DomeLightCfg", "BackWall", "WarmGlossWood", "root_joint", "GetJointEnabledAttr", "ArticulationRootAPI.Apply(pelvis)"):
             self.assertIn(token, source)
         self.assertNotIn("GroundPlaneCfg", source)
         self.assertTrue((ROOT / "configs" / "cloudwalk_wood.png").is_file())
@@ -46,6 +46,8 @@ class CloudWalkSceneContractTests(unittest.TestCase):
         self.assertIn("configure_g1_free_base_articulation()", runner)
         self.assertIn("--interactive", runner)
         self.assertIn("timeline.is_playing()", runner)
+        self.assertIn("omni.anim.window.timeline", runner)
+        self.assertIn("G1 Head Camera (GR00T RGB)", runner)
         self.assertIn("immutable_after_reset", runner)
         self.assertNotIn("class CloudWalkSceneCfg", runner)
 
