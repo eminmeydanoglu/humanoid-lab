@@ -41,20 +41,33 @@ def discover_nucleus_assets() -> dict[str, Any]:
     return {"available": bool(discovered), "roots": discovered}
 
 
-def release_g1_fixed_root() -> None:
-    """Disable the fixed joint authored by the upstream Inspire USD before PhysX parses it."""
+def configure_g1_free_base_articulation() -> None:
+    """Move the Inspire USD's articulation root from its disabled world joint to pelvis."""
     import omni.usd
-    from pxr import UsdPhysics
+    from pxr import PhysxSchema, UsdPhysics
 
     stage = omni.usd.get_context().get_stage()
-    path = "/World/envs/env_0/Robot/root_joint"
-    joint = UsdPhysics.Joint(stage.GetPrimAtPath(path))
-    if not joint:
-        raise RuntimeError(f"CloudWalk free-base USD override cannot find {path}")
-    enabled = joint.GetJointEnabledAttr()
-    if not enabled:
-        raise RuntimeError(f"CloudWalk free-base USD override cannot author {path}:physics:jointEnabled")
-    enabled.Set(False)
+    root_joint_path = "/World/envs/env_0/Robot/root_joint"
+    root_joint_prim = stage.GetPrimAtPath(root_joint_path)
+    root_joint = UsdPhysics.Joint(root_joint_prim)
+    pelvis = stage.GetPrimAtPath("/World/envs/env_0/Robot/pelvis")
+    if not root_joint or not pelvis:
+        raise RuntimeError("CloudWalk free-base USD override cannot find root_joint and pelvis")
+    root_joint.GetJointEnabledAttr().Set(False)
+    source_api = PhysxSchema.PhysxArticulationAPI(root_joint_prim)
+    source_attributes = {
+        name: root_joint_prim.GetAttribute(name).Get()
+        for name in source_api.GetSchemaAttributeNames()
+        if root_joint_prim.GetAttribute(name)
+    }
+    root_joint_prim.RemoveAPI(UsdPhysics.ArticulationRootAPI)
+    root_joint_prim.RemoveAPI(PhysxSchema.PhysxArticulationAPI)
+    UsdPhysics.ArticulationRootAPI.Apply(pelvis)
+    pelvis_api = PhysxSchema.PhysxArticulationAPI.Apply(pelvis)
+    for name, value in source_attributes.items():
+        pelvis.GetAttribute(name).Set(value)
+    if not UsdPhysics.ArticulationRootAPI(pelvis) or PhysxSchema.PhysxArticulationAPI(root_joint_prim):
+        raise RuntimeError("CloudWalk free-base USD override did not move the articulation root to pelvis")
 
 
 def make_scene_cfg(config: dict[str, Any], robot_cfg: Any) -> Any:
