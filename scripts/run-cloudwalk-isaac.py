@@ -158,6 +158,8 @@ def main() -> int:
         if set(body_joint_names) != set(G1_BODY_JOINTS):
             _fail(f"Isaac body DOFs differ from the pinned SONIC names: {body_joint_names}")
         default_pos, default_vel = robot.data.default_joint_pos.clone(), robot.data.default_joint_vel.clone()
+        initial_root_pos = tuple(float(value) for value in robot.data.root_pos_w[0].tolist())
+        initial_root_quat = tuple(float(value) for value in robot.data.root_quat_w[0].tolist())
         # This ordering is shared by the upstream SONIC decoder and the free-base initial pose.
         body_ids = torch.tensor([robot.joint_names.index(name) for name in G1_BODY_JOINTS], device=default_pos.device)
         inspire_ids = torch.tensor([robot.joint_names.index(name) for name in INSPIRE_HAND_JOINTS], device=default_pos.device)
@@ -347,6 +349,20 @@ def main() -> int:
                 robot.set_joint_position_target(standing_targets)
                 scene.write_data_to_sim(); sim.step(); scene.update(sim.get_physics_dt())
             events.append("scene_only")
+        final_root_pos = tuple(float(value) for value in robot.data.root_pos_w[0].tolist())
+        final_root_quat = tuple(float(value) for value in robot.data.root_quat_w[0].tolist())
+        final_root_linear_velocity = tuple(float(value) for value in robot.data.root_lin_vel_w[0].tolist())
+        # The world-space Z component of the pelvis' local Z axis detects a fall without assuming heading.
+        _, root_x, root_y, root_z = final_root_quat
+        pelvis_up_z = 1.0 - 2.0 * (root_x * root_x + root_y * root_y)
+        motion_observation = {
+            "initial_root_pos_w": initial_root_pos,
+            "initial_root_quat_wxyz": initial_root_quat,
+            "final_root_pos_w": final_root_pos,
+            "final_root_quat_wxyz": final_root_quat,
+            "final_root_linear_velocity_w": final_root_linear_velocity,
+            "pelvis_up_z": pelvis_up_z,
+        }
         lifecycle.pause()
         lifecycle.stop()
         lifecycle.reset()
@@ -375,7 +391,7 @@ def main() -> int:
         if args.video_path is not None and video_frames:
             args.video_path.parent.mkdir(parents=True, exist_ok=True)
             iio.imwrite(args.video_path, video_frames, fps=10, codec="libx264")
-        result = {"asset_cfg": "CLOUDWALK_G1_INSPIRE_FTP_FREE_BASE_CFG", "usd": "Robots/Unitree/G1/g1_29dof_inspire_hand.usd", "joints": robot.num_joints, "bodies": robot.num_bodies, "camera_shape": list(rgb.shape), "capture": str(args.capture_path), "events": events, "prompt": PROMPT, "embodiment": EMBODIMENT, "scene_config": str(args.scene_config), "scene_parameters": {"table_height_m": scene_config["table"]["size_m"][2], "table_position": scene_config["table"]["position_m"], "bottle_position": scene_config["bottle"]["position_m"], "bottle_height_m": scene_config["bottle"]["height_m"], "camera_focal_length_mm": scene_config["camera"]["focal_length_mm"]}, "physics": {"root_fixed": False, "gravity_enabled": True, "stage_topology": "immutable_after_reset", "mode": "interactive" if args.interactive else "batch"}, "isaac_target_dofs": {"body": list(body_joint_names), "inspire": list(INSPIRE_HAND_JOINTS)}, "vla_connection": "upstream_policy_native_sonic_connected" if args.closed_loop else "not_connected", "hand_application": "verified_24_joint_normalized_mapper" if args.closed_loop else "scene_only", "rollout_metrics": rollout_metrics}
+        result = {"asset_cfg": "CLOUDWALK_G1_INSPIRE_FTP_FREE_BASE_CFG", "usd": "Robots/Unitree/G1/g1_29dof_inspire_hand.usd", "joints": robot.num_joints, "bodies": robot.num_bodies, "camera_shape": list(rgb.shape), "capture": str(args.capture_path), "events": events, "prompt": PROMPT, "embodiment": EMBODIMENT, "scene_config": str(args.scene_config), "scene_parameters": {"table_height_m": scene_config["table"]["size_m"][2], "table_position": scene_config["table"]["position_m"], "bottle_position": scene_config["bottle"]["position_m"], "bottle_height_m": scene_config["bottle"]["height_m"], "camera_focal_length_mm": scene_config["camera"]["focal_length_mm"]}, "physics": {"root_fixed": False, "gravity_enabled": True, "stage_topology": "immutable_after_reset", "mode": "interactive" if args.interactive else "batch"}, "isaac_target_dofs": {"body": list(body_joint_names), "inspire": list(INSPIRE_HAND_JOINTS)}, "vla_connection": "upstream_policy_native_sonic_connected" if args.closed_loop else "not_connected", "hand_application": "verified_24_joint_normalized_mapper" if args.closed_loop else "scene_only", "motion_observation": motion_observation, "rollout_metrics": rollout_metrics}
         # Flush before close(): Kit's teardown can discard buffered stdout.
         print(json.dumps(result, sort_keys=True), flush=True)
         _exit_code[0] = 0
