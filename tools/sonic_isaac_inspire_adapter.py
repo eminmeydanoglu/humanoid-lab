@@ -218,16 +218,22 @@ class InspireFTPGripMapper:
             raise ContractError("CloudWalk hand closures must be normalized to [0,1]")
         return tuple(values[name] for name in INSPIRE_HAND_JOINTS)
 
-    def targets(self, action: V4Action, joint_limits: Sequence[tuple[float, float]]) -> tuple[float, ...]:
+    def targets(self, action: V4Action, joint_limits: Sequence[tuple[float, float]], open_positions: Sequence[float] | None = None) -> tuple[float, ...]:
         normalized = self.normalized_targets(action)
         if len(joint_limits) != INSPIRE_HAND_JOINT_COUNT:
             raise ContractError("Inspire joint limits must cover exactly 24 articulation joints")
+        opens = (0.0,) * INSPIRE_HAND_JOINT_COUNT if open_positions is None else _finite_tuple(open_positions, INSPIRE_HAND_JOINT_COUNT, "Inspire open positions")
         targets = []
-        for name, closure, limits in zip(INSPIRE_HAND_JOINTS, normalized, joint_limits, strict=True):
+        for name, closure, limits, opened in zip(INSPIRE_HAND_JOINTS, normalized, joint_limits, opens, strict=True):
             lower, upper = _finite_tuple(limits, 2, f"limits for {name}")
             if lower >= upper:
                 raise ContractError(f"invalid joint limits for {name}")
-            targets.append(lower + closure * (upper - lower))
+            opened = min(max(opened, lower), upper)
+            if name == "R_thumb_proximal_yaw_joint":
+                closed = upper
+            else:
+                closed = lower if opened - lower >= upper - opened else upper
+            targets.append(opened + closure * (closed - opened))
         return tuple(targets)
 
 

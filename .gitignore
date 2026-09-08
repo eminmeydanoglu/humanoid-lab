@@ -15,7 +15,12 @@ __pycache__/
 *.pyc
 # yerel tanalama
 diagnostics/
+outputs/
 *.local.json
+
+# yerel görsel referanslar ve tek seferlik ortam sorguları
+cloud-walk-model/
+check_env.py
 # editor / OS
 .DS_Store
 *.swp

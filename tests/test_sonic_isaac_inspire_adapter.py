@@ -29,11 +29,15 @@ class AdapterTests(unittest.TestCase):
             mapper.normalized_targets(closures)
         mapper = InspireFTPGripMapper(True, True)
         limits = tuple((-1.0, 1.0) for _ in INSPIRE_HAND_JOINTS)
-        mapped = dict(zip(INSPIRE_HAND_JOINTS, mapper.targets(closures, limits)))
-        self.assertEqual(mapped["L_thumb_proximal_yaw_joint"], -1.0)
-        self.assertEqual(mapped["L_index_proximal_joint"], -0.4)
-        self.assertAlmostEqual(mapped["L_ring_intermediate_joint"], 0.2)
-        self.assertEqual(mapped["R_thumb_distal_joint"], 0.8)
+        # Closure is measured from the asset's observed open pose, not from a
+        # guessed URDF limit.  A zero CloudWalk channel must preserve that pose.
+        open_positions = (0.0,) * len(INSPIRE_HAND_JOINTS)
+        mapped = dict(zip(INSPIRE_HAND_JOINTS, mapper.targets(closures, limits, open_positions)))
+        self.assertEqual(mapped["L_thumb_proximal_yaw_joint"], 0.0)
+        self.assertAlmostEqual(mapped["L_index_proximal_joint"], -0.3)
+        self.assertAlmostEqual(mapped["L_ring_intermediate_joint"], -0.6)
+        self.assertEqual(mapped["R_thumb_proximal_yaw_joint"], 0.7)
+        self.assertAlmostEqual(mapped["R_thumb_distal_joint"], -0.9)
         self.assertEqual(len(mapped), 24)
 
     def test_hand_mapping_rejects_non_normalized_values_and_incomplete_limits(self):

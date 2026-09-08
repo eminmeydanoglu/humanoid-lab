@@ -109,7 +109,43 @@ Not: GR00T N1.7 backbone'u `nvidia/Cosmos-Reason2-2B` gated — once HF'de lisan
 
 GR00T veri formati, embodiment config'i, iki-adim `pipeline` / `pretrained` / `eval` smoke komutlari ve 40 GiB VRAM siniri icin [GR00T N1.7 fine-tuning rehberine](docs/groot-n17-finetuning.md) bak. Bu GPU/data maliyetli akıs `setup.sh` ve normal `./dev.sh smoke` icinde otomatik calismaz.
 
-## 4. Dogrulama / tanalama
+## 4. CloudWalk GR00T + SONIC + Isaac
+
+Bu yol yalnız Raider'da çalıştırılır. `scripts/run-cloudwalk-isaac.py` aynı dataset-kalibre scene builder'ını iki modda kullanır:
+
+```text
+interactive GUI: paused scene → Timeline Play → free-base PhysX
+headless rollout: Isaac RGB/state → GR00T → SONIC C++ → Isaac G1 + Inspire FTP
+```
+
+G1, `g1_29dof_inspire_hand.usd` asset'i ile 29 gövde ve 24 Inspire el eklemi olarak kurulur. CloudWalk modunda root serbesttir ve gravity açıktır; upstream asset'in fixed-base manipülasyon varsayımları kullanılmaz. Masa, bottle, oda ve görsel child primleri `sim.reset()`ten önce author edilir. Physics başladıktan sonra USD topology'sini GUI'den değiştirme; bottle/table pose'unu komut satırından değiştirip oturumu yeniden başlat.
+
+GUI'de sahneyi açmak için:
+
+```bash
+ssh raider
+cd ~/code/humanoid-lab
+docker exec -it humanoid-lab-dev bash -lc '
+  source /opt/humanoid-lab/entrypoint.sh
+  use-isaac-sonic
+  exec /opt/venvs/isaac-sonic/bin/python \
+    /workspace/humanoid-lab/scripts/run-cloudwalk-isaac.py \
+    --interactive \
+    --capture-path /workspace/humanoid-lab/outputs/cloudwalk-gui.jpg
+'
+```
+
+Scene Timeline'da paused başlar. Play ile gravity ve serbest-root PhysX çalışır. `--bottle-position X Y Z`, `--table-position X Y Z` ve `--table-size X Y Z` yalnız başlangıç scene config'ini değiştirir. Yeni değer için uygulamayı kapatıp yeniden başlat.
+
+Headless closed-loop koşusu dört ayrı süreç başlatır: upstream GR00T server, VLA worker, native SONIC decoder ve Isaac owner. Varsayılan başlatıcı:
+
+```bash
+./scripts/run-cloudwalk-closed-loop.sh
+```
+
+Koşu sırasında GR00T yüklenene kadar doğrulanmış SONIC standing reference gönderilir; böylece serbest taban cold-start sırasında kontrolsüz bırakılmaz. `outputs/` Git dışında runtime kanıt dizinidir. Kod yolu ve sözleşmeler: `tools/cloudwalk_scene.py`, `tools/cloudwalk_closed_loop.py`, `tools/sonic_isaac_inspire_adapter.py`, `scripts/cloudwalk-vla-worker.py`, `scripts/run-cloudwalk-isaac.py`.
+
+## 5. Dogrulama / tanalama
 
 ```bash
 ./doctor.sh                 # host'tan tam rapor (${HUMANOID_DATA_ROOT}/diagnostics/)
@@ -117,7 +153,7 @@ GR00T veri formati, embodiment config'i, iki-adim `pipeline` / `pretrained` / `e
 ./scripts/ci-lint.sh        # bash/python/yaml statik kontroller
 ```
 
-## 5. Container icinde environment secicileri
+## 6. Container icinde environment secicileri
 
 ```bash
 use-isaac-sonic | use-sonic-sim | use-groot | use-none

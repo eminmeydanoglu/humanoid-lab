@@ -18,9 +18,30 @@
 
 namespace {
 constexpr size_t kBody = 29, kState = 93, kHistory = 10, kToken = 64;
-constexpr size_t kDecoderInput = kState * kHistory + kToken;
+constexpr size_t kDecoderInput = kToken + kState * kHistory;
+constexpr size_t kAngularOffset = kToken;
+constexpr size_t kPositionOffset = kAngularOffset + 3 * kHistory;
+constexpr size_t kVelocityOffset = kPositionOffset + kBody * kHistory;
+constexpr size_t kLastActionOffset = kVelocityOffset + kBody * kHistory;
+constexpr size_t kGravityOffset = kLastActionOffset + kBody * kHistory;
 constexpr std::array<char, 5> kStateMagic = {'C','W','S','T','1'};
 constexpr std::array<char, 5> kBodyMagic = {'C','W','B','D','1'};
+// Exact SONIC policy_parameters.hpp constants: decoder is IsaacLab-order action,
+// while Isaac target application below consumes the hardware/MuJoCo order.
+constexpr std::array<int, kBody> kIsaacLabToMujoco = {0, 3, 6, 9, 13, 17, 1, 4, 7, 10, 14, 18, 2, 5, 8, 11, 15, 19, 21, 23, 25, 27, 12, 16, 20, 22, 24, 26, 28};
+constexpr std::array<double, kBody> kDefaultAngles = {-0.312, 0.0, 0.0, 0.669, -0.363, 0.0, -0.312, 0.0, 0.0, 0.669, -0.363, 0.0, 0.0, 0.0, 0.0, 0.2, 0.2, 0.0, 0.6, 0.0, 0.0, 0.0, 0.2, -0.2, 0.0, 0.6, 0.0, 0.0, 0.0};
+constexpr double kNaturalFrequency = 10.0 * 2.0 * 3.1415926535;
+constexpr double kScale5020 = 0.25 * 25.0 / (0.003609725 * kNaturalFrequency * kNaturalFrequency);
+constexpr double kScale752014 = 0.25 * 88.0 / (0.010177520 * kNaturalFrequency * kNaturalFrequency);
+constexpr double kScale752022 = 0.25 * 139.0 / (0.025101925 * kNaturalFrequency * kNaturalFrequency);
+constexpr double kScale4010 = 0.25 * 5.0 / (0.00425 * kNaturalFrequency * kNaturalFrequency);
+constexpr std::array<double, kBody> kActionScale = {kScale752022, kScale752022, kScale752014, kScale752022, kScale5020, kScale5020, kScale752022, kScale752022, kScale752014, kScale752022, kScale5020, kScale5020, kScale752014, kScale5020, kScale5020, kScale5020, kScale5020, kScale5020, kScale5020, kScale5020, kScale4010, kScale4010, kScale5020, kScale5020, kScale5020, kScale5020, kScale5020, kScale4010, kScale4010};
+
+std::array<float, kBody> upstream_targets(const std::array<float, kBody>& action) {
+  std::array<float, kBody> target{};
+  for (size_t i = 0; i < kBody; ++i) target[i] = static_cast<float>(kDefaultAngles[i] + action[kIsaacLabToMujoco[i]] * kActionScale[i]);
+  return target;
+}
 
 const char* required_env(const char* name) {
   const char* value = std::getenv(name);
@@ -92,19 +113,30 @@ int main() {
       const uint64_t sequence = static_cast<uint64_t>(frame_index), received_at = now_ns(), received_count = ++action_count;
       event("native_action_receive", sequence, received_at, received_count);
       std::array<float, kDecoderInput> input{};
+      std::memcpy(input.data(), fields[0].data, kToken * sizeof(float));
       { std::lock_guard<std::mutex> lock(state_mutex);
         if (state_count < kHistory || received_at - state_time > 100000000ULL) { event("native_action_hold", sequence, received_at, state_count); return; }
-        std::copy(history.begin(), history.end(), input.begin()); }
-      std::memcpy(input.data() + kState * kHistory, fields[0].data, kToken * sizeof(float));
+        for (size_t frame = 0; frame < kHistory; ++frame) {
+          const float* state = history.data() + frame * kState;
+          std::copy_n(state, 3, input.data() + kAngularOffset + frame * 3);
+          std::copy_n(state + 3, kBody, input.data() + kPositionOffset + frame * kBody);
+          std::copy_n(state + 32, kBody, input.data() + kVelocityOffset + frame * kBody);
+          std::copy_n(state + 61, kBody, input.data() + kLastActionOffset + frame * kBody);
+          std::copy_n(state + 90, 3, input.data() + kGravityOffset + frame * 3);
+        }
+      }
       const uint64_t started = now_ns(); event("native_decoder_invoke", sequence, started, ++decoder_count);
-      const auto command = decoder.run(input);
-      std::array<char, 5 + 8 + 8 + 4 * kBody> packet{};
+      const auto raw_action = decoder.run(input);
+      const auto command = upstream_targets(raw_action);
+      std::array<char, 5 + 8 + 8 + 4 * kBody * 2> packet{};
       std::copy(kBodyMagic.begin(), kBodyMagic.end(), packet.begin()); write_u64(packet.data() + 5, sequence); write_u64(packet.data() + 13, now_ns());
-      std::memcpy(packet.data() + 21, command.data(), kBody * sizeof(float)); body_socket.send(zmq::buffer(packet), zmq::send_flags::none);
+      std::memcpy(packet.data() + 21, command.data(), kBody * sizeof(float));
+      std::memcpy(packet.data() + 21 + kBody * sizeof(float), raw_action.data(), kBody * sizeof(float));
+      body_socket.send(zmq::buffer(packet), zmq::send_flags::none);
       event("native_body_publish", sequence, now_ns(), ++body_count);
     });
     if (!actions.Connect()) throw std::runtime_error("upstream SONIC action subscriber connection failed");
-    std::cout << "{\"event\":\"native_ready\",\"decoder_input\":994,\"decoder_output\":29,\"protocol\":\"v4\"}" << std::endl;
+    std::cout << "{\"event\":\"native_ready\",\"decoder_input\":994,\"decoder_output\":29,\"token_source\":\"external_groot_encoder_bypass\",\"protocol\":\"v4\"}" << std::endl;
     for (;;) actions.PollOnce();
   } catch (const std::exception& error) { std::cerr << "FAIL " << error.what() << std::endl; return 1; }
 }
