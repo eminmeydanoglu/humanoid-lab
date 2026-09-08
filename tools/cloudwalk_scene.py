@@ -41,6 +41,22 @@ def discover_nucleus_assets() -> dict[str, Any]:
     return {"available": bool(discovered), "roots": discovered}
 
 
+def release_g1_fixed_root() -> None:
+    """Disable the fixed joint authored by the upstream Inspire USD before PhysX parses it."""
+    import omni.usd
+    from pxr import UsdPhysics
+
+    stage = omni.usd.get_context().get_stage()
+    path = "/World/envs/env_0/Robot/root_joint"
+    joint = UsdPhysics.Joint(stage.GetPrimAtPath(path))
+    if not joint:
+        raise RuntimeError(f"CloudWalk free-base USD override cannot find {path}")
+    enabled = joint.GetJointEnabledAttr()
+    if not enabled:
+        raise RuntimeError(f"CloudWalk free-base USD override cannot author {path}:physics:jointEnabled")
+    enabled.Set(False)
+
+
 def make_scene_cfg(config: dict[str, Any], robot_cfg: Any) -> Any:
     import isaaclab.sim as sim_utils
     from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg

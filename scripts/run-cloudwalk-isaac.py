@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from cloudwalk_adapter import CHECKPOINT_REVISION, EMBODIMENT, G1_BODY_JOINTS, G1_INSPIRE_FTP_JOINTS, PROMPT, validate_observation  # noqa: E402
 from cloudwalk_closed_loop import DEFAULT_ANGLES  # noqa: E402
-from cloudwalk_scene import configure_rtx, decorate_scene, load_scene_config, make_scene_cfg  # noqa: E402
+from cloudwalk_scene import configure_rtx, decorate_scene, load_scene_config, make_scene_cfg, release_g1_fixed_root  # noqa: E402
 from sonic_isaac_inspire_adapter import ContractError, INSPIRE_HAND_JOINTS, InspireFTPGripMapper, Lifecycle, LifecycleGuard, SafeReference, V4Action  # noqa: E402
 
 DEFAULT_DATASET = Path("/data/datasets/groot/gr00t-g1-grab-bottle-right-hand-v10")
@@ -141,8 +141,10 @@ def main() -> int:
         configure_rtx(scene_config)
         sim = sim_utils.SimulationContext(sim_utils.SimulationCfg(dt=0.01, device=args.device))
         scene = InteractiveScene(make_scene_cfg(scene_config, robot_cfg)(num_envs=1, env_spacing=1.0))
-        # All visual child prims are authored before reset creates the PhysX tensor view.
+        # All visual child prims and the free-base root override are authored before
+        # reset creates the PhysX tensor view.  Runtime code never changes topology.
         decorate_scene(scene_config)
+        release_g1_fixed_root()
         sim.reset()
         robot, camera = scene["robot"], scene["head_camera"]
         if robot.num_joints != EXPECTED_JOINT_COUNT or robot.num_bodies != EXPECTED_BODY_COUNT:
