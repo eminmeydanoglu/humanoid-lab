@@ -56,7 +56,7 @@ GR00T inference:
 2.5 Hz
 ```
 
-Bu iterasyonda **Dex3 kullanılmayacak**. CloudWalk reproduction kendi Inspire FTP embodiment’ıyla yapılacak. Mevcut plan da hedefi aynı şekilde v10 checkpoint-30000 + `UNITREE_G1_SONIC` olarak sabitliyor. 
+Bu iterasyonda **Dex3 kullanılmayacak**. CloudWalk reproduction kendi Inspire FTP embodiment’ıyla yapılacak. Mevcut plan da hedefi aynı şekilde v10 checkpoint-30000 + `UNITREE_G1_SONIC` olarak sabitliyor.
 
 ### Ana mimari kuralı
 
@@ -66,9 +66,9 @@ Bizim yazacağımız ana şey:
 
 > **Isaac ↔ mevcut SONIC/VLA stack adapter’ı.**
 
-Isaac için ayrı SONIC implementasyonu, özel policy veya farklı action semantics yazılmayacak. Mevcut planın en önemli mimari kararı da bu. 
+Isaac için ayrı SONIC implementasyonu, özel policy veya farklı action semantics yazılmayacak. Mevcut planın en önemli mimari kararı da bu.
 
-MuJoCo parity, generic simulator framework, multi-backend abstraction, gerçek robot deployment ve multi-task desteği **Isaac bottle task çalışana kadar yapılmayacak.** 
+MuJoCo parity, generic simulator framework, multi-backend abstraction, gerçek robot deployment ve multi-task desteği **Isaac bottle task çalışana kadar yapılmayacak.**
 
 ---
 
@@ -97,7 +97,7 @@ Worker görevleri:
 5. **CloudWalk dataset worker**
    Dataset videolarını inceleyip robot–masa mesafesi, camera view/FOV, bottle placement, grasp yaklaşımı ve scene görünüşü için yaklaşık parametreler çıkar.
 
-Bu dağılım mevcut planın beş paralel agent ayrımını koruyor. 
+Bu dağılım mevcut planın beş paralel agent ayrımını koruyor.
 
 ### Progress update kuralı
 
@@ -156,7 +156,7 @@ Beklenen gerçek output:
 7 right hand
 ```
 
-Shape, dtype, finite values, latency ve prompt transport doğrulansın. Mevcut plan bunu GR00T-only replay aşaması olarak tanımlıyor. 
+Shape, dtype, finite values, latency ve prompt transport doğrulansın. Mevcut plan bunu GR00T-only replay aşaması olarak tanımlıyor.
 
 Bu çalışmadan Isaac’e geçme.
 
@@ -192,7 +192,7 @@ veya
 bilinen güvenli reference motion
 ```
 
-SONIC’in start/pause/initial-pose/stop/watchdog davranışını da doğrula. Mevcut planın SONIC-only aşaması bunun temelini zaten içeriyor. 
+SONIC’in start/pause/initial-pose/stop/watchdog davranışını da doğrula. Mevcut planın SONIC-only aşaması bunun temelini zaten içeriyor.
 
 ---
 
@@ -282,7 +282,7 @@ Isaac doğru jointleri hareket ettiriyor
 reset/stop tekrar çalışıyor
 ```
 
-Mevcut plandaki “birinci teknik kabul” de tam olarak bu sınırı tanımlıyor. 
+Mevcut plandaki “birinci teknik kabul” de tam olarak bu sınırı tanımlıyor.
 
 ---
 
@@ -370,7 +370,7 @@ Nominal:
 
 Tek şanslı grasp “model çalışıyor” sonucu olarak kabul edilmesin.
 
-Bunun yanında en az bir başarılı closed-loop task görmek yine ilk milestone’un temel gereksinimi. Mevcut plan zaten task başarısını approach/contact/hand-close/grasp/lift şeklinde bölüyor. 
+Bunun yanında en az bir başarılı closed-loop task görmek yine ilk milestone’un temel gereksinimi. Mevcut plan zaten task başarısını approach/contact/hand-close/grasp/lift şeklinde bölüyor.
 
 ---
 
@@ -399,7 +399,7 @@ Isaac actuator
 contact physics
 ```
 
-Mevcut planın risk kuralları da özellikle bunu istiyor. 
+Mevcut planın risk kuralları da özellikle bunu istiyor.
 
 ---
 
@@ -409,4 +409,4 @@ Mevcut planın risk kuralları da özellikle bunu istiyor.
 
 > **CloudWalk checkpoint-30000, gerçek upstream GR00T + SONIC stack’i kullanarak Isaac Sim’de Inspire FTP’li G1’i closed-loop kontrol ediyor; `"grab the bottle"` nominal scene’de test edilmiş; en az 5 tekrarlı sonuç, video ve failure breakdown mevcut.**
 
-Bundan **sonra** MuJoCo parity, generic simulator abstraction ve kendi **G1 + Dex3 + Fruits** training pipeline’ımız için ayrı plan açılacak. 
+Bundan **sonra** MuJoCo parity, generic simulator abstraction ve kendi **G1 + Dex3 + Fruits** training pipeline’ımız için ayrı plan açılacak.
