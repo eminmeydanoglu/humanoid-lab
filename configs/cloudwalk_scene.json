@@ -30,7 +30,7 @@
     "focal_length_mm": 15.15,
     "horizontal_aperture_mm": 20.955,
     "position_rel_pelvis_m": [0.113, -0.035, 0.457],
-    "rotation_wxyz_ros": [0.3032, 0.6386, 0.6904, 0.1518]
+    "rotation_wxyz_world": [0.7920522854, -0.2056942373, 0.4385740112, 0.3714779868]
   },
   "room": {
     "floor_color_srgb": [0.20, 0.235, 0.25],

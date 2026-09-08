@@ -349,7 +349,8 @@ def main() -> int:
             import omni.timeline
 
             timeline = omni.timeline.get_timeline_interface()
-            timeline.stop()
+            # STOP invalidates IsaacLab tensor views; PAUSE preserves them for Timeline Play.
+            timeline.pause()
             head_camera_panel = _open_head_camera_panel()
             print(json.dumps({"event": "interactive_ready", "physics": "free_base_gravity_enabled", "head_camera_panel": "G1 Head Camera (GR00T RGB)", "instruction": "Press Timeline Play to begin PhysX stepping; do not alter stage topology after Play."}, sort_keys=True), flush=True)
             while simulation_app.is_running():

@@ -126,13 +126,14 @@ def make_scene_cfg(config: dict[str, Any], robot_cfg: Any) -> Any:
         )
         ambient = AssetBaseCfg(prim_path="/World/Ambient", spawn=sim_utils.DomeLightCfg(intensity=420.0, color=(0.68, 0.72, 0.74)))
         robot: ArticulationCfg = robot_cfg.replace(prim_path="{ENV_REGEX_NS}/Robot")
+        # CameraCfg converts this pelvis world-frame offset (+X forward, +Z up) to USD/OpenGL.
         head_camera = CameraCfg(
             prim_path="{ENV_REGEX_NS}/Robot/pelvis/head_camera", update_period=0.0,
             height=camera_data["resolution"][1], width=camera_data["resolution"][0], data_types=["rgb"],
             spawn=sim_utils.PinholeCameraCfg(
                 focal_length=camera_data["focal_length_mm"], horizontal_aperture=camera_data["horizontal_aperture_mm"], clipping_range=(0.05, 20.0)
             ),
-            offset=CameraCfg.OffsetCfg(pos=tuple(camera_data["position_rel_pelvis_m"]), rot=tuple(camera_data["rotation_wxyz_ros"]), convention="ros"),
+            offset=CameraCfg.OffsetCfg(pos=tuple(camera_data["position_rel_pelvis_m"]), rot=tuple(camera_data["rotation_wxyz_world"]), convention="world"),
         )
 
     return CloudWalkSceneCfg

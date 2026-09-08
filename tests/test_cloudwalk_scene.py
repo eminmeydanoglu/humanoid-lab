@@ -19,6 +19,15 @@ class CloudWalkSceneContractTests(unittest.TestCase):
         self.assertAlmostEqual(self.config["bottle"]["height_m"], 0.207)
         self.assertAlmostEqual(self.config["table"]["size_m"][2], 0.75)
 
+    def test_head_camera_world_frame_looks_down_and_toward_bottle(self):
+        w, x, y, z = self.config["camera"]["rotation_wxyz_world"]
+        forward = (1 - 2 * (y * y + z * z), 2 * (x * y + w * z), 2 * (x * z - w * y))
+        up = (2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y))
+        self.assertGreater(forward[0], 0.30)
+        self.assertGreater(forward[1], 0.35)
+        self.assertLess(forward[2], -0.80)
+        self.assertGreater(up[2], 0.50)
+
     def test_bottle_starts_on_table_and_has_physical_properties(self):
         table_top = self.config["table"]["position_m"][2] + self.config["table"]["size_m"][2] / 2
         bottle_bottom = self.config["bottle"]["position_m"][2] - self.config["bottle"]["height_m"] / 2
@@ -31,7 +40,7 @@ class CloudWalkSceneContractTests(unittest.TestCase):
     def test_scene_uses_rtx_pbr_room_and_compound_bottle(self):
         source = (ROOT / "tools" / "cloudwalk_scene.py").read_text()
         self.assertEqual(self.config["render"]["renderer"], "RayTracedLighting")
-        for token in ("UsdPreviewSurface", "BottleGlass", "BlueWater", "CapPlastic", "opacity=0.82", "DiskLightCfg", "DomeLightCfg", "BackWall", "WarmGlossWood", "root_joint", "GetJointEnabledAttr", "ArticulationRootAPI.Apply(pelvis)"):
+        for token in ("UsdPreviewSurface", "BottleGlass", "BlueWater", "CapPlastic", "opacity=0.82", "DiskLightCfg", "DomeLightCfg", "BackWall", "WarmGlossWood", "root_joint", "GetJointEnabledAttr", "ArticulationRootAPI.Apply(pelvis)", "Robot/pelvis/head_camera", "convention=\"world\""):
             self.assertIn(token, source)
         self.assertNotIn("GroundPlaneCfg", source)
         self.assertTrue((ROOT / "configs" / "cloudwalk_wood.png").is_file())
@@ -46,6 +55,8 @@ class CloudWalkSceneContractTests(unittest.TestCase):
         self.assertIn("configure_g1_free_base_articulation()", runner)
         self.assertIn("--interactive", runner)
         self.assertIn("timeline.is_playing()", runner)
+        self.assertIn("timeline.pause()", runner)
+        self.assertNotIn("timeline.stop()", runner)
         self.assertIn("omni.anim.window.timeline", runner)
         self.assertIn("G1 Head Camera (GR00T RGB)", runner)
         self.assertIn("immutable_after_reset", runner)
