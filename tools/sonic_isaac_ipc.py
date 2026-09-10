@@ -229,6 +229,8 @@ class StateLink:
         listener.bind((self.host, self.port))
         listener.listen(1)
         listener.setblocking(False)
+        # Record the port actually bound: port 0 asks the kernel to choose.
+        self.port = int(listener.getsockname()[1])
         self._listener = listener
         self._accepting = True
 

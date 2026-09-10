@@ -188,17 +188,28 @@ class UnitreeDds:
                 publisher.Write(message)
 
 
-def serve(*, host: str, port: int, dds: UnitreeDds, report_path: Path | None = None) -> int:
-    """Accept one runner connection and pump frames until it closes."""
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind((host, port))
-    listener.listen(1)
-    print(json.dumps({"event": "bridge_listening", "host": host, "port": port}), flush=True)
+def serve(*, host: str, port: int, dds, report_path: Path | None = None,
+          connect_timeout_s: float = 120.0) -> int:
+    """Connect to the runner's loopback link and pump frames until it closes.
 
-    connection, _ = listener.accept()
+    The runner is the listener: it starts first so it can publish the initial
+    pose while the scene is still paused. The bridge is therefore a client.
+    """
+    deadline = time.monotonic() + float(connect_timeout_s)
+    connection = None
+    while connection is None:
+        try:
+            connection = socket.create_connection((host, port), timeout=5.0)
+        except OSError:
+            if time.monotonic() >= deadline:
+                print(
+                    json.dumps({"event": "bridge_connect_failed", "host": host, "port": port}),
+                    file=sys.stderr, flush=True,
+                )
+                return 2
+            time.sleep(0.5)
     connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    print(json.dumps({"event": "bridge_connected"}), flush=True)
+    print(json.dumps({"event": "bridge_connected", "host": host, "port": port}), flush=True)
 
     published = 0
     forwarded = 0
@@ -231,7 +242,6 @@ def serve(*, host: str, port: int, dds: UnitreeDds, report_path: Path | None = N
                 forwarded += 1
     finally:
         connection.close()
-        listener.close()
 
     summary = {
         "event": "bridge_stopped",
