@@ -441,3 +441,69 @@ class SourceContractTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ViewportFrameTest(unittest.TestCase):
+    """The viewport annotator returns batched arrays; encoding needs one image."""
+
+    def setUp(self) -> None:
+        import numpy as np
+
+        self.np = np
+
+    def as_image(self, frame):
+        return runner.VideoRecorder._as_image(frame)
+
+    def test_batched_rgba_frame_is_unwrapped(self) -> None:
+        frame = self.np.zeros((1, 480, 640, 4), dtype=self.np.uint8)
+        result = self.as_image(frame)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.shape, (480, 640, 4))
+
+    def test_plain_rgb_image_passes_through(self) -> None:
+        frame = self.np.zeros((480, 640, 3), dtype=self.np.uint8)
+        result = self.as_image(frame)
+        self.assertEqual(result.shape, (480, 640, 3))
+
+    def test_grayscale_image_is_accepted(self) -> None:
+        frame = self.np.zeros((480, 640), dtype=self.np.uint8)
+        self.assertEqual(self.as_image(frame).shape, (480, 640))
+
+    def test_channel_first_layout_is_moved_last(self) -> None:
+        frame = self.np.zeros((3, 480, 640), dtype=self.np.uint8)
+        self.assertEqual(self.as_image(frame).shape, (480, 640, 3))
+
+    def test_five_dimensional_frame_is_reduced(self) -> None:
+        frame = self.np.zeros((1, 1, 480, 640, 4), dtype=self.np.uint8)
+        self.assertEqual(self.as_image(frame).shape, (480, 640, 4))
+
+    def test_unusable_shape_is_reported_as_none(self) -> None:
+        frame = self.np.zeros((2, 3, 4, 5, 6, 7), dtype=self.np.uint8)
+        self.assertIsNone(self.as_image(frame))
+
+    def test_none_frame_is_reported_as_none(self) -> None:
+        self.assertIsNone(self.as_image(None))
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("imageio") is not None,
+        "imageio is only installed in the container environment",
+    )
+    def test_recorded_frames_are_written_as_a_playable_video(self) -> None:
+        """End to end: batched frames in, a real video file out."""
+        import tempfile
+
+        np = self.np
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "clip.mp4"
+            recorder = runner.VideoRecorder(path, fps=10, every=1)
+            # Bypass viewport discovery; feed frames the way a capture would.
+            recorder.capture = lambda: np.zeros((1, 64, 64, 4), dtype=np.uint8)
+            recorder.status = "ready"
+            for step in range(1, 6):
+                recorder.maybe_record(step)
+            result = recorder.write()
+
+            self.assertEqual(result["status"], "written", result)
+            self.assertEqual(result["frames"], 5)
+            self.assertTrue(path.is_file())
+            self.assertGreater(path.stat().st_size, 0)

@@ -651,8 +651,38 @@ class VideoRecorder:
         except Exception:  # noqa: BLE001
             self.status = "failed"
             return
-        if frame is not None:
-            self.frames.append(frame.copy())
+        if frame is None:
+            return
+        prepared = self._as_image(frame)
+        if prepared is None:
+            self.status = "unexpected_frame_shape"
+            return
+        self.frames.append(prepared)
+
+    @staticmethod
+    def _as_image(frame):
+        """Normalise an annotator payload to a single HxWxC image, or None."""
+        if frame is None:
+            return None
+        try:
+            import numpy as np
+
+            array = np.asarray(frame)
+        except Exception:  # noqa: BLE001
+            return None
+        # Drop leading singleton/leading frame dimensions until 2D or 3D.
+        while array.ndim > 3 and array.shape[0] == 1:
+            array = array[0]
+        if array.ndim == 4:
+            array = array[0]
+        if array.ndim == 2:
+            return array
+        if array.ndim == 3 and array.shape[-1] in (1, 3, 4):
+            return array
+        if array.ndim == 3 and array.shape[0] in (1, 3, 4):
+            # Channel-first layout.
+            return np.moveaxis(array, 0, -1)
+        return None
 
     def write(self) -> dict:
         if self.path is None:
