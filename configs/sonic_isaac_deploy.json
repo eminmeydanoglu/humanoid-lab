@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "comment": "Paths for the pinned upstream SONIC C++ deploy on the Isaac simulation path. The planner path must contain a planner version token (V0/V1/V2): the deploy parses its version from the path, not the file.",
+  "comment": "Paths for the pinned upstream SONIC C++ deploy on the Isaac simulation path. The planner path must contain a planner version token (V0/V1/V2): the deploy parses its version from the path, not the file. Reference motions must be real git-lfs content, not pointer stubs.",
   "binary": "/data/models/sonic-deploy/g1_deploy_onnx_ref",
   "lib_dir": "/data/models/sonic-deploy/lib",
   "models_dir": "/data/models/sonic-isaac/sonic_v1_1",
@@ -10,7 +10,7 @@
     "V1",
     "V2"
   ],
-  "reference_dir": "/opt/src/sonic/gear_sonic_deploy/reference/example",
+  "reference_dir": "/data/models/sonic-isaac/reference/example",
   "keyboard_input_type": "keyboard",
   "f310_input_type": "f310_bridge",
   "dds_interface": "lo",
