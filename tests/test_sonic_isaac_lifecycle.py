@@ -234,6 +234,29 @@ class InteractiveLoopTest(unittest.TestCase):
         self.assertEqual(sim.steps, 2)
         self.assertEqual(len(applied), 2)
 
+    def test_app_is_pumped_every_frame_including_while_playing(self) -> None:
+        """Kit must be pumped while playing, or the viewport never repaints."""
+        app = FakeApp(4)
+        sim, scene = FakeSim(), FakeScene()
+        metrics = make_metrics()
+        runner.run_interactive_app(
+            app,
+            FakeTimeline([True] * 4, app),
+            sim,
+            scene,
+            actuation=BodyActuation([88.0] * BODY_JOINT_COUNT),
+            link=FakeLink(),
+            metrics=metrics,
+            read_state=lambda: None,
+            read_body_q_dq=lambda: (vector(0.0), vector(0.0)),
+            apply_effort=lambda efforts: None,
+        )
+        self.assertEqual(sim.steps, 4, "physics should advance on every playing frame")
+        self.assertEqual(
+            app.updates, 4,
+            "app.update() must run on playing frames too, otherwise the GUI freezes",
+        )
+
     def test_state_is_published_every_frame_including_paused(self) -> None:
         _steps, _sim, _applied, link, _metrics = self.run_loop(
             [False, False, False], frames=3

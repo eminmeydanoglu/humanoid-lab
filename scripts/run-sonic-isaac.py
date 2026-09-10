@@ -219,6 +219,10 @@ def run_interactive_app(
             efforts=None if step is None else step.efforts,
             apply_effort=apply_effort,
         )
+        # Pump the Kit application every frame, playing or paused. Without this
+        # the physics still advances but the viewport never presents a new
+        # frame, so the GUI looks frozen while the timeline runs.
+        simulation_app.update()
         if advanced:
             physics_steps += 1
             if on_physics_step is not None:
