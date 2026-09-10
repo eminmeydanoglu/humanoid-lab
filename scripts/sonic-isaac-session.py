@@ -524,16 +524,23 @@ def _wait_deploy_ready(deploy: "PtyChild", *, timeout_s: float, quiet_s: float) 
 
 
 def _child_exit_code(pid: int | None) -> int | None:
-    """Return the exit code if the pid is gone, else None."""
+    """Return the exit code once our own child has exited, else None.
+
+    ``os.kill(pid, 0)`` still succeeds for a zombie, so a child that has
+    finished but not been reaped would look alive forever. waitpid is the
+    correct liveness test for a direct child.
+    """
     if not pid:
         return None
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return 0
-    except PermissionError:
+        reaped, status = os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
         return None
-    return None
+    except OSError:
+        return None
+    if reaped == 0:
+        return None
+    return os.waitstatus_to_exitcode(status)
 
 
 def _drive_auto_keys(*, args, paths, record_children, deploy, play_trigger,
@@ -640,25 +647,36 @@ def _drive_auto_keys(*, args, paths, record_children, deploy, play_trigger,
     return 0 if outcome == "runner_exited" else 6
 
 
+def _child_alive(pid: int) -> bool:
+    try:
+        reaped, _ = os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        return False
+    except OSError:
+        return False
+    return reaped == 0
+
+
 def _terminate_child(child: ChildProcess, timeout_s: float = 8.0) -> None:
     """TERM then KILL: the deploy does not always exit on SIGTERM alone."""
+    if not _child_alive(child.pid):
+        return
     try:
         os.kill(child.pid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
         return
     deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        try:
-            os.kill(child.pid, 0)
-        except ProcessLookupError:
-            return
-        except PermissionError:
-            return
+    while time.monotonic() < deadline and _child_alive(child.pid):
         time.sleep(0.2)
-    try:
-        os.kill(child.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
+    if _child_alive(child.pid):
+        try:
+            os.kill(child.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            os.waitpid(child.pid, 0)
+        except (ChildProcessError, OSError):
+            pass
 
 
 def command_accept(args: argparse.Namespace) -> int:
