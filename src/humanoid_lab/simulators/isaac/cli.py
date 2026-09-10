@@ -7,7 +7,6 @@ import json
 import os
 import sys
 import threading
-import time
 import traceback
 from pathlib import Path
 from typing import Sequence
@@ -18,21 +17,16 @@ from .contracts import RunProfile
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", type=Path, required=True)
-    parser.add_argument(
-        "--output-root",
-        type=Path,
-        default=Path(os.environ.get("HUMANOID_OUTPUT_ROOT", "/outputs")),
-    )
-    parser.add_argument("--run-id")
     parser.add_argument("--duration", type=float)
-    parser.add_argument("--capture-every", type=int, default=4)
     parser.add_argument("--test", choices=("passive-fall",))
-    parser.add_argument("--no-record", action="store_true")
     from isaaclab.app import AppLauncher
 
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args(argv)
     args.enable_cameras = True
+    # AppLauncher owns --device; only an explicit flag overrides the profile default.
+    raw = list(sys.argv[1:] if argv is None else argv)
+    args.device_explicit = any(item == "--device" or item.startswith("--device=") for item in raw)
     if args.duration is None:
         args.duration = 12.0 if args.test or args.headless else 300.0
     return args
@@ -40,6 +34,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
+    # AppLauncher pops its own flags (including device_explicit) from vars(args).
+    device_override = args.device if args.device_explicit else None
     from isaaclab.app import AppLauncher
 
     launcher = AppLauncher(args)
@@ -48,18 +44,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         from .service import SimulatorService
 
-        profile = RunProfile.load(args.profile)
-        run_id = args.run_id or time.strftime("isaac-g1-%Y%m%d-%H%M%S")
+        # The profile owns the physics device; --device only wins when passed explicitly.
+        profile = RunProfile.load(args.profile).with_device(device_override)
         service = SimulatorService(
             profile,
             simulation_app,
-            run_id=run_id,
-            output_root=args.output_root,
             duration=args.duration,
-            record=not args.no_record,
             show_ui=not args.headless,
             test_mode=args.test,
-            capture_every=args.capture_every,
         )
         summary = service.run()
         print(json.dumps(summary, indent=2, sort_keys=True), flush=True)

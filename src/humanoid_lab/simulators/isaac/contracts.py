@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+DEVICE_PATTERN = re.compile(r"^(cpu|cuda(:\d+)?)$")
+DEFAULT_DEVICE = "cpu"
+DEFAULT_RENDER_INTERVAL = 8
 
 
 class ContractError(ValueError):
@@ -125,6 +130,8 @@ class RunProfile:
     robot: RobotSpec
     camera: CameraSpec
     physics_dt: float
+    device: str = DEFAULT_DEVICE
+    render_interval: int = DEFAULT_RENDER_INTERVAL
 
     @classmethod
     def load(cls, path: Path) -> "RunProfile":
@@ -144,6 +151,19 @@ class RunProfile:
             camera=CameraSpec.from_dict(data["camera"]),
             physics_dt=dt,
         )
+
+    def with_device(self, device: str | None) -> "RunProfile":
+        """Return the profile with an explicit CLI device override applied."""
+        if device is None:
+            return self
+        if not DEVICE_PATTERN.match(device):
+            raise ContractError("simulation.device must be cpu or cuda[:N]")
+        return replace(self, device=device)
+
+    @property
+    def camera_update_period(self) -> float:
+        """Sensor period that keeps the head camera aligned with the render cadence."""
+        return self.physics_dt * self.render_interval
 
     def as_manifest(self) -> dict[str, Any]:
         return {
@@ -172,35 +192,11 @@ class RunProfile:
                 "position_m": list(self.camera.position_m),
                 "rotation_wxyz": list(self.camera.rotation_wxyz),
             },
-            "simulation": {"physics_dt": self.physics_dt},
-        }
-
-
-@dataclass(frozen=True)
-class RobotState:
-    run_id: str
-    episode_id: int
-    physics_tick: int
-    simulated_time: float
-    root_position: tuple[float, float, float]
-    root_rotation_wxyz: tuple[float, float, float, float]
-    body_position: tuple[float, ...]
-    body_velocity: tuple[float, ...]
-    timeline_state: TimelineState
-    control_mode: str = "passive"
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "run_id": self.run_id,
-            "episode_id": self.episode_id,
-            "physics_tick": self.physics_tick,
-            "simulated_time": self.simulated_time,
-            "root_position": list(self.root_position),
-            "root_rotation_wxyz": list(self.root_rotation_wxyz),
-            "body_position": list(self.body_position),
-            "body_velocity": list(self.body_velocity),
-            "timeline_state": self.timeline_state.value,
-            "control_mode": self.control_mode,
+            "simulation": {
+                "physics_dt": self.physics_dt,
+                "device": self.device,
+                "render_interval": self.render_interval,
+            },
         }
 
 

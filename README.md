@@ -32,7 +32,7 @@ kurulum komutlarini yazdirir; `--verify-digests` Isaac Sim digest'ini NGC'den ce
 
 ## 3. Isaac G1 simulatoru (Kapi 1)
 
-Yalniz Isaac Lab, G1 asset'i, head camera ve evidence sink kullanir; SONIC,
+Yalnız Isaac Lab, G1 asset'i ve head camera kullanır; SONIC,
 GR00T, CloudWalk, DDS veya baska bir controller yuklemez. Fizik dongusunun tek
 sahibi `SimulatorService`tir.
 
@@ -43,23 +43,24 @@ sahibi `SimulatorService`tir.
 ./dev.sh isaac-g1 dex3 --test passive-fall # controller'siz dusus kabulu
 ```
 
-Secenekler: `--test passive-fall`, `--headless`, `--run-id NAME`, `--no-record`,
-`--duration SECONDS`. Normal calisma `COMPLETED` ile biter; dusus PASS/FAIL
-kabulu yalniz `--test passive-fall` verildiginde uygulanir.
+Seçenekler: `--test passive-fall`, `--headless`, `--duration SECONDS`,
+`--device {cpu,cuda}`. Normal çalışma
+`COMPLETED` ile biter; düşüş PASS/FAIL kabulü yalnız `--test passive-fall`
+verildiğinde uygulanır.
+
+Tek robotlu bu sahnede fizik varsayılan olarak CPU'da, dört worker thread ile çalışır;
+`--device cuda` açık bir geri dönüş seçeneğidir. Fizik 200 Hz'de ilerler, RTX render
+ve kamera 25 Hz'de güncellenir. Bu ayrım RTX görsel ayarlarını, ışıkları,
+materyalleri ve kamera çözünürlüğünü değiştirmez; yalnızca her fizik adımında aynı
+sahneyi gereksiz yere yeniden çizmeyi önler.
 
 GUI kosularinda `G1 Simulator` penceresi ve sensorun RGB buffer'ini gosteren
 `G1 Head Camera` paneli acilir; kamera paneli ayri viewport veya fizik dongusu
 olusturmaz. `Reset Robot` baslangic pozunu geri yukler ve timeline'i paused
 birakir. Kosuyu `Ctrl-C` veya pencereyi kapatarak durdur.
 
-Her kosu `outputs/runs/<run-id>/` altinda manifest, graph, component status,
-tensor trajectory, provenance ve ozet uretir; kayit aciksa iki MP4. `outputs/`
-Git disidir. Kaydin trajectory'yi degistirmedigini iki kosu arasinda dogrula:
-
-```bash
-python3 scripts/verify-isaac-trajectory.py \
-  outputs/runs/<recording-on-run> outputs/runs/<recording-off-run>
-```
+Simülatör özel MP4, trajectory, JSONL veya provenance kaydı üretmez. Performans
+değerleri çalışırken terminale saniyede bir yazılır.
 
 ### Isaac Lab demolari
 

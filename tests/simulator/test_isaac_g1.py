@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import importlib.util
 import sys
 import tempfile
 import unittest
@@ -11,7 +10,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 from humanoid_lab.simulators.isaac.contracts import ContractError, RunProfile  # noqa: E402
-from humanoid_lab.simulators.isaac.evidence import StreamingVideoWriter  # noqa: E402
+
+SERVICE = ROOT / "src/humanoid_lab/simulators/isaac/service.py"
 
 
 class IsaacG1ProfileTests(unittest.TestCase):
@@ -42,29 +42,18 @@ class IsaacG1ProfileTests(unittest.TestCase):
                 RunProfile.load(path)
 
 
-class IsaacG1RecorderTests(unittest.TestCase):
-    def test_normalize_copies_rgba_without_retaining_source(self) -> None:
-        import numpy as np
+class IsaacG1SimulationConfigTests(unittest.TestCase):
+    def test_shipped_profiles_resolve_to_cpu_and_25hz(self) -> None:
+        for path in sorted((ROOT / "configs/profiles").glob("isaac-g1-*.json")):
+            profile = RunProfile.load(path)
+            self.assertEqual(profile.device, "cpu")
+            self.assertEqual(profile.render_interval, 8)
+            self.assertAlmostEqual(profile.camera_update_period, 0.04)
 
-        source = np.zeros((1, 4, 5, 4), dtype=np.uint8)
-        image = StreamingVideoWriter.normalize(source)
-        self.assertEqual(image.shape, (4, 5, 3))
-        source[..., :3] = 255
-        self.assertEqual(int(image.sum()), 0)
-
-    def test_expected_head_camera_shape_is_preserved(self) -> None:
-        import numpy as np
-
-        image = StreamingVideoWriter.normalize(np.zeros((1, 480, 640, 4), dtype=np.uint8))
-        self.assertEqual(list(image.shape), [480, 640, 3])
-
-    def test_empty_warmup_frame_is_retried(self) -> None:
-        import numpy as np
-
-        with tempfile.TemporaryDirectory() as directory:
-            writer = StreamingVideoWriter(Path(directory) / "unused.mp4", fps=10)
-            self.assertIsNone(writer.append(np.asarray([])))
-            self.assertIsNone(writer.error)
+    def test_device_override_only_applies_when_requested(self) -> None:
+        profile = RunProfile.load(ROOT / "configs/profiles/isaac-g1-dex3.json")
+        self.assertEqual(profile.with_device(None).device, "cpu")
+        self.assertEqual(profile.with_device("cuda").device, "cuda")
 
 
 class IsaacG1SourceInvariantTests(unittest.TestCase):
@@ -73,15 +62,27 @@ class IsaacG1SourceInvariantTests(unittest.TestCase):
         for forbidden in ("sonic_isaac", "cloudwalk", "groot", "StateLink", "LowCmd"):
             self.assertNotIn(forbidden, source)
 
-    def test_loop_has_one_step_and_render_only_paths(self) -> None:
-        source = (ROOT / "src/humanoid_lab/simulators/isaac/service.py").read_text()
-        run_body = source[
-            source.index("    def run(self)") : source.index("    def _runtime_summary")
+    def test_loop_decouples_physics_from_render(self) -> None:
+        source = SERVICE.read_text()
+        step_body = source[source.index("    def _step_physics") : source.index("    def _render_paused")]
+        paused_body = source[
+            source.index("    def _render_paused") : source.index("    def run(self)")
         ]
-        self.assertEqual(source.count("self._sim.step()"), 1)
-        self.assertEqual(run_body.count("self._step_physics(record=True)"), 1)
-        self.assertEqual(run_body.count("self._step_physics(record=False)"), 1)
-        self.assertEqual(run_body.count("self._sim.render()"), 1)
+        run_body = source[source.index("    def run(self)") : source.index("    def _accounting")]
+        self.assertEqual(source.count("self._sim.step(render=False)"), 1)
+        self.assertNotIn("self._sim.step()", source)
+        self.assertEqual(step_body.count("self._sim.render()"), 1)
+        self.assertIn(
+            "rendered = self._is_rendering and self.tick % self.profile.render_interval == 0",
+            step_body,
+        )
+        self.assertIn("if rendered:", step_body)
+        self.assertEqual(run_body.count("self._step_physics()"), 2)
+        self.assertNotIn("self._sim.render()", run_body)
+        self.assertIn("self._render_paused()", run_body)
+        self.assertIn("1.0 / self.PAUSED_RENDER_HZ", paused_body)
+        self.assertIn("time.monotonic()", paused_body)
+        self.assertIn("time.sleep(delay)", paused_body)
         self.assertIn("if self._pending_ui_reset:", run_body)
         self.assertNotIn("app.update", run_body)
         self.assertIn("self._transition(TimelineState.STOPPED)", run_body)
@@ -107,10 +108,10 @@ class IsaacG1SourceInvariantTests(unittest.TestCase):
         ]
         self.assertLess(
             reset_branch.index("self.reset_episode(resume=True)"),
-            reset_branch.index("self._step_physics(record=False)"),
+            reset_branch.index("self._step_physics()"),
         )
         self.assertLess(
-            reset_branch.index("self._step_physics(record=False)"),
+            reset_branch.index("self._step_physics()"),
             reset_branch.index("self.pause()"),
         )
     def test_passive_fall_acceptance_is_an_explicit_test_mode(self) -> None:
@@ -120,37 +121,19 @@ class IsaacG1SourceInvariantTests(unittest.TestCase):
         self.assertIn('if self.test_mode == "passive-fall"', service)
         self.assertIn('"result": "COMPLETED"', service)
 
-    def test_simulator_uses_fabric_without_usd_writeback(self) -> None:
-        source = (ROOT / "src/humanoid_lab/simulators/isaac/service.py").read_text()
-        self.assertIn("use_fabric = True", source)
+    def test_fabric_is_conditional_on_the_physics_device(self) -> None:
+        source = SERVICE.read_text()
+        self.assertIn('use_fabric = self._device.startswith("cuda")', source)
+        self.assertIn('settings.set_bool("/physics/fabricEnabled", use_fabric)', source)
         self.assertIn('settings.set_bool("/physics/updateToUsd", not use_fabric)', source)
         self.assertIn("SimulationManager.enable_fabric(use_fabric)", source)
-
-
-class IsaacG1TrajectoryTests(unittest.TestCase):
-    def test_recording_comparison_is_tick_aligned(self) -> None:
-        script = ROOT / "scripts/verify-isaac-trajectory.py"
-        spec = importlib.util.spec_from_file_location("verify_isaac_trajectory", script)
-        module = importlib.util.module_from_spec(spec)
-        assert spec.loader is not None
-        spec.loader.exec_module(module)
-        row = {
-            "physics_tick": 1,
-            "root_position": [0.0, 0.0, 0.8],
-            "root_rotation_wxyz": [1.0, 0.0, 0.0, 0.0],
-            "body_position": [0.0] * 29,
-            "body_velocity": [0.0] * 29,
-        }
-        with tempfile.TemporaryDirectory() as directory:
-            first, second = Path(directory) / "on", Path(directory) / "off"
-            first.mkdir(); second.mkdir()
-            payload = "\n".join(json.dumps({**row, "physics_tick": tick}) for tick in (1, 2)) + "\n"
-            (first / "simulator-metrics.jsonl").write_text(payload)
-            (second / "simulator-metrics.jsonl").write_text(payload)
-            result = module.compare(first, second, 1e-6)
-            self.assertEqual(result["result"], "PASS")
-            self.assertEqual(result["compared_ticks"], 2)
-
+        self.assertIn(
+            'settings.set_int("/persistent/physics/numThreads", self.PHYSX_NUM_THREADS)',
+            source,
+        )
+        self.assertIn("device=self._device", source)
+        self.assertIn("render_interval=self.profile.render_interval", source)
+        self.assertIn("update_period=self.profile.camera_update_period", source)
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,76 +2,64 @@
 
 from __future__ import annotations
 
-import subprocess
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
-from .contracts import RobotState, RunProfile, TimelineState, quaternion_up_z
-from .evidence import EvidenceSink, StreamingVideoWriter
+from .contracts import RunProfile, TimelineState, quaternion_up_z
 
 
 @dataclass(frozen=True)
 class AcceptanceThresholds:
     minimum_drop_m: float = 0.12
     minimum_up_change: float = 0.15
-    minimum_frames: int = 2
-    minimum_changed_pixels: int = 1
     minimum_root_z: float = -0.50
 
 
 class SimulatorService:
-    """Own the one scene, one reset, one physics loop, and its evidence."""
+    """Own the one scene, one reset, and one physics loop."""
+
+    PAUSED_RENDER_HZ = 30.0
+    PHYSX_NUM_THREADS = 4
 
     def __init__(
         self,
         profile: RunProfile,
         simulation_app: Any,
         *,
-        run_id: str,
-        output_root: Path,
         duration: float,
-        record: bool,
         show_ui: bool,
         test_mode: str | None,
-        capture_every: int = 4,
     ) -> None:
         self.profile = profile
         self.app = simulation_app
-        self.run_id = run_id
         self.duration = duration
         self.show_ui = show_ui
         self.test_mode = test_mode
-        self.capture_every = max(1, capture_every)
-        fps = max(1, round(1.0 / profile.physics_dt / self.capture_every))
-        self.evidence = EvidenceSink(output_root / "runs" / run_id, record=record, fps=fps)
         self.state = TimelineState.STARTING
         self.tick = 0
-        self.episode_id = 1
         self._sim: Any = None
         self._scene: Any = None
         self._timeline: Any = None
         self._robot: Any = None
         self._body_ids: list[int] = []
         self._hand_ids: list[int] = []
-        self._viewport_capture: Any = None
         self._control_window: Any = None
         self._head_camera_panel: Any = None
         self._head_camera_provider: Any = None
-        self._ui_state_label: Any = None
-        self._ui_tick = 0
         self._pending_ui_reset = False
-        self._simulation_output = "fabric"
+        self._device = profile.device
+        self._is_rendering = False
+        self._run_started = time.monotonic()
+        self._wall_physics_elapsed = 0.0
+        self._last_perf_report = self._run_started
+        self._last_perf_tick = 0
+        self._last_paused_render = 0.0
         self._root_z: list[float] = []
         self._root_up: list[float] = []
-        self._simulated_times: list[float] = []
 
-    def _transition(self, state: TimelineState, **details: Any) -> None:
+    def _transition(self, state: TimelineState) -> None:
         self.state = state
-        self.evidence.status.write(
-            {"run_id": self.run_id, "component": "simulator", "state": state.value, **details}
-        )
 
     def start(self) -> None:
         import carb
@@ -83,20 +71,25 @@ class SimulatorService:
 
         print('{"event":"isaac_g1_start","stage":"simulation_context"}', flush=True)
         settings = carb.settings.get_settings()
-        use_fabric = True
+        # Isaac Lab's Fabric/Warp view path does not support a CPU device.
+        use_fabric = self._device.startswith("cuda")
+        # PhysX reads the thread count when the physics scene is created.
+        settings.set_int("/persistent/physics/numThreads", self.PHYSX_NUM_THREADS)
         settings.set_bool("/physics/fabricEnabled", use_fabric)
         settings.set_bool("/physics/updateToUsd", not use_fabric)
         SimulationManager.enable_fabric(use_fabric)
         self._sim = sim_utils.SimulationContext(
             sim_utils.SimulationCfg(
                 dt=self.profile.physics_dt,
-                device="cuda:0",
+                device=self._device,
                 use_fabric=use_fabric,
-                render_interval=4,
+                render_interval=self.profile.render_interval,
             )
         )
         print('{"event":"isaac_g1_start","stage":"interactive_scene"}', flush=True)
         self._scene = InteractiveScene(self._make_scene_cfg())
+        # Mirror DirectRLEnv: rendering is only needed for a GUI or an RTX sensor.
+        self._is_rendering = self._sim.has_gui() or self._sim.has_rtx_sensors()
         print('{"event":"isaac_g1_start","stage":"free_base"}', flush=True)
         self._configure_free_base_if_needed()
         attach_stage_to_usd_context()
@@ -108,17 +101,9 @@ class SimulatorService:
         self._timeline = get_timeline_interface()
         self._timeline.pause()
         self._set_debug_camera()
-        self._viewport_capture = self._make_viewport_capture()
         if self.show_ui:
             self._open_ui()
-        print('{"event":"isaac_g1_start","stage":"evidence"}', flush=True)
-        self._write_manifest_and_provenance()
-        self._transition(
-            TimelineState.PAUSED,
-            controller="absent",
-            control_mode="passive",
-            simulation_output=self._simulation_output,
-        )
+        self._transition(TimelineState.PAUSED)
 
     def play(self) -> None:
         self._timeline.play()
@@ -140,17 +125,13 @@ class SimulatorService:
         default_root = self._write_initial_state_to_sim()
         self._scene.reset()
         self._resolve_and_disable_actuators()
-        self.episode_id += 1
         self.tick = 0
+        self._wall_physics_elapsed = 0.0
+        self._last_perf_report = time.monotonic()
+        self._last_perf_tick = 0
         self._root_z.clear()
         self._root_up.clear()
-        self._simulated_times.clear()
-        self._transition(
-            TimelineState.PLAYING if should_resume else TimelineState.PAUSED,
-            event="soft_reset",
-            episode_id=self.episode_id,
-            root_position=[float(value) for value in default_root[0, :3].tolist()],
-        )
+        self._transition(TimelineState.PLAYING if should_resume else TimelineState.PAUSED)
         if should_resume and not self._timeline.is_playing():
             self.play()
         elif not should_resume and self._timeline.is_playing():
@@ -245,7 +226,7 @@ class SimulatorService:
             robot: ArticulationCfg = robot_cfg
             head_camera = CameraCfg(
                 prim_path=camera_path,
-                update_period=0.0,
+                update_period=self.profile.camera_update_period,
                 width=camera.width,
                 height=camera.height,
                 data_types=["rgb"],
@@ -316,146 +297,6 @@ class SimulatorService:
         if hasattr(self._sim, "set_camera_view"):
             self._sim.set_camera_view(eye=(2.6, 2.4, 1.6), target=(0.0, 0.0, 0.65))
 
-    @staticmethod
-    def _make_viewport_capture() -> Any:
-        try:
-            import omni.replicator.core as rep
-            from omni.kit.viewport.utility import get_active_viewport
-
-            viewport = get_active_viewport()
-            product = getattr(viewport, "render_product_path", None)
-            if not product:
-                return None
-            annotator = rep.AnnotatorRegistry.get_annotator("rgb")
-            annotator.attach([product])
-            return lambda: annotator.get_data()
-        except Exception:  # noqa: BLE001
-            return None
-
-    def _write_manifest_and_provenance(self) -> None:
-        manifest = self.profile.as_manifest()
-        manifest.update(
-            {
-                "run_id": self.run_id,
-                "controller": "absent",
-                "root": "free",
-                "gravity": "enabled",
-                "ground_collision": "enabled",
-                "body_actuator": "passive",
-                "test_mode": self.test_mode,
-                "simulation_output": self._simulation_output,
-            }
-        )
-        self.evidence.write_manifest(manifest)
-        self.evidence.policy_metrics.write({"run_id": self.run_id, "state": "not_applicable"})
-        self.evidence.controller_metrics.write(
-            {"run_id": self.run_id, "state": "absent", "control_mode": "passive"}
-        )
-        self.evidence.write_json("model-provenance.json", {"state": "not_applicable"})
-        self.evidence.write_json("task-metrics.json", {"state": "not_applicable"})
-        self.evidence.write_json(
-            "asset-provenance.json",
-            {
-                "asset_reference": self.profile.robot.asset_reference,
-                "declared_provenance": self.profile.robot.asset_provenance,
-                "sonic_commit": self._git_revision("/opt/src/sonic"),
-                "isaaclab_commit": self._git_revision("/opt/src/isaaclab"),
-            },
-        )
-        self.evidence.write_json("asset-report.json", self._asset_report())
-        (self.evidence.run_dir / "graph.mmd").write_text(
-            "graph LR\n  CLI --> SimulatorService\n  SimulatorService --> IsaacLab\n"
-            "  IsaacLab --> G1\n  G1 --> HeadCamera\n  IsaacLab --> DebugViewport\n"
-            "  HeadCamera --> EvidenceSink\n  DebugViewport --> EvidenceSink\n"
-            "  G1 --> EvidenceSink\n",
-            encoding="utf-8",
-        )
-
-    @staticmethod
-    def _git_revision(path: str) -> str | None:
-        try:
-            return subprocess.check_output(
-                ["git", "-C", path, "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
-            ).strip()
-        except (OSError, subprocess.CalledProcessError):
-            return None
-
-    def _asset_report(self) -> dict[str, Any]:
-        import omni.usd
-        from pxr import Usd, UsdPhysics
-
-        stage = omni.usd.get_context().get_stage()
-        robot = stage.GetPrimAtPath("/World/envs/env_0/Robot")
-        prims = list(Usd.PrimRange(robot, Usd.TraverseInstanceProxies()))
-        collisions = []
-        masses = []
-        for prim in prims:
-            collision = UsdPhysics.CollisionAPI(prim)
-            if collision:
-                enabled = collision.GetCollisionEnabledAttr().Get()
-                collisions.append({"prim": str(prim.GetPath()), "enabled": enabled is not False})
-            mass_api = UsdPhysics.MassAPI(prim)
-            if mass_api:
-                diagonal = mass_api.GetDiagonalInertiaAttr().Get()
-                center = mass_api.GetCenterOfMassAttr().Get()
-                masses.append(
-                    {
-                        "prim": str(prim.GetPath()),
-                        "mass_kg": mass_api.GetMassAttr().Get(),
-                        "diagonal_inertia": None if diagonal is None else list(diagonal),
-                        "center_of_mass": None if center is None else list(center),
-                    }
-                )
-        collision_count = len(collisions)
-        mass_count = len(masses)
-        return {
-            "profile_id": self.profile.profile_id,
-            "prim_count": len(prims),
-            "collision_prim_count": collision_count,
-            "mass_or_inertia_prim_count": mass_count,
-            "joint_count": len(self._robot.joint_names),
-            "body_dofs": len(self._body_ids),
-            "hand_dofs": len(self._hand_ids),
-            "joint_names": list(self._robot.joint_names),
-            "body_names": list(self._robot.body_names),
-            "collisions": collisions,
-            "mass_and_inertia": masses,
-            "mesh_paths_resolved": bool(prims and collision_count and mass_count),
-            "mesh_path_note": "runtime-loaded USD traversal found populated collision and mass prims",
-        }
-
-    def _robot_state(self) -> RobotState:
-        robot = self._robot
-        root_pos = tuple(float(v) for v in robot.data.root_pos_w[0].tolist())
-        root_quat = tuple(float(v) for v in robot.data.root_quat_w[0].tolist())
-        body_pos = tuple(float(robot.data.joint_pos[0, i]) for i in self._body_ids)
-        body_vel = tuple(float(robot.data.joint_vel[0, i]) for i in self._body_ids)
-        return RobotState(
-            run_id=self.run_id,
-            episode_id=self.episode_id,
-            physics_tick=self.tick,
-            simulated_time=float(self._sim.current_time),
-            root_position=root_pos,
-            root_rotation_wxyz=root_quat,
-            body_position=body_pos,
-            body_velocity=body_vel,
-            timeline_state=self.state,
-        )
-
-    def _record_tick(self, state: RobotState) -> None:
-        metric = state.as_dict()
-        camera_metric = None
-        viewport_metric = None
-        if self.tick % self.capture_every == 0:
-            camera = self._scene["head_camera"].data.output.get("rgb")
-            if self.evidence.head_video is not None and camera is not None:
-                camera_metric = self.evidence.head_video.append(camera)
-            if self.evidence.viewport_video is not None and self._viewport_capture is not None:
-                viewport_metric = self.evidence.viewport_video.append(self._viewport_capture())
-        metric["camera"] = camera_metric
-        metric["viewport"] = viewport_metric
-        self.evidence.metrics.write(metric)
-
     def _update_head_camera_panel(self) -> None:
         if self._head_camera_provider is None:
             return
@@ -465,7 +306,14 @@ class SimulatorService:
         try:
             import numpy as np
 
-            image = StreamingVideoWriter.normalize(camera)
+            image = camera.detach().cpu().numpy() if hasattr(camera, "detach") else np.asarray(camera)
+            while image.ndim > 3 and image.shape[0] == 1:
+                image = image[0]
+            if image.ndim == 4:
+                image = image[0]
+            if image.ndim != 3 or image.shape[-1] not in (3, 4):
+                return
+            image = np.ascontiguousarray(image[..., :3].astype(np.uint8, copy=False))
             rgba = np.empty((*image.shape[:2], 4), dtype=np.uint8)
             rgba[..., :3] = image
             rgba[..., 3] = 255
@@ -475,111 +323,129 @@ class SimulatorService:
         except (TypeError, ValueError):
             return
 
-    def _step_physics(self, *, record: bool) -> None:
-        """Advance the sole physics owner once, optionally recording the tick."""
+    def _step_physics(self) -> None:
+        """Advance physics once, refreshing render and sensors on their own cadence."""
         self._robot.set_joint_effort_target(0.0)
         self._scene.write_data_to_sim()
-        self._sim.step()
-        self._scene.update(self.profile.physics_dt)
-        self._ui_tick += 1
-        if self._ui_tick % self.capture_every == 0:
-            self._update_head_camera_panel()
-        if not record:
-            return
+        self._sim.step(render=False)
         self.tick += 1
-        state = self._robot_state()
-        self._root_z.append(state.root_position[2])
-        self._root_up.append(quaternion_up_z(state.root_rotation_wxyz))
-        self._simulated_times.append(state.simulated_time)
-        self._record_tick(state)
+        rendered = self._is_rendering and self.tick % self.profile.render_interval == 0
+        if rendered:
+            self._sim.render()
+        self._scene.update(self.profile.physics_dt)
+        if rendered:
+            self._update_head_camera_panel()
+        if self.test_mode == "passive-fall":
+            self._root_z.append(float(self._robot.data.root_pos_w[0, 2]))
+            root_quat = tuple(float(value) for value in self._robot.data.root_quat_w[0].tolist())
+            self._root_up.append(quaternion_up_z(root_quat))
+
+    def _render_paused(self) -> None:
+        """Refresh UI and viewport at a bounded rate while physics is paused."""
+        interval = 1.0 / self.PAUSED_RENDER_HZ
+        delay = self._last_paused_render + interval - time.monotonic()
+        if delay > 0.0:
+            time.sleep(delay)
+        self._last_paused_render = time.monotonic()
+        self._sim.render()
+
+    def _report_performance(self) -> None:
+        """Print one compact performance sample per wall-clock second."""
+        now = time.monotonic()
+        elapsed = now - self._last_perf_report
+        if elapsed < 1.0:
+            return
+        physics_hz = (self.tick - self._last_perf_tick) / elapsed
+        render_fps = physics_hz / self.profile.render_interval if self._is_rendering else 0.0
+        print(
+            f"[isaac-g1] physics={physics_hz:.1f} Hz  render={render_fps:.1f} FPS  "
+            f"RTF={physics_hz * self.profile.physics_dt:.2f}x  device={self._device}",
+            flush=True,
+        )
+        self._last_perf_report = now
+        self._last_perf_tick = self.tick
 
     def run(self) -> dict[str, Any]:
         self.start()
         self.play()
-        started = time.monotonic()
+        self._run_started = time.monotonic()
+        self._last_perf_report = self._run_started
         try:
-            while self.app.is_running() and time.monotonic() - started < self.duration:
+            while self.app.is_running() and time.monotonic() - self._run_started < self.duration:
                 if self._pending_ui_reset:
                     self._pending_ui_reset = False
                     # Match the official Isaac Lab reset order: write state
                     # while playing, publish it through the sole physics step,
                     # then pause on the freshly rendered initial pose.
                     self.reset_episode(resume=True)
-                    self._step_physics(record=False)
+                    self._step_physics()
                     self.pause()
                     print('{"event":"isaac_g1_ui_reset","timeline":"paused"}', flush=True)
                     continue
                 if self._timeline.is_playing():
                     if self.state is not TimelineState.PLAYING:
                         self._transition(TimelineState.PLAYING)
-                    self._step_physics(record=True)
+                    iteration_started = time.monotonic()
+                    self._step_physics()
+                    self._wall_physics_elapsed += time.monotonic() - iteration_started
+                    self._report_performance()
                 else:
                     if self.state is not TimelineState.PAUSED:
                         self._transition(TimelineState.PAUSED)
-                    self._sim.render()  # Paused loop renders and never advances physics.
+                    self._render_paused()
         except Exception as exc:
             self._transition(TimelineState.FAILED, error=str(exc))
             raise
         finally:
             self.stop()
         self._transition(TimelineState.STOPPED)
-        videos = self.evidence.close()
         summary = (
-            self._passive_fall_acceptance(videos)
+            self._passive_fall_acceptance()
             if self.test_mode == "passive-fall"
-            else self._runtime_summary(videos)
+            else self._runtime_summary()
         )
-        self.evidence.write_json("summary.json", summary)
         return summary
 
-    def _runtime_summary(self, videos: dict[str, Any]) -> dict[str, Any]:
+    def _accounting(self) -> dict[str, Any]:
+        simulated_time = self.tick * self.profile.physics_dt
         return {
-            "result": "COMPLETED",
-            "run_id": self.run_id,
-            "profile_id": self.profile.profile_id,
             "physics_ticks": self.tick,
-            "episodes": self.episode_id,
-            "videos": videos,
+            "real_time_factor": (
+                simulated_time / self._wall_physics_elapsed if self._wall_physics_elapsed else 0.0
+            ),
+            "device": self._device,
+            "render_interval": self.profile.render_interval,
         }
 
-    def _passive_fall_acceptance(self, videos: dict[str, Any]) -> dict[str, Any]:
+    def _runtime_summary(self) -> dict[str, Any]:
+        return {
+            "result": "COMPLETED",
+            "profile_id": self.profile.profile_id,
+            **self._accounting(),
+        }
+
+    def _passive_fall_acceptance(self) -> dict[str, Any]:
         thresholds = AcceptanceThresholds()
         initial_z = self._root_z[0] if self._root_z else None
         minimum_z = min(self._root_z) if self._root_z else None
         drop = 0.0 if initial_z is None or minimum_z is None else initial_z - minimum_z
         up_change = 0.0 if not self._root_up else abs(self._root_up[-1] - self._root_up[0])
         fell = drop >= thresholds.minimum_drop_m or up_change >= thresholds.minimum_up_change
-        head = videos["head_camera"]
-        viewport = videos["debug_viewport"]
-        physics_time_monotonic = len(self._simulated_times) > 1 and all(
-            later > earlier for earlier, later in zip(self._simulated_times, self._simulated_times[1:])
-        )
-        expected_shape = [self.profile.camera.height, self.profile.camera.width, 3]
         checks = {
             "controller_absent": True,
-            "physics_tick_monotonic": self.tick > 1 and physics_time_monotonic,
+            "physics_tick_monotonic": self.tick > 1,
             "robot_fell": fell,
             "floor_bounded": bool(self._root_z and minimum_z >= thresholds.minimum_root_z),
-            "head_camera_flowing": head.get("frames", 0) >= thresholds.minimum_frames
-            and head.get("changed_pixels", 0) >= thresholds.minimum_changed_pixels
-            and head.get("shape") == expected_shape,
             "clean_stop": True,
         }
-        if self.show_ui:
-            checks["debug_viewport_flowing"] = (
-                viewport.get("frames", 0) >= thresholds.minimum_frames
-                and viewport.get("changed_pixels", 0) >= thresholds.minimum_changed_pixels
-            )
         result = "PASS" if all(checks.values()) else "FAIL"
         return {
             "result": result,
-            "run_id": self.run_id,
             "profile_id": self.profile.profile_id,
             "checks": checks,
-            "physics_ticks": self.tick,
+            **self._accounting(),
             "initial_root_z": initial_z,
             "minimum_root_z": minimum_z,
             "root_drop_m": drop,
             "pelvis_up_change": up_change,
-            "videos": videos,
         }
