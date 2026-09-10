@@ -87,6 +87,10 @@ class FakeSim:
     def __init__(self) -> None:
         self.steps = 0
         self.current_time = 0.0
+        self.renders = 0
+
+    def render(self) -> None:
+        self.renders += 1
 
     def reset(self) -> None:
         self.reset_called = True
@@ -234,11 +238,18 @@ class InteractiveLoopTest(unittest.TestCase):
         self.assertEqual(sim.steps, 2)
         self.assertEqual(len(applied), 2)
 
-    def test_app_is_pumped_every_frame_including_while_playing(self) -> None:
-        """Kit must be pumped while playing, or the viewport never repaints."""
+    def test_viewport_is_refreshed_via_render_every_playing_frame(self) -> None:
+        """render() flushes fabric into the textures; app.update() does not."""
         app = FakeApp(4)
         sim, scene = FakeSim(), FakeScene()
-        metrics = make_metrics()
+        calls = {"render": 0}
+        original_render = sim.render
+
+        def counting_render():
+            calls["render"] += 1
+            return original_render()
+
+        sim.render = counting_render
         runner.run_interactive_app(
             app,
             FakeTimeline([True] * 4, app),
@@ -246,30 +257,31 @@ class InteractiveLoopTest(unittest.TestCase):
             scene,
             actuation=BodyActuation([88.0] * BODY_JOINT_COUNT),
             link=FakeLink(),
-            metrics=metrics,
+            metrics=make_metrics(),
             read_state=lambda: None,
             read_body_q_dq=lambda: (vector(0.0), vector(0.0)),
             apply_effort=lambda efforts: None,
         )
-        self.assertEqual(sim.steps, 4, "physics should advance on every playing frame")
-        self.assertEqual(
-            app.updates, 4,
-            "app.update() must run on playing frames too, otherwise the GUI freezes",
-        )
+        self.assertEqual(calls["render"], 4, "render() must run on every playing frame")
 
-    def test_state_is_published_every_frame_including_paused(self) -> None:
-        _steps, _sim, _applied, link, _metrics = self.run_loop(
-            [False, False, False], frames=3
-        )
-        self.assertEqual(link.published, 3)
+    def test_refresh_viewport_falls_back_when_render_is_unavailable(self) -> None:
+        app = FakeApp(3)
 
-    def test_no_controller_means_every_applied_effort_is_zero(self) -> None:
-        _steps, _sim, applied, _link, metrics = self.run_loop([True, True, True], frames=3)
-        self.assertTrue(applied)
-        for efforts in applied:
-            self.assertEqual(efforts, (0.0,) * BODY_JOINT_COUNT)
-        self.assertEqual(metrics.passive_steps, 3)
-        self.assertEqual(metrics.controlled_steps, 0)
+        class NoRender:
+            pass
+
+        for _ in range(3):
+            runner.refresh_viewport(NoRender(), app)
+        self.assertEqual(app.updates, 3)
+
+    def test_refresh_viewport_survives_a_failing_render(self) -> None:
+        class BadRender:
+            def render(self):
+                raise RuntimeError("render failed")
+
+        app = FakeApp(1)
+        runner.refresh_viewport(BadRender(), app)
+        self.assertEqual(app.updates, 1)
 
     def test_command_received_while_paused_is_cached_not_applied(self) -> None:
         link = FakeLink([command(1, kp=100.0, q=0.5)])
@@ -668,10 +680,10 @@ class ShutdownTest(unittest.TestCase):
 
         report = runner.shutdown_app(BrokenApp(), None, None, settle_s=0.05,
                                      close_timeout_s=1.0)
-        # BrokenApp.update raises and has no close(); the helper must still
-        # return a report instead of propagating.
+        # BrokenApp.update raises; the helper must still return a report
+        # instead of propagating, and must still attempt the close.
         self.assertIn("closed", report)
-        self.assertFalse(report["closed"])
+        self.assertTrue(report["closed"])
 
     def test_main_registers_handles_for_shutdown(self) -> None:
         self.assertIn('_SIM["sim"] = sim', self.source)

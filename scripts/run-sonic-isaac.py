@@ -85,6 +85,26 @@ HANDS_CONTROLLED_BY_SONIC = False
 # --------------------------------------------------------------------------- #
 
 
+def refresh_viewport(sim: object, simulation_app: object) -> None:
+    """Refresh the rendered viewport, falling back to a plain app frame.
+
+    ``SimulationContext.render()`` is what flushes fabric data into the Hydra
+    textures; using it keeps the live window and any recording in step with the
+    physics instead of freezing on the first frame.
+    """
+    render = getattr(sim, "render", None)
+    if render is not None:
+        try:
+            render()
+            return
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        simulation_app.update()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def pump_app(simulation_app: object, frames: int = 2) -> None:
     """Run a few app frames so the window keeps answering the desktop.
 
@@ -281,10 +301,11 @@ def run_interactive_app(
             efforts=None if step is None else step.efforts,
             apply_effort=apply_effort,
         )
-        # Pump the Kit application every frame, playing or paused. Without this
-        # the physics still advances but the viewport never presents a new
-        # frame, so the GUI looks frozen while the timeline runs.
-        simulation_app.update()
+        # Refresh the viewport every frame, playing or paused. A bare
+        # app.update() does not flush the physics transforms into the Hydra
+        # textures, so both the window and the recording would stay on the
+        # first frame while the timeline advances.
+        refresh_viewport(sim, simulation_app)
         if advanced:
             physics_steps += 1
             if on_physics_step is not None:
@@ -1078,7 +1099,7 @@ def _run(args: argparse.Namespace, profile: Profile, simulation_app) -> tuple[in
     hold_started = time.monotonic()
     hold_updates = 0
     while (time.monotonic() - hold_started) < args.paused_hold:
-        simulation_app.update()
+        refresh_viewport(sim, simulation_app)
         # The bridge may connect during the paused hold; the link must be
         # accepted here as well as in the main loop.
         link.accept()
@@ -1112,7 +1133,7 @@ def _run(args: argparse.Namespace, profile: Profile, simulation_app) -> tuple[in
                     "waited_s": waited,
                 })
                 return EXIT_BROKEN, {"status": "play_trigger_timeout"}
-            simulation_app.update()
+            refresh_viewport(sim, simulation_app)
             # The bridge connects while the scene is paused, so the link has to
             # be accepted here or the connection would sit unaccepted.
             link.accept()
