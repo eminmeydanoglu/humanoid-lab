@@ -191,9 +191,9 @@ case "${1:-}" in
         # TTY; the automated gates pass --auto-play/--headless and get -T.
         up_once
         if [ "${*: -1}" = "--headless" ] || printf '%s\n' "$@" | grep -qx -- '--auto-play'; then
-          DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && cd /workspace/humanoid-lab && exec python scripts/sonic-isaac-session.py start "$@"' sonic-isaac "${@:2}"
+          DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && cd /workspace/humanoid-lab && exec python scripts/sonic-isaac-session.py start "$@"' sonic-isaac "${@:3}"
         else
-          DC exec dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && cd /workspace/humanoid-lab && exec python scripts/sonic-isaac-session.py start "$@"' sonic-isaac "${@:2}"
+          DC exec dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && cd /workspace/humanoid-lab && exec python scripts/sonic-isaac-session.py start "$@"' sonic-isaac "${@:3}"
         fi
         ;;
       status|stop)
@@ -202,7 +202,7 @@ case "${1:-}" in
         ;;
       accept)
         up_once
-        DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && cd /workspace/humanoid-lab && exec python scripts/sonic-isaac-session.py accept "$@"' sonic-isaac "${@:2}"
+        DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && cd /workspace/humanoid-lab && exec python scripts/sonic-isaac-session.py accept "$@"' sonic-isaac "${@:3}"
         ;;
       *)
         echo "usage: $0 sonic-isaac {start --robot g1-29dof|g1-inspire --input keyboard|f310|status|stop|accept --robot g1-29dof|g1-inspire}" >&2
