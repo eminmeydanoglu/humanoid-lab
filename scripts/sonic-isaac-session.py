@@ -691,7 +691,9 @@ def main() -> int:
     start.add_argument("--arm-settle", type=float, default=6.0,
                        help="seconds between arming SONIC and allowing physics to run")
     start.add_argument("--deploy-ready-timeout", type=float, default=600.0)
-    start.add_argument("--deploy-quiet-s", type=float, default=4.0)
+    # Must exceed the deploy's waiting-for-LowState message interval, or the
+    # quiet period would end while it is still reporting that it has no state.
+    start.add_argument("--deploy-quiet-s", type=float, default=16.0)
     start.add_argument("--max-run-s", type=float, default=900.0)
     # Simulation-only by construction: any other value is refused by the
     # launcher gates rather than silently connecting to a real robot.
