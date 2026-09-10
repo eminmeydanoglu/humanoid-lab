@@ -685,18 +685,38 @@ class VideoRecorder:
         return None
 
     def write(self) -> dict:
+        """Encode the captured frames to one continuous mp4.
+
+        Frames are appended one at a time: imageio's list overload stacks them
+        into a single 4-D array and then rejects it as "not 2D", which fails the
+        recording silently.
+        """
         if self.path is None:
             return {"status": "disabled", "frames": 0}
         if not self.frames:
-            return {"status": self.status, "frames": 0}
+            return {"status": self.status, "frames": 0, "path": str(self.path)}
         try:
-            import imageio.v2 as iio
+            import imageio
 
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            iio.imwrite(str(self.path), self.frames, fps=self.fps, codec="libx264")
+            writer = imageio.get_writer(
+                str(self.path), fps=self.fps, codec="libx264", macro_block_size=None
+            )
+            try:
+                for frame in self.frames:
+                    writer.append_data(frame)
+            finally:
+                writer.close()
         except Exception as exc:  # noqa: BLE001
             return {"status": f"encode_failed: {exc}", "frames": len(self.frames)}
-        return {"status": "written", "frames": len(self.frames), "path": str(self.path)}
+        if not self.path.is_file() or self.path.stat().st_size == 0:
+            return {"status": "encode_empty", "frames": len(self.frames)}
+        return {
+            "status": "written",
+            "frames": len(self.frames),
+            "path": str(self.path),
+            "bytes": self.path.stat().st_size,
+        }
 
 
 # --------------------------------------------------------------------------- #
