@@ -623,6 +623,24 @@ def read_hand_state(robot: object, hand_ids: Sequence[int]) -> HandStateFrame:
 # --------------------------------------------------------------------------- #
 
 
+def viewport_diagnostics() -> dict:
+    """Describe the viewport being recorded; empty when it cannot be inspected."""
+    info: dict = {}
+    try:
+        from omni.kit.viewport.utility import get_active_viewport
+
+        viewport = get_active_viewport()
+        info["render_product_path"] = getattr(viewport, "render_product_path", None)
+        info["resolution"] = list(getattr(viewport, "resolution", ()) or ())
+        try:
+            info["camera_path"] = viewport.get_active_camera()
+        except Exception:  # noqa: BLE001
+            info["camera_path"] = None
+    except Exception as exc:  # noqa: BLE001
+        info["error"] = str(exc)
+    return info
+
+
 def make_viewport_capture():
     """Return a callable producing the active viewport's RGB frame, or None."""
     try:
@@ -1054,6 +1072,7 @@ def _run(args: argparse.Namespace, profile: Profile, simulation_app) -> tuple[in
         "physics_steps": steps,
         "paused_hold": paused_hold,
         "diagnostics": diagnostics,
+        "viewport": viewport_diagnostics(),
         "hands_controlled_by_sonic": HANDS_CONTROLLED_BY_SONIC,
         "hand_joint_count": len(hand_ids),
         "hand_q_final": list(hand_state.q),

@@ -409,6 +409,11 @@ class SourceContractTest(unittest.TestCase):
         self.assertIn("set_camera_view", self.source)
         self.assertIn("camera_view_set", self.source)
 
+    def test_evidence_records_which_viewport_was_captured(self) -> None:
+        """An unusable recording must be explainable from the evidence."""
+        self.assertIn("def viewport_diagnostics", self.source)
+        self.assertIn('"viewport": viewport_diagnostics()', self.source)
+
     def test_hands_are_declared_uncontrolled(self) -> None:
         self.assertIn("HANDS_CONTROLLED_BY_SONIC = False", self.source)
 
