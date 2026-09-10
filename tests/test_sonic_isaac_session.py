@@ -176,6 +176,30 @@ class StopPlanTest(unittest.TestCase):
         )
         self.assertEqual(stop_plan(record), (9,))
 
+    def test_dead_session_record_does_not_block_a_new_start(self) -> None:
+        """A leftover record whose processes exited is not a live session."""
+        stale = state(
+            owner_pid=999999,
+            children=[ChildProcess("isaac", 999998, started_at=1.0)],
+        )
+        from sonic_isaac_session import SessionPaths
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = SessionPaths.under(tmp)
+            save_state(paths, stale)
+            reloaded = load_state(paths)
+            self.assertIsNotNone(reloaded)
+            # os.kill on a pid that does not exist is the liveness test used.
+            import os as _os
+
+            alive = True
+            for pid in reloaded.child_pids():
+                try:
+                    _os.kill(pid, 0)
+                except ProcessLookupError:
+                    alive = False
+            self.assertFalse(alive, "the test needs a definitely-dead pid")
+
     def test_stop_on_an_empty_session_targets_nothing(self) -> None:
         self.assertEqual(stop_plan(state()), ())
 

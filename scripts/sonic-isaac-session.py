@@ -233,6 +233,10 @@ def command_start(args: argparse.Namespace) -> int:
     existing = load_state(paths)
     if args.force:
         existing = None
+    # Only a session whose processes are still running may block a new start;
+    # a leftover record from a crashed run is not a concurrent session.
+    if existing is not None and not _any_alive(existing):
+        existing = None
 
     dds_uri = os.environ.get("CYCLONEDDS_URI", "")
     config_text = None
