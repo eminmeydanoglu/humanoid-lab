@@ -47,13 +47,26 @@ from sonic_isaac_ipc import (  # noqa: E402
 MAX_PAYLOAD = 1 << 20
 
 
-def _recv_exact(connection: socket.socket, size: int) -> bytes | None:
+def _recv_exact(connection: socket.socket, size: int, *, idle_timeout_s: float = 120.0):
+    """Read exactly ``size`` bytes, tolerating idle gaps.
+
+    Returns None on a real EOF or once the link has been idle beyond the
+    timeout. A short socket timeout must not be treated as a closed link, or
+    the bridge would exit during a pause in the runner's publishing.
+    """
     chunks = bytearray()
+    deadline = time.monotonic() + float(idle_timeout_s)
     while len(chunks) < size:
-        block = connection.recv(size - len(chunks))
+        try:
+            block = connection.recv(size - len(chunks))
+        except (TimeoutError, socket.timeout):
+            if time.monotonic() >= deadline:
+                return None
+            continue
         if not block:
             return None
         chunks.extend(block)
+        deadline = time.monotonic() + float(idle_timeout_s)
     return bytes(chunks)
 
 

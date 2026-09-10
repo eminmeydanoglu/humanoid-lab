@@ -840,6 +840,9 @@ def _run(args: argparse.Namespace, profile: Profile, simulation_app) -> tuple[in
     hold_updates = 0
     while (time.monotonic() - hold_started) < args.paused_hold:
         simulation_app.update()
+        # The bridge may connect during the paused hold; the link must be
+        # accepted here as well as in the main loop.
+        link.accept()
         link.publish(build_state_frame())
         hold_updates += 1
     hold_clock_after = physx_timestamp()
@@ -871,6 +874,9 @@ def _run(args: argparse.Namespace, profile: Profile, simulation_app) -> tuple[in
                 })
                 return EXIT_BROKEN, {"status": "play_trigger_timeout"}
             simulation_app.update()
+            # The bridge connects while the scene is paused, so the link has to
+            # be accepted here or the connection would sit unaccepted.
+            link.accept()
             link.publish(build_state_frame())
             time.sleep(0.002)
             waited += 0.002

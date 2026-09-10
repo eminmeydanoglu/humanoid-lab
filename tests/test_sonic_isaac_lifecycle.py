@@ -392,6 +392,19 @@ class SourceContractTest(unittest.TestCase):
     def test_hands_are_declared_uncontrolled(self) -> None:
         self.assertIn("HANDS_CONTROLLED_BY_SONIC = False", self.source)
 
+    def test_every_publish_loop_accepts_the_incoming_link(self) -> None:
+        """The bridge connects while paused, so all publish loops must accept."""
+        import inspect
+
+        source = inspect.getsource(runner._run)
+        publishes = source.count("link.publish(build_state_frame())")
+        accepts = source.count("link.accept()")
+        self.assertGreater(publishes, 0)
+        self.assertGreaterEqual(
+            accepts, publishes,
+            "a publish loop without accept() leaves the bridge unconnected",
+        )
+
     def test_timeline_is_not_auto_played_without_an_explicit_flag(self) -> None:
         self.assertIn("--auto-play", self.source)
         self.assertIn("--play-trigger", self.source)

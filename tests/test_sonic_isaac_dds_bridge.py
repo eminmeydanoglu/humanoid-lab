@@ -160,6 +160,38 @@ class BridgeTransportTest(unittest.TestCase):
         link.close()
         thread.join(timeout=10)
 
+    def test_bridge_survives_an_idle_gap_longer_than_the_socket_timeout(self) -> None:
+        """A pause in publishing must not be mistaken for a closed link."""
+        link = StateLink(port=0)
+        link.open()
+        dds = FakeDds(None)
+        thread, _ = self.run_bridge(link, dds)
+
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            link.accept()
+            if link.connected:
+                break
+            time.sleep(0.02)
+        self.assertTrue(link.connected)
+
+        # The bridge's socket timeout is 5 s; idle past it and then resume.
+        self.assertTrue(link.publish(state_frame()))
+        time.sleep(7.0)
+        for _ in range(3):
+            link.publish(state_frame())
+            time.sleep(0.02)
+
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and len(dds.published) < 4:
+            time.sleep(0.05)
+        self.assertGreaterEqual(
+            len(dds.published), 4,
+            "the bridge dropped the link during an idle gap",
+        )
+        link.close()
+        thread.join(timeout=10)
+
     def test_bridge_reports_failure_when_nothing_is_listening(self) -> None:
         import socket
 
