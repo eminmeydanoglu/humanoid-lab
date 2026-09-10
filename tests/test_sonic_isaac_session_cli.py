@@ -141,6 +141,31 @@ class LauncherRefusalTest(unittest.TestCase):
         self.assertIn("no recorded session", result.stdout)
 
 
+class AutoKeysTest(unittest.TestCase):
+    """The launcher supplies the deploy's PTY, so no operator terminal is needed."""
+
+    def setUp(self) -> None:
+        self.source = CLI.read_text()
+
+    def test_tty_is_required_only_for_an_operator_keyboard_session(self) -> None:
+        # The guard sits immediately above the refusal it raises.
+        at = self.source.index("keyboard_requires_tty")
+        guard = self.source[max(0, at - 400) : at]
+        self.assertIn('args.input == "keyboard"', guard)
+        self.assertIn('args.auto_keys == "none"', guard)
+        self.assertIn("isatty", guard)
+
+    def test_auto_keys_replays_the_plan_key_schedules(self) -> None:
+        self.assertIn("drive_schedule", self.source)
+        self.assertIn("standing_schedule", self.source)
+        self.assertIn('"--auto-keys"', self.source)
+
+    def test_play_only_after_the_controller_is_armed(self) -> None:
+        # Physics must not start until SONIC has been armed.
+        self.assertIn("arm_settle", self.source)
+        self.assertIn('play_trigger.write_text', self.source)
+
+
 class DeployArgvTest(unittest.TestCase):
     def test_deploy_command_is_simulation_only(self) -> None:
         sys.path.insert(0, str(ROOT / "scripts"))

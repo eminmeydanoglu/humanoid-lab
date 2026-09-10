@@ -154,7 +154,7 @@ def make_metrics(body_ids=(0, 1, 2)):
         body_ids=body_ids,
         limits=limits,
         read_joint_pos=lambda: (0.0,) * len(body_ids),
-        read_root=lambda: ((0.0, 0.0, 0.7), (1.0, 0.0, 0.0, 0.0)),
+        read_root=lambda: ((0.0, 0.0, 0.7), (1.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
     )
     return metrics
 
@@ -297,7 +297,7 @@ class MetricsTest(unittest.TestCase):
 
         def read_root():
             z = next(heights)
-            return (0.0, 0.0, z), (1.0, 0.0, 0.0, 0.0)
+            return (0.0, 0.0, z), (1.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0)
 
         metrics.bind(body_ids=(), limits=(), read_joint_pos=lambda: (), read_root=read_root)
         metrics.start_measurement(0.0)
@@ -311,8 +311,8 @@ class MetricsTest(unittest.TestCase):
         metrics = runner.Metrics()
         # Pelvis rotated 90 degrees: up-Z collapses to ~0.
         poses = [
-            ((0.0, 0.0, 0.75), (1.0, 0.0, 0.0, 0.0)),
-            ((0.0, 0.0, 0.74), (0.7071, 0.7071, 0.0, 0.0)),
+            ((0.0, 0.0, 0.75), (1.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
+            ((0.0, 0.0, 0.74), (0.7071, 0.7071, 0.0, 0.0), (0.0, 0.0, 0.0)),
         ]
 
         def read_root():
@@ -329,7 +329,7 @@ class MetricsTest(unittest.TestCase):
         metrics = runner.Metrics()
 
         def read_root():
-            return (0.0, 0.0, 0.74), (1.0, 0.0, 0.0, 0.0)
+            return (0.0, 0.0, 0.74), (1.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0)
 
         metrics.bind(body_ids=(), limits=(), read_joint_pos=lambda: (), read_root=read_root)
         metrics.start_measurement(0.0)
@@ -345,7 +345,7 @@ class MetricsTest(unittest.TestCase):
             body_ids=(0,),
             limits=[JointLimits("j0", -0.5, 0.5, 88.0, 32.0)],
             read_joint_pos=lambda: (9.0,),
-            read_root=lambda: ((0.0, 0.0, 0.7), (1.0, 0.0, 0.0, 0.0)),
+            read_root=lambda: ((0.0, 0.0, 0.7), (1.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
         )
         metrics.start_measurement(0.0)
         metrics.observe(None)
@@ -394,7 +394,16 @@ class SourceContractTest(unittest.TestCase):
 
     def test_timeline_is_not_auto_played_without_an_explicit_flag(self) -> None:
         self.assertIn("--auto-play", self.source)
-        self.assertIn("if args.auto_play:", self.source)
+        self.assertIn("--play-trigger", self.source)
+        # Play only happens on an explicit flag or an explicit trigger file.
+        self.assertIn("if args.auto_play or args.play_trigger is not None:", self.source)
+
+    def test_play_trigger_waits_instead_of_playing_on_a_timer(self) -> None:
+        self.assertIn("while not args.play_trigger.is_file():", self.source)
+
+    def test_motion_metrics_expose_the_drive_acceptance_quantities(self) -> None:
+        for key in ("net_xy_m", "root_yaw_deg", "max_speed_mps", "trace"):
+            self.assertIn(f'"{key}"', self.source)
 
 
 if __name__ == "__main__":

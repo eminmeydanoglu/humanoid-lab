@@ -213,8 +213,9 @@ def command_start(args: argparse.Namespace) -> int:
     plan_children(args.robot, args.input)
 
     # Keyboard mode feeds the upstream SONIC input handler directly, so it must
-    # not silently continue against a missing or nested PTY.
-    if args.input == "keyboard" and not sys.stdin.isatty():
+    # not silently continue against a missing or nested PTY. An operator session
+    # needs their terminal; an automated replay gets a launcher-created PTY.
+    if args.input == "keyboard" and args.auto_keys == "none" and not sys.stdin.isatty():
         print(json.dumps({"started": False, "refused": ["keyboard_requires_tty"]}, indent=2))
         return 2
 
@@ -472,14 +473,8 @@ DEPLOY_WAITING_MARKERS = (
     "LowState is not available",
     "waiting for robot",
 )
-#: Lines that mean the deploy is past loading and safe to drive.
-DEPLOY_READY_MARKERS = (
-    "control",
-    "Planner",
-    "planner mode",
-    "Standing",
-    "F1",
-)
+#: Minimum time for the deploy to load its models before it can accept a key.
+DEPLOY_MIN_LOAD_S = 8.0
 
 
 def _wait_deploy_ready(deploy: "PtyChild", *, timeout_s: float, quiet_s: float) -> dict:
@@ -491,19 +486,26 @@ def _wait_deploy_ready(deploy: "PtyChild", *, timeout_s: float, quiet_s: float) 
     """
     started = time.monotonic()
     last_waiting: float | None = None
+    last_output: float | None = None
     seen_waiting = False
     while (time.monotonic() - started) < timeout_s:
         fresh = deploy.drain()
         now = time.monotonic()
+        if fresh:
+            last_output = now
         for line in fresh:
             if any(marker in line for marker in DEPLOY_WAITING_MARKERS):
                 seen_waiting = True
                 last_waiting = now
-            if any(marker in line for marker in DEPLOY_READY_MARKERS):
-                return {"ready": True, "reason": "ready_marker", "line": line,
-                        "waited_s": now - started}
-        if seen_waiting and last_waiting is not None and (now - last_waiting) >= quiet_s:
-            return {"ready": True, "reason": "state_flowing", "waited_s": now - started}
+        # State reaching the deploy is what makes a keystroke meaningful: it
+        # stops the deploy reporting that it is still waiting for LowState.
+        if (now - started) < DEPLOY_MIN_LOAD_S:
+            time.sleep(0.05)
+            continue
+        quiet_since = last_waiting if last_waiting is not None else last_output
+        if quiet_since is not None and (now - quiet_since) >= quiet_s:
+            return {"ready": True, "reason": "state_flowing",
+                    "seen_waiting": seen_waiting, "waited_s": now - started}
         if deploy.poll() is not None:
             return {"ready": False, "reason": "deploy_exited", "waited_s": now - started}
         time.sleep(0.05)
