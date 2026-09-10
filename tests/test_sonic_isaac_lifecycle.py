@@ -248,14 +248,38 @@ class InteractiveLoopTest(unittest.TestCase):
 
     def test_viewport_refresh_uses_a_plain_app_frame(self) -> None:
         """app.update() is the refresh that measurably renders motion."""
+        import ast
         import inspect
 
         source = inspect.getsource(runner.refresh_viewport)
-        self.assertIn("simulation_app.update()", source)
-        self.assertNotIn("render()", source)
+        # Inspect the calls, not the prose: the docstring names the alternative.
+        called = {
+            node.func.attr
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+        self.assertIn("update", called)
+        self.assertNotIn("render", called)
+
         app = FakeApp(2)
         runner.refresh_viewport(FakeSim(), app)
         self.assertEqual(app.updates, 2)
+
+    def test_reset_does_not_pause_the_simulation_context(self) -> None:
+        """PhysX pause desynchronises physics from the rendered textures."""
+        import ast
+        import inspect
+
+        source = inspect.getsource(runner.reset_simulation_paused)
+        called = {
+            node.func.attr
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+        self.assertIn("pause", called)
+        self.assertIn("reset", called)
+        # Only the timeline may be paused.
+        self.assertNotIn("sim.pause()", source.replace(":", ""))
 
     def test_viewport_is_refreshed_every_playing_frame(self) -> None:
         """render() flushes fabric into the textures; app.update() does not."""
