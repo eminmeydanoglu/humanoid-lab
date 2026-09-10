@@ -648,7 +648,7 @@ def make_viewport_capture():
 class VideoRecorder:
     """Collects main-viewport frames and writes one uninterrupted mp4."""
 
-    def __init__(self, path: Path | None, *, fps: int = 20, every: int = 10) -> None:
+    def __init__(self, path: Path | None, *, fps: int = 20, every: int = 4) -> None:
         self.path = path
         self.fps = fps
         self.every = every
@@ -894,6 +894,14 @@ def _run(args: argparse.Namespace, profile: Profile, simulation_app) -> tuple[in
         read_root=lambda: read_root_state(robot),
     )
     apply_effort = make_effort_writer(robot, body_ids)
+    # Point the viewport at the robot so the recording actually contains it.
+    if hasattr(sim, "set_camera_view"):
+        try:
+            sim.set_camera_view(eye=(2.4, 2.4, 1.5), target=(0.0, 0.0, 0.6))
+            diagnostics["camera_view_set"] = True
+        except Exception as exc:  # noqa: BLE001
+            diagnostics["camera_view_set"] = f"failed: {exc}"
+
     recorder = VideoRecorder(args.video_path)
 
     link = StateLink(port=args.ipc_port)

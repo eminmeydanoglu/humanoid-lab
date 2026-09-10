@@ -404,6 +404,11 @@ class SourceContractTest(unittest.TestCase):
         self.assertIn("DistantLightCfg", self.source)
         self.assertIn("/World/DomeLight", self.source)
 
+    def test_viewport_camera_is_pointed_at_the_robot(self) -> None:
+        """A recording whose camera misses the robot cannot evidence the fall."""
+        self.assertIn("set_camera_view", self.source)
+        self.assertIn("camera_view_set", self.source)
+
     def test_hands_are_declared_uncontrolled(self) -> None:
         self.assertIn("HANDS_CONTROLLED_BY_SONIC = False", self.source)
 
