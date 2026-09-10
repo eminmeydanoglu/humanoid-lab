@@ -19,15 +19,21 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
+from cloudwalk_actuation import ActuationGate, configure_sonic_actuators  # noqa: E402
 from cloudwalk_adapter import CHECKPOINT_REVISION, EMBODIMENT, G1_BODY_JOINTS, G1_INSPIRE_FTP_JOINTS, PROMPT, validate_observation  # noqa: E402
 from cloudwalk_closed_loop import DEFAULT_ANGLES  # noqa: E402
-from cloudwalk_scene import configure_g1_free_base_articulation, configure_rtx, decorate_scene, load_scene_config, make_scene_cfg  # noqa: E402
-from sonic_isaac_inspire_adapter import ContractError, INSPIRE_HAND_JOINTS, InspireFTPGripMapper, Lifecycle, LifecycleGuard, SafeReference, V4Action  # noqa: E402
+from cloudwalk_scene import configure_g1_free_base_articulation, configure_rtx, decorate_scene, head_camera_prim_path, load_scene_config, make_scene_cfg  # noqa: E402
+from cloudwalk_sim_controller import SimulatorControllerBridge  # noqa: E402
+from sonic_isaac_inspire_adapter import ACTION_RATE_HZ, ContractError, INSPIRE_HAND_JOINTS, InspireFTPGripMapper, Lifecycle, LifecycleGuard, SafeReference, V4Action  # noqa: E402
 
 DEFAULT_DATASET = Path("/data/datasets/groot/gr00t-g1-grab-bottle-right-hand-v10")
 DEFAULT_CHECKPOINT = Path("/data/models/cloudwalk-gr00t-n17-g1-grab-bottle-rh-371ep-v10-finetune/checkpoint-30000")
 EXPECTED_JOINT_COUNT = 53
 EXPECTED_BODY_COUNT = 54
+INTERACTIVE_FALL_TEST_STEPS = 200
+INTERACTIVE_STANDING_TEST_STEPS = 200
+INTERACTIVE_FALL_MIN_DROP_M = 0.05
+INTERACTIVE_FALL_MAX_PELVIS_UP_Z = 0.95
 LEFT_INSPIRE_JOINTS = (
     "L_index_proximal_joint", "L_middle_proximal_joint", "L_pinky_proximal_joint",
     "L_ring_proximal_joint", "L_thumb_proximal_yaw_joint", "L_index_intermediate_joint",
@@ -81,16 +87,73 @@ def _safe_reference() -> SafeReference:
     return SafeReference(V4Action(token, (0.0,) * 7, (0.0,) * 7), "34bae8570d4a4421a5391a5c2befd745d4a02d182ec539e5f9da44c091c67509", "recorded-upstream-sonic-initial-poses.py@a0732b642c0333077e127a2f56ab0014c196bca4")
 
 
-def _open_head_camera_panel() -> object:
+HEAD_CAMERA_PANEL_TITLE = "G1 Head Camera (GR00T RGB)"
+
+
+def _open_head_camera_panel(camera_path: str) -> object:
     from omni import ui
     from omni.kit.viewport.utility import create_viewport_window
 
-    panel = create_viewport_window(name="G1 Head Camera (GR00T RGB)", width=480, height=360, position_x=0, position_y=0)
-    panel.viewport_api.camera_path = "/World/envs/env_0/Robot/pelvis/head_camera"
+    panel = create_viewport_window(name=HEAD_CAMERA_PANEL_TITLE, width=480, height=360, position_x=0, position_y=0)
+    panel.viewport_api.camera_path = camera_path
     dockspace = ui.Workspace.get_window("DockSpace")
     if dockspace is not None:
         panel.dock_in(dockspace, ui.DockPosition.RIGHT)
     return panel
+
+
+def _reset_simulation_paused(sim: object, timeline: object | None) -> None:
+    sim.reset()
+    if timeline is not None:
+        # reset() initializes PhysX tensor views; PAUSE keeps them valid for GUI Play.
+        timeline.pause()
+
+
+def _step_interactive_frame(
+    simulation_app: object,
+    timeline: object,
+    sim: object,
+    scene: object,
+    actuation: object | None = None,
+) -> bool:
+    if not timeline.is_playing():
+        simulation_app.update()
+        return False
+    if actuation is not None:
+        actuation.enforce()
+    scene.write_data_to_sim()
+    sim.step()
+    scene.update(sim.get_physics_dt())
+    return True
+
+
+def _run_interactive_app(
+    simulation_app: object,
+    timeline: object,
+    sim: object,
+    scene: object,
+    actuation: object | None = None,
+    before_frame: object | None = None,
+    before_step: object | None = None,
+) -> int:
+    physics_steps = 0
+    play_started_emitted = False
+    while simulation_app.is_running():
+        if before_frame is not None:
+            before_frame()
+        if before_step is not None and timeline.is_playing():
+            before_step(physics_steps)
+        stepped = _step_interactive_frame(simulation_app, timeline, sim, scene, actuation)
+        if stepped:
+            physics_steps += 1
+            if not play_started_emitted:
+                print(json.dumps({"event": "timeline_play_started"}, sort_keys=True), flush=True)
+                play_started_emitted = True
+    return physics_steps
+
+
+def _fall_accepted(root_drop_m: float, pelvis_up_z: float) -> bool:
+    return root_drop_m >= INTERACTIVE_FALL_MIN_DROP_M or pelvis_up_z <= INTERACTIVE_FALL_MAX_PELVIS_UP_Z
 
 
 def main() -> int:
@@ -106,6 +169,11 @@ def main() -> int:
     parser.add_argument("--table-size", type=float, nargs=3, default=None)
     parser.add_argument("--bottle-position", type=float, nargs=3, default=None)
     parser.add_argument("--interactive", action="store_true", help="Run a paused GUI scene; Timeline Play starts free-base physics.")
+    parser.add_argument("--interactive-fall-test", action="store_true", help="Programmatically Play the paused scene and require passive free-base fall motion.")
+    parser.add_argument("--interactive-fall-test-steps", type=int, default=INTERACTIVE_FALL_TEST_STEPS)
+    parser.add_argument("--interactive-standing-test", action="store_true", help="Play with the pinned SONIC motor model and report direct standing-target motion without enforcing a physical threshold.")
+    parser.add_argument("--interactive-standing-test-steps", type=int, default=INTERACTIVE_STANDING_TEST_STEPS)
+    parser.add_argument("--controller-attach-test-steps", type=int, default=0, help="Wait for the separate controller, Play for N physics steps, require live transport, and report physical motion without enforcing a stability threshold.")
     parser.add_argument("--hand-sign-probe", action="store_true")
     parser.add_argument("--checkpoint-revision", default=CHECKPOINT_REVISION)
     parser.add_argument("--validate-only", action="store_true")
@@ -114,16 +182,30 @@ def main() -> int:
     parser.add_argument("--state-endpoint", default="tcp://127.0.0.1:56112")
     parser.add_argument("--body-endpoint", default="tcp://127.0.0.1:56113")
     parser.add_argument("--action-endpoint", default="tcp://127.0.0.1:56114")
+    parser.add_argument("--control-endpoint", default="tcp://127.0.0.1:56115")
+    parser.add_argument("--observation-endpoint", default="tcp://127.0.0.1:56116")
     from isaaclab.app import AppLauncher
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
     _enable_required_camera(args)
-    if args.interactive:
+    interactive_mode = args.interactive or args.interactive_fall_test or args.interactive_standing_test
+    if interactive_mode:
         args.kit_args = " ".join((args.kit_args, "--enable omni.anim.window.timeline --/exts/omni.anim.window.timeline/show=true")).strip()
     if args.checkpoint_revision != CHECKPOINT_REVISION:
         _fail("checkpoint revision is not the verified CloudWalk checkpoint revision")
-    if args.interactive and args.closed_loop:
-        _fail("interactive GUI mode does not start GR00T or SONIC; use the headless closed-loop launcher")
+    if interactive_mode and args.closed_loop:
+        _fail("interactive modes do not start GR00T or SONIC; use the headless closed-loop launcher")
+    selected_interactive_modes = sum(bool(value) for value in (args.interactive, args.interactive_fall_test, args.interactive_standing_test))
+    if selected_interactive_modes > 1:
+        _fail("choose only one interactive mode")
+    if args.interactive_fall_test_steps <= 0:
+        _fail("--interactive-fall-test-steps must be positive")
+    if args.interactive_standing_test_steps <= 0:
+        _fail("--interactive-standing-test-steps must be positive")
+    if args.controller_attach_test_steps < 0:
+        _fail("--controller-attach-test-steps cannot be negative")
+    if args.controller_attach_test_steps and not args.interactive:
+        _fail("--controller-attach-test-steps requires --interactive")
     _validate_cloudwalk_contract(args.dataset, args.checkpoint)
     scene_config = load_scene_config(args.scene_config)
     if args.table_position is not None:
@@ -150,16 +232,37 @@ def main() -> int:
         robot_cfg = G1_INSPIRE_FTP_CFG.copy()
         robot_cfg.spawn.rigid_props.disable_gravity = False
         robot_cfg.spawn.articulation_props.fix_root_link = False
+        configure_sonic_actuators(robot_cfg)
         if robot_cfg.spawn.rigid_props.disable_gravity or robot_cfg.spawn.articulation_props.fix_root_link:
             _fail("CloudWalk physics requires a free-base gravity-enabled G1")
         configure_rtx(scene_config)
-        sim = sim_utils.SimulationContext(sim_utils.SimulationCfg(dt=0.01, device=args.device))
+        if interactive_mode:
+            import carb
+            from isaacsim.core.simulation_manager import SimulationManager
+
+            physics_settings = carb.settings.get_settings()
+            physics_settings.set_bool("/physics/fabricEnabled", True)
+            physics_settings.set_bool("/physics/updateToUsd", False)
+            SimulationManager.enable_fabric(True)
+        sim = sim_utils.SimulationContext(
+            sim_utils.SimulationCfg(dt=0.01, device=args.device, use_fabric=True)
+        )
+        if interactive_mode and str(args.device).startswith("cuda") and not sim.is_fabric_enabled():
+            _fail("Interactive GPU simulation requires Fabric to render physics transforms")
         scene = InteractiveScene(make_scene_cfg(scene_config, robot_cfg)(num_envs=1, env_spacing=1.0))
         # All visual child prims and the free-base root override are authored before
-        # reset creates the PhysX tensor view.  Runtime code never changes topology.
+        # reset creates the PhysX tensor view. Runtime code never changes topology.
         decorate_scene(scene_config)
         configure_g1_free_base_articulation()
-        sim.reset()
+        from isaaclab.sim.utils.stage import attach_stage_to_usd_context
+
+        attach_stage_to_usd_context()
+        timeline = None
+        if interactive_mode:
+            import omni.timeline
+
+            timeline = omni.timeline.get_timeline_interface()
+        _reset_simulation_paused(sim, timeline)
         robot, camera = scene["robot"], scene["head_camera"]
         if robot.num_joints != EXPECTED_JOINT_COUNT or robot.num_bodies != EXPECTED_BODY_COUNT:
             _fail(f"G1 Inspire runtime contract is {robot.num_joints} joints/{robot.num_bodies} bodies, expected 53/54")
@@ -186,6 +289,7 @@ def main() -> int:
         # A free root is initialized in the standing posture before the timeline advances.
         robot.write_joint_state_to_sim(standing_targets, default_vel)
         robot.set_joint_position_target(standing_targets)
+        actuation = ActuationGate(robot)
         standing_reference = _safe_reference()
         lifecycle = LifecycleGuard(watchdog_seconds=0.10)
         lifecycle.initialize(standing_reference)
@@ -196,9 +300,13 @@ def main() -> int:
             right_hand_body_ids = [index for index, name in enumerate(robot.body_names) if name.startswith("R_")]
         rollout_samples: list[dict[str, object]] = []
         video_frames: list[object] = []
+        # Shared by the rollout-metrics tail on every mode; the closed-loop branch only increments them.
+        inference_frames = 0
+        body_frames = 0
         initial_bottle_z = float(bottle.data.root_pos_w[0, 2])
         stable_grasp_frames = 0
         events: list[str] = ["initial_pose", "gravity_settle", "hand_open"]
+        interactive_physics_steps = 0
         if args.hand_sign_probe:
             closed = mapper.targets(V4Action((0.0,) * 64, (1.0,) * 7, (1.0,) * 7), hand_limits, hand_open_positions)
             print(json.dumps({"event": "right_thumb_sign_probe", "asset": "g1_29dof_inspire_hand.usd", "joint": "R_thumb_proximal_yaw_joint", "limits": dict(zip(INSPIRE_HAND_JOINTS, hand_limits)), "open_target": float(standing_targets[0, robot.joint_names.index("R_thumb_proximal_yaw_joint")]), "closed_target": closed[INSPIRE_HAND_JOINTS.index("R_thumb_proximal_yaw_joint")], "closure_direction": "lower_to_upper"}, sort_keys=True), flush=True)
@@ -213,7 +321,7 @@ def main() -> int:
                 sys.path.insert(0, "/opt/venvs/sonic-sim/lib/python3.11/site-packages")
                 import zmq
             from cloudwalk_closed_loop import BodyCommand, SonicState, native_decoder_state
-            from sonic_isaac_inspire_adapter import ACTION_RATE_HZ, INFERENCE_RATE_HZ, split_groot_action_chunk
+            from sonic_isaac_inspire_adapter import INFERENCE_RATE_HZ, split_groot_action_chunk
 
             module_spec = importlib.util.spec_from_file_location("cloudwalk_upstream_packer", ROOT / "scripts" / "sonic-isolated-vla-producer.py")
             packer_module = importlib.util.module_from_spec(module_spec)
@@ -251,7 +359,7 @@ def main() -> int:
             worker = threading.Thread(target=inference_worker, name="cloudwalk-groot", daemon=True)
             worker.start()
             time.sleep(0.25)
-            chunk = None; chunk_index = 0; sequence = 0; last_command_sequence = -1; body_frames = 0; inference_frames = 0; warmup_frames = 10
+            chunk = None; chunk_index = 0; sequence = 0; last_command_sequence = -1; warmup_frames = 10
             last_body = tuple(float(value) for value in standing_targets[0, body_ids].tolist())
             last_raw_action = (0.0,) * 29
             last_hand_action = standing_reference.action
@@ -345,21 +453,118 @@ def main() -> int:
                 _fail("closed loop did not receive both upstream GR00T and native SONIC body frames")
             events.extend(("live_rgb_state", "upstream_groot_policy", "upstream_v4_serializer", "native_sonic_29_body", "hands_24_joint_applied"))
             print(json.dumps({"event": "closed_loop", "inference_frames": inference_frames, "native_body_frames": body_frames, "hand_application": "verified_24_joint_normalized_mapper", "body_dofs": list(G1_BODY_JOINTS), "prompt": PROMPT, "embodiment": EMBODIMENT}, sort_keys=True), flush=True)
-        elif args.interactive:
-            import omni.timeline
-
-            timeline = omni.timeline.get_timeline_interface()
-            # STOP invalidates IsaacLab tensor views; PAUSE preserves them for Timeline Play.
-            timeline.pause()
-            head_camera_panel = _open_head_camera_panel()
-            print(json.dumps({"event": "interactive_ready", "physics": "free_base_gravity_enabled", "head_camera_panel": "G1 Head Camera (GR00T RGB)", "instruction": "Press Timeline Play to begin PhysX stepping; do not alter stage topology after Play."}, sort_keys=True), flush=True)
-            while simulation_app.is_running():
-                if timeline.is_playing():
+        elif interactive_mode:
+            actuation.set_passive()
+            scene.write_data_to_sim()
+            if args.interactive_fall_test:
+                timeline.play()
+                simulation_app.update()
+                print(json.dumps({"event": "timeline_play_started", "source": "interactive_fall_test"}, sort_keys=True), flush=True)
+                for _ in range(args.interactive_fall_test_steps):
+                    if not _step_interactive_frame(simulation_app, timeline, sim, scene, actuation):
+                        _fail("interactive fall test timeline stopped before completing physics steps")
+                    interactive_physics_steps += 1
+                timeline.pause()
+                events.append("interactive_fall_test")
+            elif args.interactive_standing_test:
+                actuation.set_controlled()
+                robot.set_joint_position_target(standing_targets)
+                scene.write_data_to_sim()
+                timeline.play()
+                simulation_app.update()
+                print(json.dumps({"event": "timeline_play_started", "source": "interactive_standing_test"}, sort_keys=True), flush=True)
+                for _ in range(args.interactive_standing_test_steps):
                     robot.set_joint_position_target(standing_targets)
-                    scene.write_data_to_sim(); sim.step(); scene.update(sim.get_physics_dt())
-                else:
-                    sim.render()
-            events.append("interactive_scene")
+                    if not _step_interactive_frame(simulation_app, timeline, sim, scene, actuation):
+                        _fail("interactive standing test timeline stopped before completing physics steps")
+                    interactive_physics_steps += 1
+                timeline.pause()
+                events.append("interactive_standing_test")
+            else:
+                bridge = SimulatorControllerBridge(
+                    state_endpoint=args.state_endpoint,
+                    body_endpoint=args.body_endpoint,
+                    action_endpoint=args.action_endpoint,
+                    control_endpoint=args.control_endpoint,
+                    observation_endpoint=args.observation_endpoint,
+                )
+                head_camera_panel = _open_head_camera_panel(head_camera_prim_path(scene_config, "/World/envs/env_0"))
+                timeline.pause()
+
+                def poll_controller() -> None:
+                    response = bridge.poll_control(actuation, robot, standing_targets, timeline.is_playing())
+                    if response is not None and response.get("state") in ("holding", "controlled", "passive"):
+                        print(json.dumps({"event": "controller_state", **response}, sort_keys=True), flush=True)
+                    if response is not None and response.get("state") == "holding":
+                        bridge.publish_policy_observation(
+                            robot=robot,
+                            camera=camera,
+                            body_ids=body_ids,
+                            prompt=PROMPT,
+                            validate_observation=validate_observation,
+                        )
+                        print(json.dumps({"event": "controller_bootstrap_observation"}, sort_keys=True), flush=True)
+
+                def controller_step(physics_step: int) -> None:
+                    if physics_step % 2:
+                        return
+                    event = bridge.control_tick(
+                        robot=robot,
+                        camera=camera,
+                        body_ids=body_ids,
+                        inspire_ids=inspire_ids,
+                        standing_targets=standing_targets,
+                        mapper=mapper,
+                        hand_limits=hand_limits,
+                        hand_open_positions=hand_open_positions,
+                        prompt=PROMPT,
+                        validate_observation=validate_observation,
+                        actuation=actuation,
+                    )
+                    if event is not None:
+                        print(json.dumps({"event": event, **bridge.snapshot(timeline.is_playing())}, sort_keys=True), flush=True)
+
+                print(json.dumps({"event": "simulator_ready", "timeline": "paused", "actuation": "passive", "head_camera_panel": HEAD_CAMERA_PANEL_TITLE, "instruction": "Timeline Play controls physics only. Run ./scripts/run-cloudwalk-controller.sh separately to arm GR00T and SONIC."}, sort_keys=True), flush=True)
+                try:
+                    if args.controller_attach_test_steps:
+                        deadline = time.monotonic() + 30.0
+                        while not bridge.status.active and time.monotonic() < deadline:
+                            poll_controller()
+                            simulation_app.update()
+                        if not bridge.status.active:
+                            _fail("separate controller did not arm within 30 seconds")
+                        if timeline.is_playing():
+                            _fail("controller start changed the paused Timeline state")
+                        policy_deadline = time.monotonic() + 120.0
+                        while bridge.status.state != "controlled" and time.monotonic() < policy_deadline:
+                            poll_controller()
+                            simulation_app.update()
+                        if bridge.status.state != "controlled":
+                            _fail("separate controller did not receive a GR00T policy reply within 120 seconds")
+                        if timeline.is_playing():
+                            _fail("controller policy activation changed the paused Timeline state")
+                        timeline.play()
+                        simulation_app.update()
+                        print(json.dumps({"event": "timeline_play_started", "source": "controller_attach_test"}, sort_keys=True), flush=True)
+                        for physics_step in range(args.controller_attach_test_steps):
+                            poll_controller()
+                            controller_step(physics_step)
+                            if not _step_interactive_frame(simulation_app, timeline, sim, scene, actuation):
+                                _fail("controller attach test timeline stopped")
+                            interactive_physics_steps += 1
+                        timeline.pause()
+                        if not bridge.status.active or bridge.status.body_frames == 0 or bridge.status.action_frames == 0:
+                            _fail(f"controller attach test did not receive live actions/body commands: {bridge.snapshot(False)}")
+                        print(json.dumps({"event": "controller_attach_test", **bridge.snapshot(False)}, sort_keys=True), flush=True)
+                    else:
+                        interactive_physics_steps = _run_interactive_app(
+                            simulation_app, timeline, sim, scene, actuation, before_frame=poll_controller, before_step=controller_step
+                        )
+                finally:
+                    bridge.close()
+                if interactive_physics_steps:
+                    events.append("timeline_play_observed")
+                events.append("interactive_scene")
         else:
             for _ in range(args.steps):
                 robot.set_joint_position_target(standing_targets)
@@ -379,6 +584,22 @@ def main() -> int:
             "final_root_linear_velocity_w": final_root_linear_velocity,
             "pelvis_up_z": pelvis_up_z,
         }
+        if interactive_mode:
+            root_drop_m = initial_root_pos[2] - final_root_pos[2]
+            fall_accepted = _fall_accepted(root_drop_m, pelvis_up_z)
+            interactive_summary = {"event": "interactive_physics_summary", "physics_steps": interactive_physics_steps, "initial_root_pos_w": initial_root_pos, "final_root_pos_w": final_root_pos, "root_drop_m": root_drop_m, "pelvis_up_z": pelvis_up_z, "fall_accepted": fall_accepted}
+            print(json.dumps(interactive_summary, sort_keys=True), flush=True)
+            if args.interactive_fall_test and not fall_accepted:
+                _fail(f"interactive fall acceptance failed: root_drop_m={root_drop_m:.6f}, pelvis_up_z={pelvis_up_z:.6f}")
+            if args.interactive_standing_test or args.controller_attach_test_steps:
+                print(json.dumps({
+                    "event": "interactive_control_observation",
+                    "mode": "standing" if args.interactive_standing_test else "controller",
+                    "root_drop_m": root_drop_m,
+                    "pelvis_up_z": pelvis_up_z,
+                    "fall_like_motion_observed": fall_accepted,
+                    "physical_acceptance_enforced": False,
+                }, sort_keys=True), flush=True)
         lifecycle.pause()
         lifecycle.stop()
         lifecycle.reset()
@@ -386,7 +607,7 @@ def main() -> int:
         robot.write_joint_state_to_sim(standing_targets, default_vel)
         robot.set_joint_position_target(standing_targets)
         events.append("reset")
-        if not args.interactive:
+        if not interactive_mode:
             for _ in range(5):
                 scene.write_data_to_sim(); sim.step(); scene.update(sim.get_physics_dt())
         rgb = camera.data.output["rgb"][0].cpu().numpy()
@@ -407,7 +628,7 @@ def main() -> int:
         if args.video_path is not None and video_frames:
             args.video_path.parent.mkdir(parents=True, exist_ok=True)
             iio.imwrite(args.video_path, video_frames, fps=10, codec="libx264")
-        result = {"asset_cfg": "CLOUDWALK_G1_INSPIRE_FTP_FREE_BASE_CFG", "usd": "Robots/Unitree/G1/g1_29dof_inspire_hand.usd", "joints": robot.num_joints, "bodies": robot.num_bodies, "camera_shape": list(rgb.shape), "capture": str(args.capture_path), "events": events, "prompt": PROMPT, "embodiment": EMBODIMENT, "scene_config": str(args.scene_config), "scene_parameters": {"table_height_m": scene_config["table"]["size_m"][2], "table_position": scene_config["table"]["position_m"], "bottle_position": scene_config["bottle"]["position_m"], "bottle_height_m": scene_config["bottle"]["height_m"], "camera_focal_length_mm": scene_config["camera"]["focal_length_mm"]}, "physics": {"root_fixed": False, "gravity_enabled": True, "stage_topology": "immutable_after_reset", "mode": "interactive" if args.interactive else "batch"}, "isaac_target_dofs": {"body": list(body_joint_names), "inspire": list(INSPIRE_HAND_JOINTS)}, "vla_connection": "upstream_policy_native_sonic_connected" if args.closed_loop else "not_connected", "hand_application": "verified_24_joint_normalized_mapper" if args.closed_loop else "scene_only", "motion_observation": motion_observation, "rollout_metrics": rollout_metrics}
+        result = {"asset_cfg": "CLOUDWALK_G1_INSPIRE_FTP_FREE_BASE_CFG", "usd": "Robots/Unitree/G1/g1_29dof_inspire_hand.usd", "joints": robot.num_joints, "bodies": robot.num_bodies, "camera_shape": list(rgb.shape), "capture": str(args.capture_path), "events": events, "prompt": PROMPT, "embodiment": EMBODIMENT, "scene_config": str(args.scene_config), "scene_parameters": {"table_height_m": scene_config["table"]["size_m"][2], "table_position": scene_config["table"]["position_m"], "bottle_position": scene_config["bottle"]["position_m"], "bottle_height_m": scene_config["bottle"]["height_m"], "camera_focal_length_mm": scene_config["camera"]["focal_length_mm"]}, "physics": {"root_fixed": False, "gravity_enabled": True, "stage_topology": "immutable_after_reset", "mode": "interactive_fall_test" if args.interactive_fall_test else ("interactive" if args.interactive else "batch")}, "isaac_target_dofs": {"body": list(body_joint_names), "inspire": list(INSPIRE_HAND_JOINTS)}, "vla_connection": "upstream_policy_native_sonic_connected" if args.closed_loop else "not_connected", "hand_application": "verified_24_joint_normalized_mapper" if args.closed_loop else "scene_only", "motion_observation": motion_observation, "rollout_metrics": rollout_metrics}
         # Flush before close(): Kit's teardown can discard buffered stdout.
         print(json.dumps(result, sort_keys=True), flush=True)
         _exit_code[0] = 0
