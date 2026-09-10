@@ -477,6 +477,12 @@ class SourceContractTest(unittest.TestCase):
         # The helper must be callable (and JSON-safe) outside a Kit app.
         json.dumps(runner.viewport_diagnostics())
 
+    def test_camera_sensors_are_off_by_default(self) -> None:
+        """Camera sensors select an experience whose viewport does not repaint."""
+        self.assertIn("args.enable_cameras = bool(args.camera_sensors)", self.source)
+        self.assertNotIn("args.enable_cameras = True", self.source)
+        self.assertIn("--camera-sensors", self.source)
+
     def test_hands_are_declared_uncontrolled(self) -> None:
         self.assertIn("HANDS_CONTROLLED_BY_SONIC = False", self.source)
 

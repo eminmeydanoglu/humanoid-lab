@@ -801,11 +801,22 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="frames to hold the reset pose after Play before measuring",
     )
     parser.add_argument("--dump-dir", type=Path)
+    parser.add_argument(
+        "--camera-sensors",
+        action="store_true",
+        help=(
+            "enable Isaac camera sensors. This selects the "
+            "isaaclab.python.rendering.kit experience, which leaves the "
+            "interactive viewport frozen while the timeline plays."
+        ),
+    )
     from isaaclab.app import AppLauncher
 
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args(argv)
-    args.enable_cameras = True
+    # The interactive viewport is the only thing recorded, so camera sensors stay
+    # off: forcing them swaps in an experience whose viewport does not repaint.
+    args.enable_cameras = bool(args.camera_sensors)
     # The timeline widget must exist so a human can press Play.
     args.kit_args = " ".join(
         (args.kit_args, "--enable omni.anim.window.timeline --/exts/omni.anim.window.timeline/show=true")
