@@ -164,6 +164,14 @@ def make_metrics(body_ids=(0, 1, 2)):
 
 
 class ResetOrderingTest(unittest.TestCase):
+    def test_reset_uses_only_the_timeline_pause(self) -> None:
+        """SimulationContext.pause() desyncs physics from the rendered textures."""
+        import inspect
+
+        source = inspect.getsource(runner.reset_simulation_paused)
+        self.assertIn("timeline.pause()", source)
+        self.assertNotIn("sim.pause()", source)
+
     def test_reset_completes_before_timeline_is_paused(self) -> None:
         order: list[str] = []
         sim = FakeSim()
@@ -238,18 +246,21 @@ class InteractiveLoopTest(unittest.TestCase):
         self.assertEqual(sim.steps, 2)
         self.assertEqual(len(applied), 2)
 
-    def test_viewport_is_refreshed_via_render_every_playing_frame(self) -> None:
+    def test_viewport_refresh_uses_a_plain_app_frame(self) -> None:
+        """app.update() is the refresh that measurably renders motion."""
+        import inspect
+
+        source = inspect.getsource(runner.refresh_viewport)
+        self.assertIn("simulation_app.update()", source)
+        self.assertNotIn("render()", source)
+        app = FakeApp(2)
+        runner.refresh_viewport(FakeSim(), app)
+        self.assertEqual(app.updates, 2)
+
+    def test_viewport_is_refreshed_every_playing_frame(self) -> None:
         """render() flushes fabric into the textures; app.update() does not."""
         app = FakeApp(4)
         sim, scene = FakeSim(), FakeScene()
-        calls = {"render": 0}
-        original_render = sim.render
-
-        def counting_render():
-            calls["render"] += 1
-            return original_render()
-
-        sim.render = counting_render
         runner.run_interactive_app(
             app,
             FakeTimeline([True] * 4, app),
@@ -262,7 +273,9 @@ class InteractiveLoopTest(unittest.TestCase):
             read_body_q_dq=lambda: (vector(0.0), vector(0.0)),
             apply_effort=lambda efforts: None,
         )
-        self.assertEqual(calls["render"], 4, "render() must run on every playing frame")
+        self.assertEqual(
+            app.updates, 4, "the viewport must be refreshed on every playing frame"
+        )
 
     def test_refresh_viewport_falls_back_when_render_is_unavailable(self) -> None:
         app = FakeApp(3)

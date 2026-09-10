@@ -86,19 +86,13 @@ HANDS_CONTROLLED_BY_SONIC = False
 
 
 def refresh_viewport(sim: object, simulation_app: object) -> None:
-    """Refresh the rendered viewport, falling back to a plain app frame.
+    """Present a frame, playing or paused.
 
-    ``SimulationContext.render()`` is what flushes fabric data into the Hydra
-    textures; using it keeps the live window and any recording in step with the
-    physics instead of freezing on the first frame.
+    A plain app frame is what measurably keeps the window and any recording in
+    step with the physics. Routing this through ``SimulationContext.render()``
+    instead, or pausing through ``SimulationContext.pause()``, both left the
+    recorded textures on the first frame while the timeline advanced.
     """
-    render = getattr(sim, "render", None)
-    if render is not None:
-        try:
-            render()
-            return
-        except Exception:  # noqa: BLE001
-            pass
     try:
         simulation_app.update()
     except Exception:  # noqa: BLE001
@@ -188,10 +182,6 @@ def reset_simulation_paused(sim: object, timeline: object | None) -> None:
     sim.reset()
     if timeline is not None:
         timeline.pause()
-    if hasattr(sim, "pause"):
-        # pause() only clears SimulationContext's own playing flag; the GUI
-        # timeline stays authoritative for step_frame().
-        sim.pause()
 
 
 def step_frame(
