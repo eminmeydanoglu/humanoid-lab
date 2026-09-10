@@ -155,6 +155,7 @@ def run_interactive_app(
 ) -> int:
     """Main GUI loop; returns the number of physics steps taken."""
     physics_steps = 0
+    pending_control_sample = None
     play_started_at: float | None = None
     measurement_started_at: float | None = None
     settle_remaining = 0
@@ -194,10 +195,14 @@ def run_interactive_app(
         if command is not None:
             outcome = actuation.submit(_to_sample(command, now))
             metrics.command_seen(command, now, accepted=outcome.accepted)
+            if outcome.accepted:
+                pending_control_sample = command
 
         step = None
         if playing:
             body_q, body_dq = read_body_q_dq()
+            if pending_control_sample is not None and metrics.first_control_sample is None:
+                metrics.record_first_control_sample(pending_control_sample, body_q, body_dq)
             step = actuation.step(now, body_q, body_dq)
             if step.mode is ActuationMode.CONTROLLED:
                 metrics.controlled_steps += 1
@@ -279,6 +284,7 @@ class Metrics:
         self.net_xy_m = 0.0
         self.max_speed_mps = 0.0
         self.trace: list[list[float]] = []
+        self.first_control_sample: dict | None = None
         self._trace_every = 20  # 10 Hz at the 200 Hz physics rate
         self._steps = 0
         self.passive_since: float | None = None
@@ -317,6 +323,23 @@ class Metrics:
         self.max_speed_mps = 0.0
         self.trace = []
         self._steps = 0
+
+    def record_first_control_sample(self, command: LowCmdFrame, isaac_q, isaac_dq) -> None:
+        if self.first_control_sample is not None:
+            return
+        self.first_control_sample = {
+            "names": list(SONIC_BODY_JOINT_NAMES),
+            "lowcmd_q": [round(float(v), 5) for v in command.q],
+            "lowcmd_dq": [round(float(v), 5) for v in command.dq],
+            "lowcmd_tau": [round(float(v), 5) for v in command.tau],
+            "lowcmd_kp": [round(float(v), 5) for v in command.kp],
+            "lowcmd_kd": [round(float(v), 5) for v in command.kd],
+            "isaac_q": [round(float(v), 5) for v in isaac_q],
+            "isaac_dq": [round(float(v), 5) for v in isaac_dq],
+            "q_error": [
+                round(float(c) - float(a), 5) for c, a in zip(command.q, isaac_q)
+            ],
+        }
 
     def command_seen(self, command: LowCmdFrame, now: float, *, accepted: bool) -> None:
         if accepted:
@@ -429,6 +452,7 @@ class Metrics:
             "max_speed_mps": self.max_speed_mps,
             "trace_columns": ["t_s", "x_m", "y_m", "speed_mps", "yaw_deg"],
             "trace": self.trace,
+            "first_control_sample": self.first_control_sample,
         }
 
 
