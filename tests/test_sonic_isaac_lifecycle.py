@@ -377,6 +377,15 @@ class SourceContractTest(unittest.TestCase):
         self.assertAlmostEqual(PHYSICS_DT, 0.005, places=9)
         self.assertIn("dt=PHYSICS_DT", self.source)
 
+    def test_robot_starts_from_the_sonic_default_pose(self) -> None:
+        """The asset's own initial state must not be the starting pose."""
+        self.assertIn("sonic_default_joint_target(robot, body_ids)", self.source)
+        self.assertNotIn("default_pos = robot.data.default_joint_pos.clone()", self.source)
+        import inspect
+
+        helper = inspect.getsource(runner.sonic_default_joint_target)
+        self.assertIn("sonic_default_pose_by_name", helper)
+
     def test_body_drives_are_zeroed(self) -> None:
         self.assertIn("write_joint_stiffness_to_sim(0.0", self.source)
         self.assertIn("write_joint_damping_to_sim(0.0", self.source)

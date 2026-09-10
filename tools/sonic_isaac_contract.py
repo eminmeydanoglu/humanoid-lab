@@ -35,6 +35,7 @@ __all__ = [
     "SIM_DDS_DOMAIN_ID",
     "SIM_DDS_INTERFACE",
     "SONIC_BODY_JOINT_NAMES",
+    "SONIC_DEFAULT_BODY_ANGLES",
     "ContractError",
     "DdsProfile",
     "JointLimits",
@@ -104,6 +105,50 @@ SONIC_BODY_JOINT_NAMES: tuple[str, ...] = (
 )
 assert len(SONIC_BODY_JOINT_NAMES) == BODY_JOINT_COUNT
 assert len(set(SONIC_BODY_JOINT_NAMES)) == BODY_JOINT_COUNT
+
+#: Upstream's default standing pose (``policy_parameters.hpp::default_angles``),
+#: in the same DDS/hardware order as :data:`SONIC_BODY_JOINT_NAMES`.
+#:
+#: The policy is trained around this pose. Starting the robot anywhere else puts
+#: it out of distribution at the first step, so Isaac's own asset initial state
+#: (hip pitch -0.10, knee 0.30, ankle pitch -0.20) must not be used as-is.
+SONIC_DEFAULT_BODY_ANGLES: tuple[float, ...] = (
+    -0.312,  # left_hip_pitch_joint
+    0.0,     # left_hip_roll_joint
+    0.0,     # left_hip_yaw_joint
+    0.669,   # left_knee_joint
+    -0.363,  # left_ankle_pitch_joint
+    0.0,     # left_ankle_roll_joint
+    -0.312,  # right_hip_pitch_joint
+    0.0,     # right_hip_roll_joint
+    0.0,     # right_hip_yaw_joint
+    0.669,   # right_knee_joint
+    -0.363,  # right_ankle_pitch_joint
+    0.0,     # right_ankle_roll_joint
+    0.0,     # waist_yaw_joint
+    0.0,     # waist_roll_joint
+    0.0,     # waist_pitch_joint
+    0.2,     # left_shoulder_pitch_joint
+    0.2,     # left_shoulder_roll_joint
+    0.0,     # left_shoulder_yaw_joint
+    0.6,     # left_elbow_joint
+    0.0,     # left_wrist_roll_joint
+    0.0,     # left_wrist_pitch_joint
+    0.0,     # left_wrist_yaw_joint
+    0.2,     # right_shoulder_pitch_joint
+    -0.2,    # right_shoulder_roll_joint
+    0.0,     # right_shoulder_yaw_joint
+    0.6,     # right_elbow_joint
+    0.0,     # right_wrist_roll_joint
+    0.0,     # right_wrist_pitch_joint
+    0.0,     # right_wrist_yaw_joint
+)
+assert len(SONIC_DEFAULT_BODY_ANGLES) == BODY_JOINT_COUNT
+
+
+def sonic_default_pose_by_name() -> dict[str, float]:
+    """The default standing pose keyed by joint name."""
+    return dict(zip(SONIC_BODY_JOINT_NAMES, SONIC_DEFAULT_BODY_ANGLES))
 
 #: Stable identifiers for every way the launcher may refuse to start.
 REFUSAL_REASONS = (

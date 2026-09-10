@@ -220,6 +220,51 @@ class LimitsTest(unittest.TestCase):
         self.assertEqual(set(summary["limits"]), set(SONIC_BODY_JOINT_NAMES))
 
 
+class DefaultPoseTest(unittest.TestCase):
+    """The robot must start in the pose the policy was trained around."""
+
+    def test_default_pose_covers_every_body_joint_exactly_once(self) -> None:
+        from sonic_isaac_contract import SONIC_DEFAULT_BODY_ANGLES, sonic_default_pose_by_name
+
+        self.assertEqual(len(SONIC_DEFAULT_BODY_ANGLES), BODY_JOINT_COUNT)
+        pose = sonic_default_pose_by_name()
+        self.assertEqual(set(pose), set(SONIC_BODY_JOINT_NAMES))
+        self.assertEqual(len(pose), BODY_JOINT_COUNT)
+
+    def test_default_pose_values_match_upstream(self) -> None:
+        # Transcribed from policy_parameters.hpp::default_angles.
+        pose = dict(zip(SONIC_BODY_JOINT_NAMES, __import__(
+            "sonic_isaac_contract").SONIC_DEFAULT_BODY_ANGLES))
+        self.assertAlmostEqual(pose["left_hip_pitch_joint"], -0.312, places=6)
+        self.assertAlmostEqual(pose["left_knee_joint"], 0.669, places=6)
+        self.assertAlmostEqual(pose["left_ankle_pitch_joint"], -0.363, places=6)
+        self.assertAlmostEqual(pose["right_knee_joint"], 0.669, places=6)
+        self.assertAlmostEqual(pose["left_elbow_joint"], 0.6, places=6)
+        self.assertAlmostEqual(pose["right_shoulder_roll_joint"], -0.2, places=6)
+        # The two legs are mirrored, so the pose is not accidentally one-sided.
+        self.assertEqual(pose["left_hip_pitch_joint"], pose["right_hip_pitch_joint"])
+        self.assertEqual(pose["left_knee_joint"], pose["right_knee_joint"])
+
+    def test_default_pose_differs_from_the_isaac_asset_initial_state(self) -> None:
+        """The asset pose is a different, non-standing configuration."""
+        from sonic_isaac_contract import sonic_default_pose_by_name
+
+        pose = sonic_default_pose_by_name()
+        # G1_29DOF_CFG.init_state uses hip_pitch -0.10 / knee 0.30.
+        self.assertNotAlmostEqual(pose["left_hip_pitch_joint"], -0.10, places=3)
+        self.assertNotAlmostEqual(pose["left_knee_joint"], 0.30, places=3)
+
+    def test_lower_body_is_a_real_standing_crouch(self) -> None:
+        from sonic_isaac_contract import sonic_default_pose_by_name
+
+        pose = sonic_default_pose_by_name()
+        # Knees bent positively, hips and ankles compensating: a standing pose.
+        for side in ("left", "right"):
+            self.assertGreater(pose[f"{side}_knee_joint"], 0.0)
+            self.assertLess(pose[f"{side}_hip_pitch_joint"], 0.0)
+            self.assertLess(pose[f"{side}_ankle_pitch_joint"], 0.0)
+
+
 class DdsIsolationTest(unittest.TestCase):
     def test_parses_the_shipped_loopback_profile(self) -> None:
         shipped = Path(__file__).resolve().parents[1] / "containers" / "cyclonedds-sim.xml"

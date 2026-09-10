@@ -37,6 +37,8 @@ from sonic_isaac_actuation import (  # noqa: E402
 )
 from sonic_isaac_contract import (  # noqa: E402
     BODY_JOINT_COUNT,
+    SONIC_DEFAULT_BODY_ANGLES,
+    sonic_default_pose_by_name,
     ContractError,
     JointLimits,
     PHYSICS_DT,
@@ -526,6 +528,21 @@ def read_body_q_dq(robot: object, body_ids: Sequence[int]):
     return read
 
 
+def sonic_default_joint_target(robot: object, body_ids: Sequence[int]):
+    """The SONIC default standing pose written into the asset's joint order.
+
+    Matched by name, so it is correct regardless of how the asset orders DOFs.
+    """
+    import torch
+
+    by_name = sonic_default_pose_by_name()
+    values = [float(by_name[SONIC_BODY_JOINT_NAMES[slot]]) for slot in range(len(body_ids))]
+    tensor = robot.data.default_joint_pos.clone()
+    index = torch.tensor(list(body_ids), dtype=torch.long, device=tensor.device)
+    tensor[:, index] = torch.tensor(values, dtype=tensor.dtype, device=tensor.device)
+    return tensor
+
+
 def body_joint_indices(robot: object) -> tuple[list[int], list[int]]:
     """Return (body ids, hand ids) using name-based matching, never order."""
     names = list(robot.joint_names)
@@ -791,9 +808,10 @@ def _run(args: argparse.Namespace, profile: Profile, simulation_app) -> tuple[in
 
     timeline = get_timeline_interface()
 
-    # Freeze the standing pose before anything can advance, then zero the
-    # drives SONIC replaces and keep the fingers at their own open target.
-    default_pos = robot.data.default_joint_pos.clone()
+    # Start from SONIC's own default standing pose: the policy is trained around
+    # it, and the asset's initial state (hip pitch -0.10, knee 0.30) would put
+    # the robot out of distribution on the very first control step.
+    default_pos = sonic_default_joint_target(robot, body_ids)
     robot.write_joint_state_to_sim(default_pos, robot.data.default_joint_vel.clone().zero_())
     robot.set_joint_position_target(default_pos)
 
