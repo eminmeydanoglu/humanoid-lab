@@ -304,6 +304,9 @@ def command_start(args: argparse.Namespace) -> int:
     ]
 
     children: list[ChildProcess] = []
+    # A ready file left by an earlier run would make the wait below return
+    # immediately, before this run's runner has actually initialised.
+    paths.ready_file.unlink(missing_ok=True)
     children.append(_spawn("isaac", isaac_argv, paths.log_dir / f"{stamp}-isaac.log"))
     if not _wait_for_file(paths.ready_file, args.ready_timeout):
         _terminate_all(children)

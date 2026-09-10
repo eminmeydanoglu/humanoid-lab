@@ -160,6 +160,11 @@ class AutoKeysTest(unittest.TestCase):
         self.assertIn("standing_schedule", self.source)
         self.assertIn('"--auto-keys"', self.source)
 
+    def test_ready_file_is_cleared_before_waiting_on_it(self) -> None:
+        clear = self.source.index("ready_file.unlink(missing_ok=True)")
+        wait = self.source.index("_wait_for_file(")
+        self.assertLess(clear, wait, "a stale ready file must be cleared before waiting")
+
     def test_play_only_after_the_controller_is_armed(self) -> None:
         # Physics must not start until SONIC has been armed.
         self.assertIn("arm_settle", self.source)
