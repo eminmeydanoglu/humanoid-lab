@@ -165,10 +165,6 @@ case "${1:-}" in
     ;;
   sonic-sim)  shell_env use-sonic-sim ;;
   groot)      shell_env use-groot ;;
-  cloudwalk-sim)
-    up_once
-    DC exec dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && cd /workspace/humanoid-lab && exec /opt/venvs/isaac-sonic/bin/python scripts/run-cloudwalk-isaac.py --interactive --capture-path outputs/cloudwalk-gui.jpg "$@"' cloudwalk-sim "${@:2}"
-    ;;
   isaac-g1)
     profile="${2:-}"
     case "$profile" in
@@ -180,47 +176,6 @@ case "${1:-}" in
     up_once
     # shellcheck disable=SC2016 # Positional parameters expand inside the container shell.
     DC exec dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && cd /workspace/humanoid-lab && exec python scripts/run-isaac-g1.py --profile "$1" "${@:2}"' isaac-g1 "$profile_file" "${@:3}"
-    ;;
-  cloudwalk-controller)
-    case "${2:-}" in
-      start) exec ./scripts/run-cloudwalk-controller.sh ;;
-      status)
-        up_once
-        DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && exec /opt/venvs/isaac-sonic/bin/python /workspace/humanoid-lab/scripts/cloudwalk-controller-command.py status'
-        ;;
-      stop)
-        up_once
-        DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && /opt/venvs/isaac-sonic/bin/python /workspace/humanoid-lab/scripts/cloudwalk-controller-command.py stop || true; pkill -TERM -f "cloudwalk-controller-session.py|run_gr00t_server.py.*56111|cloudwalk-vla-worker.py.*56111|sonic-closed-loop-native" || true'
-        ;;
-      *) echo "usage: $0 cloudwalk-controller {start|status|stop}" >&2; exit 2 ;;
-    esac
-    ;;
-  sonic-isaac)
-    sub="${2:-}"
-    case "$sub" in
-      start)
-        # Keyboard mode drives the upstream SONIC input, which needs a real
-        # TTY; the automated gates pass --auto-play/--headless and get -T.
-        up_once
-        if [ "${*: -1}" = "--headless" ] || printf '%s\n' "$@" | grep -qx -- '--auto-play'; then
-          DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && cd /workspace/humanoid-lab && exec python scripts/sonic-isaac-session.py start "$@"' sonic-isaac "${@:3}"
-        else
-          DC exec dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && cd /workspace/humanoid-lab && exec python scripts/sonic-isaac-session.py start "$@"' sonic-isaac "${@:3}"
-        fi
-        ;;
-      status|stop)
-        up_once
-        DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && cd /workspace/humanoid-lab && exec python scripts/sonic-isaac-session.py "$@"' sonic-isaac "$sub"
-        ;;
-      accept)
-        up_once
-        DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && cd /workspace/humanoid-lab && exec python scripts/sonic-isaac-session.py accept "$@"' sonic-isaac "${@:3}"
-        ;;
-      *)
-        echo "usage: $0 sonic-isaac {start --robot g1-29dof|g1-inspire --input keyboard|f310|status|stop|accept --robot g1-29dof|g1-inspire}" >&2
-        exit 2
-        ;;
-    esac
     ;;
   doctor)
     ./doctor.sh
@@ -265,7 +220,7 @@ case "${1:-}" in
     exit 2
     ;;
   *)
-    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|isaac-g1 {no_hands|inspire-ftp|dex3}|cloudwalk-sim|cloudwalk-controller {start|status|stop}|doctor|smoke|groot-finetune-smoke|sync|fetch-models|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
+    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|isaac-g1 {no_hands|inspire-ftp|dex3}|doctor|smoke|groot-finetune-smoke|sync|fetch-models|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
     exit 2
     ;;
 esac
