@@ -201,6 +201,23 @@ class DeployArgvTest(unittest.TestCase):
         self.assertIn("f310_bridge", argv)
         self.assertIn("--disable-crc-check", argv)
 
+    def test_planner_path_carries_the_version_token_the_deploy_parses(self) -> None:
+        """The deploy reads the planner version from the path string."""
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("session_cli_plan", CLI)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["session_cli_plan"] = module
+        spec.loader.exec_module(module)
+
+        argv = module.deploy_argv(robot="g1-29dof", input_mode="keyboard")
+        planner = argv[argv.index("--planner-file") + 1]
+        self.assertTrue(
+            any(token in planner for token in ("V0", "V1", "V2")),
+            f"planner path lacks a version token: {planner}",
+        )
+
     def test_keyboard_input_selects_the_keyboard_input_type(self) -> None:
         sys.path.insert(0, str(ROOT / "scripts"))
         import importlib.util

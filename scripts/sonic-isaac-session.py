@@ -103,6 +103,14 @@ def deploy_argv(*, robot: str, input_mode: str, interface: str = SIM_DDS_INTERFA
         config.get("reference_dir", str(SONIC_ROOT / "gear_sonic_deploy" / "reference" / "example"))
     )
     binary = Path(config.get("binary", "/data/models/sonic-deploy/g1_deploy_onnx_ref"))
+    # The deploy reads the planner version out of the path string, so a flat
+    # path aborts at startup with "Unsupported planner version".
+    tokens = tuple(config.get("planner_version_tokens", ("V0", "V1", "V2")))
+    if not any(token in str(planner) for token in tokens):
+        raise ContractError(
+            f"planner path must contain one of {tokens} because the deploy parses "
+            f"its version from the path: {planner}"
+        )
     keyboard_type = config.get("keyboard_input_type", "keyboard")
     f310_type = config.get("f310_input_type", "f310_bridge")
     return [
