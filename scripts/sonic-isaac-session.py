@@ -16,6 +16,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pty
+import select
 import signal
 import subprocess
 import sys
@@ -28,9 +30,16 @@ sys.path.insert(0, str(ROOT / "tools"))
 from sonic_isaac_contract import (  # noqa: E402
     SIM_DDS_DOMAIN_ID,
     SIM_DDS_INTERFACE,
+    SIM_ONLY_DEPLOY_FLAG,
     ContractError,
 )
 from sonic_isaac_ipc import DEFAULT_IPC_PORT  # noqa: E402
+from sonic_isaac_keyboard import (  # noqa: E402
+    STOP_KEY,
+    KeyScheduler,
+    drive_schedule,
+    standing_schedule,
+)
 from sonic_isaac_session import (  # noqa: E402
     AGENT_STATE_READY_PENDING_USER_DRIVE,
     DEFAULT_RUNTIME_DIR,
@@ -48,7 +57,7 @@ from sonic_isaac_session import (  # noqa: E402
 )
 
 SONIC_ROOT = Path("/opt/src/sonic")
-SONIC_DEPLOY = SONIC_ROOT / "gear_sonic_deploy" / "target" / "release" / "g1_deploy_onnx_ref"
+DEFAULT_DEPLOY_BINARY = Path("/data/models/sonic-deploy/g1_deploy_onnx_ref")
 SONIC_SIM_PYTHON = Path("/opt/venvs/sonic-sim/bin/python")
 DEPLOY_CONFIG = ROOT / "configs" / "sonic_isaac_deploy.json"
 
@@ -80,27 +89,40 @@ def _read_deploy_config() -> dict:
     return {}
 
 
-def deploy_argv(*, robot: str, input_mode: str, interface: str = SIM_DDS_INTERFACE,
-                mode: str = "sim") -> list[str]:
-    """The upstream C++ deploy command line for the simulation path."""
+def deploy_argv(*, robot: str, input_mode: str, interface: str = SIM_DDS_INTERFACE) -> list[str]:
+    """The upstream C++ deploy command line for the simulation path.
+
+    Positional arguments are ``<interface> <policy_decoder.onnx> <motion_data>``.
+    ``--disable-crc-check`` is what makes this a simulation command: the real
+    robot's lowcmd stream carries CRCs the simulator does not produce.
+    """
     config = _read_deploy_config()
     models = Path(config.get("models_dir", "/data/models/sonic/sonic_v1_1"))
     planner = Path(config.get("planner", "/data/models/sonic/planner_sonic.onnx"))
-    reference = Path(config.get("reference_dir", str(SONIC_ROOT / "gear_sonic_deploy" / "reference" / "example")))
-    argv = [
-        str(SONIC_DEPLOY),
-        interface,
+    reference = Path(
+        config.get("reference_dir", str(SONIC_ROOT / "gear_sonic_deploy" / "reference" / "example"))
+    )
+    binary = Path(config.get("binary", "/data/models/sonic-deploy/g1_deploy_onnx_ref"))
+    keyboard_type = config.get("keyboard_input_type", "keyboard")
+    f310_type = config.get("f310_input_type", "f310_bridge")
+    return [
+        str(binary),
+        str(interface),
         str(models / "model_decoder.onnx"),
         str(reference),
         "--obs-config", str(models / "observation_config.yaml"),
         "--encoder-file", str(models / "model_encoder.onnx"),
         "--planner-file", str(planner),
-        "--input-type", "f310_bridge" if input_mode == "f310" else config.get("keyboard_input_type", "manager"),
-        mode,
+        "--input-type", f310_type if input_mode == "f310" else keyboard_type,
+        config.get("sim_marker", SIM_ONLY_DEPLOY_FLAG),
     ]
-    if input_mode == "f310":
-        argv += ["--f310-bridge-port", str(config.get("f310_bridge_port", 49051))]
-    return argv
+
+
+def deploy_library_path() -> str:
+    """Extra shared libraries the deploy needs that the dev image lacks."""
+    config = _read_deploy_config()
+    lib_dir = Path(config.get("lib_dir", "/data/models/sonic-deploy/lib"))
+    return str(lib_dir)
 
 
 # --------------------------------------------------------------------------- #
@@ -217,7 +239,6 @@ def command_start(args: argparse.Namespace) -> int:
             robot=args.robot,
             input_mode=args.input,
             interface=args.sonic_interface,
-            mode=args.sonic_mode,
         ),
         physical_interfaces=host_interfaces(),
         existing_session=existing,
@@ -241,8 +262,15 @@ def command_start(args: argparse.Namespace) -> int:
         "--warmup", str(args.warmup),
         "--paused-hold", str(args.paused_hold),
     ]
+    play_trigger = None
     if args.auto_play:
         isaac_argv.append("--auto-play")
+    if args.auto_keys != "none":
+        # Physics must not start until the controller is armed, so the runner
+        # waits for a trigger file instead of playing on a timer.
+        play_trigger = paths.runtime_dir / "play.trigger"
+        play_trigger.unlink(missing_ok=True)
+        isaac_argv += ["--play-trigger", str(play_trigger)]
     if args.fall_test:
         isaac_argv.append("--fall-test")
     if args.headless:
@@ -266,15 +294,53 @@ def command_start(args: argparse.Namespace) -> int:
         print(json.dumps({"started": False, "refused": ["isaac_never_ready"]}, indent=2))
         return 3
 
+    deploy_pty: PtyChild | None = None
     if args.skip_sonic:
         children.append(_spawn("bridge", bridge_argv, paths.log_dir / f"{stamp}-bridge.log"))
     else:
         children.append(_spawn("bridge", bridge_argv, paths.log_dir / f"{stamp}-bridge.log"))
-        sound_argv = deploy_argv(robot=args.robot, input_mode=args.input)
-        if not SONIC_DEPLOY.is_file():
-            print(json.dumps({"started": False, "refused": ["sonic_deploy_missing"]}), file=sys.stderr)
+        sonic_argv = deploy_argv(
+            robot=args.robot, input_mode=args.input, interface=SIM_DDS_INTERFACE
+        )
+        if not Path(sonic_argv[0]).is_file():
+            _terminate_all(children)
+            print(json.dumps({"started": False, "refused": ["sonic_deploy_missing"],
+                              "expected": sonic_argv[0]}, indent=2))
+            return 4
+        # The dev image lacks ONNX Runtime and TensorRT; the deploy's staged
+        # libraries are added to its environment only, not to the runner's.
+        sonic_env = dict(os.environ)
+        sonic_env["LD_LIBRARY_PATH"] = ":".join(
+            [deploy_library_path(), sonic_env.get("LD_LIBRARY_PATH", "")]
+        ).strip(":")
+        if args.auto_keys == "none":
+            children.append(
+                _spawn("sonic", sonic_argv, paths.log_dir / f"{stamp}-sonic.log", env=sonic_env)
+            )
+            deploy_pty = None
         else:
-            children.append(_spawn("sonic", sound_argv, paths.log_dir / f"{stamp}-sonic.log"))
+            deploy_pty = PtyChild(
+                sonic_argv, paths.log_dir / f"{stamp}-sonic.log", env=sonic_env
+            )
+            children.append(
+                ChildProcess(
+                    role="sonic",
+                    pid=deploy_pty.pid,
+                    argv=tuple(sonic_argv),
+                    started_at=time.time(),
+                )
+            )
+
+    if args.auto_keys != "none" and deploy_pty is not None:
+        return _drive_auto_keys(
+            args=args,
+            paths=paths,
+            record_children=children,
+            deploy=deploy_pty,
+            play_trigger=play_trigger,
+            evidence=evidence,
+            stamp=stamp,
+        )
 
     record = SessionState(
         robot_profile=args.robot,
@@ -295,7 +361,81 @@ def command_start(args: argparse.Namespace) -> int:
     return 0
 
 
-def _spawn(role: str, argv: list[str], log_path: Path) -> ChildProcess:
+class PtyChild:
+    """Run a child attached to a PTY so its keyboard interface sees a TTY.
+
+    The deploy refuses to behave as a keyboard consumer without one, and the
+    automated gates need to inject the keystrokes an operator would send.
+    """
+
+    def __init__(self, argv: list[str], log_path: Path, env: dict | None = None) -> None:
+        self.argv = list(argv)
+        self.log_path = log_path
+        self.master, slave = pty.openpty()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._log = log_path.open("wb")
+        self.process = subprocess.Popen(  # noqa: S603
+            self.argv,
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            start_new_session=True,
+            cwd=str(ROOT),
+            env=env,
+        )
+        os.close(slave)
+        os.set_blocking(self.master, False)
+        self._buffer = b""
+        self.lines: list[str] = []
+
+    @property
+    def pid(self) -> int:
+        return int(self.process.pid)
+
+    def poll(self) -> int | None:
+        return self.process.poll()
+
+    def drain(self) -> list[str]:
+        """Read whatever the child has written; returns any new complete lines."""
+        while True:
+            ready, _, _ = select.select([self.master], [], [], 0)
+            if not ready:
+                break
+            try:
+                chunk = os.read(self.master, 65536)
+            except (BlockingIOError, OSError):
+                break
+            if not chunk:
+                break
+            self._log.write(chunk)
+            self._log.flush()
+            self._buffer += chunk
+        fresh: list[str] = []
+        while b"\n" in self._buffer:
+            raw, self._buffer = self._buffer.split(b"\n", 1)
+            text = raw.decode("utf-8", "replace").rstrip()
+            self.lines.append(text)
+            fresh.append(text)
+        return fresh
+
+    def send(self, keys: str) -> None:
+        os.write(self.master, keys.encode())
+
+    def terminate(self, timeout_s: float = 10.0) -> None:
+        self.process.terminate()
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline and self.process.poll() is None:
+            time.sleep(0.2)
+        if self.process.poll() is None:
+            self.process.kill()
+        try:
+            os.close(self.master)
+        except OSError:
+            pass
+        self._log.close()
+
+
+def _spawn(role: str, argv: list[str], log_path: Path, env: dict | None = None) -> ChildProcess:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     handle = log_path.open("ab")
     process = subprocess.Popen(  # noqa: S603 - argv is constructed here, not user shell text
@@ -305,6 +445,7 @@ def _spawn(role: str, argv: list[str], log_path: Path) -> ChildProcess:
         stdin=subprocess.DEVNULL,
         start_new_session=True,
         cwd=str(ROOT),
+        env=env,
     )
     return ChildProcess(role=role, pid=process.pid, argv=tuple(argv), started_at=time.time())
 
@@ -324,6 +465,175 @@ def _terminate_all(children: list[ChildProcess]) -> None:
             os.kill(child.pid, signal.SIGTERM)
         except ProcessLookupError:
             continue
+
+
+#: Lines the deploy prints once it is up and simply waiting for robot state.
+DEPLOY_WAITING_MARKERS = (
+    "LowState is not available",
+    "waiting for robot",
+)
+#: Lines that mean the deploy is past loading and safe to drive.
+DEPLOY_READY_MARKERS = (
+    "control",
+    "Planner",
+    "planner mode",
+    "Standing",
+    "F1",
+)
+
+
+def _wait_deploy_ready(deploy: "PtyChild", *, timeout_s: float, quiet_s: float) -> dict:
+    """Wait until the deploy has its initial state and can accept the arm key.
+
+    The deploy loads its models before it subscribes to ``rt/lowstate``. Once
+    state flows it stops reporting that it is waiting, which is the signal that
+    a keystroke will be consumed.
+    """
+    started = time.monotonic()
+    last_waiting: float | None = None
+    seen_waiting = False
+    while (time.monotonic() - started) < timeout_s:
+        fresh = deploy.drain()
+        now = time.monotonic()
+        for line in fresh:
+            if any(marker in line for marker in DEPLOY_WAITING_MARKERS):
+                seen_waiting = True
+                last_waiting = now
+            if any(marker in line for marker in DEPLOY_READY_MARKERS):
+                return {"ready": True, "reason": "ready_marker", "line": line,
+                        "waited_s": now - started}
+        if seen_waiting and last_waiting is not None and (now - last_waiting) >= quiet_s:
+            return {"ready": True, "reason": "state_flowing", "waited_s": now - started}
+        if deploy.poll() is not None:
+            return {"ready": False, "reason": "deploy_exited", "waited_s": now - started}
+        time.sleep(0.05)
+    return {"ready": False, "reason": "timeout", "waited_s": time.monotonic() - started}
+
+
+def _child_exit_code(pid: int | None) -> int | None:
+    """Return the exit code if the pid is gone, else None."""
+    if not pid:
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return 0
+    except PermissionError:
+        return None
+    return None
+
+
+def _drive_auto_keys(*, args, paths, record_children, deploy, play_trigger,
+                     evidence: Path, stamp: str) -> int:
+    """Replay the operator keystrokes and let physics run only once armed."""
+    events = drive_schedule() if args.auto_keys == "drive" else standing_schedule()
+    scheduler = KeyScheduler(events)
+    paths.runtime_dir.mkdir(parents=True, exist_ok=True)
+
+    record = SessionState(
+        robot_profile=args.robot,
+        input=args.input,
+        domain_id=SIM_DDS_DOMAIN_ID,
+        interface=SIM_DDS_INTERFACE,
+        simulator="paused",
+        controller="absent",
+        owner_pid=os.getpid(),
+        children=record_children,
+        agent_state=AGENT_STATE_READY_PENDING_USER_DRIVE,
+    )
+    save_state(paths, record)
+
+    readiness = _wait_deploy_ready(
+        deploy, timeout_s=args.deploy_ready_timeout, quiet_s=args.deploy_quiet_s
+    )
+    print(json.dumps({"event": "deploy_readiness", **readiness}), flush=True)
+    if not readiness.get("ready"):
+        for child in record_children:
+            _terminate_child(child)
+        deploy.terminate()
+        print(json.dumps({"started": False, "refused": ["deploy_not_ready"],
+                          "detail": readiness}, indent=2))
+        return 5
+
+    isaac_pid = record_children[0].pid if record_children else None
+    started = time.monotonic()
+    armed_at: float | None = None
+    triggered = False
+    applied: list[dict] = []
+    outcome = "completed"
+
+    while True:
+        now = time.monotonic()
+        elapsed = now - started
+        for line in deploy.drain():
+            pass
+
+        for event in scheduler.due(elapsed):
+            deploy.send(event.keys)
+            applied.append({"label": event.label, "at_s": round(event.at_s, 3)})
+            if armed_at is None:
+                armed_at = now
+            print(json.dumps({"event": "key_sent", "label": event.label,
+                              "keys": event.keys.replace("\n", "\\n"),
+                              "at_s": round(event.at_s, 3)}), flush=True)
+
+        if (
+            play_trigger is not None
+            and not triggered
+            and armed_at is not None
+            and (now - armed_at) >= args.arm_settle
+        ):
+            play_trigger.write_text("play\n")
+            triggered = True
+            print(json.dumps({"event": "play_triggered",
+                              "after_arm_s": round(now - armed_at, 3)}), flush=True)
+
+        if _child_exit_code(isaac_pid) is not None:
+            outcome = "runner_exited"
+            break
+        if deploy.poll() is not None:
+            outcome = "deploy_exited"
+            break
+        if elapsed > args.max_run_s:
+            outcome = "max_run_time"
+            break
+        time.sleep(0.02)
+
+    # A stop key then TERM, so SONIC disarms before the process goes away.
+    try:
+        deploy.send(STOP_KEY)
+    except OSError:
+        pass
+    time.sleep(0.5)
+    deploy.drain()
+    for child in record_children:
+        _terminate_child(child)
+    deploy.terminate()
+    play_trigger.unlink(missing_ok=True)
+    paths.state_file.unlink(missing_ok=True)
+
+    summary = {
+        "started": True,
+        "mode": args.auto_keys,
+        "robot_profile": args.robot,
+        "outcome": outcome,
+        "readiness": readiness,
+        "keys_applied": applied,
+        "play_triggered": triggered,
+        "evidence": str(evidence),
+        "deploy_exit": deploy.poll(),
+    }
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    return 0 if outcome == "runner_exited" else 6
+
+
+def _terminate_child(child: ChildProcess) -> None:
+    try:
+        os.kill(child.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        return
 
 
 def command_accept(args: argparse.Namespace) -> int:
@@ -371,6 +681,16 @@ def main() -> int:
     start.add_argument("--video-path", type=Path)
     start.add_argument("--force", action="store_true")
     start.add_argument("--skip-sonic", action="store_true")
+    # Automated gates: replay the operator's keystrokes into the deploy's PTY.
+    start.add_argument(
+        "--auto-keys", choices=("none", "standing", "drive"), default="none",
+        help="replay a keystroke schedule instead of expecting a human operator",
+    )
+    start.add_argument("--arm-settle", type=float, default=6.0,
+                       help="seconds between arming SONIC and allowing physics to run")
+    start.add_argument("--deploy-ready-timeout", type=float, default=600.0)
+    start.add_argument("--deploy-quiet-s", type=float, default=4.0)
+    start.add_argument("--max-run-s", type=float, default=900.0)
     # Simulation-only by construction: any other value is refused by the
     # launcher gates rather than silently connecting to a real robot.
     start.add_argument("--sonic-interface", default=SIM_DDS_INTERFACE)

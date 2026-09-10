@@ -152,9 +152,16 @@ class DeployArgvTest(unittest.TestCase):
         spec.loader.exec_module(module)
 
         argv = module.deploy_argv(robot="g1-29dof", input_mode="keyboard")
-        self.assertIn("sim", argv)
         self.assertIn("lo", argv)
+        # The simulation flag is what keeps the deploy off a real robot.
+        self.assertIn("--disable-crc-check", argv)
         self.assertNotIn("real", argv)
+        # Positional contract: <interface> <decoder.onnx> <motion_data>.
+        self.assertEqual(argv[1], "lo")
+        self.assertTrue(argv[2].endswith("model_decoder.onnx"))
+        self.assertIn("--obs-config", argv)
+        self.assertIn("--encoder-file", argv)
+        self.assertIn("--planner-file", argv)
 
     def test_f310_input_selects_the_bridge_input_type(self) -> None:
         sys.path.insert(0, str(ROOT / "scripts"))
@@ -167,6 +174,20 @@ class DeployArgvTest(unittest.TestCase):
 
         argv = module.deploy_argv(robot="g1-inspire", input_mode="f310")
         self.assertIn("f310_bridge", argv)
+        self.assertIn("--disable-crc-check", argv)
+
+    def test_keyboard_input_selects_the_keyboard_input_type(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("session_cli_kbd", CLI)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["session_cli_kbd"] = module
+        spec.loader.exec_module(module)
+
+        argv = module.deploy_argv(robot="g1-29dof", input_mode="keyboard")
+        self.assertEqual(argv[argv.index("--input-type") + 1], "keyboard")
+        self.assertNotIn("f310_bridge", argv)
 
 
 if __name__ == "__main__":

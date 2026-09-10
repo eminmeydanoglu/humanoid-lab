@@ -40,6 +40,7 @@ __all__ = [
     "JointLimits",
     "JointMapping",
     "REFUSAL_REASONS",
+    "SIM_ONLY_DEPLOY_FLAG",
     "SessionClaim",
     "build_joint_mapping",
     "check_launch_safety",
@@ -112,6 +113,11 @@ REFUSAL_REASONS = (
     "unsafe_physical_interface",
     "session_conflict",
 )
+
+#: The upstream deploy skips CRC validation only for simulation. Without it the
+#: deploy expects a real robot's CRC-checked lowcmd stream, so its presence is
+#: what distinguishes a simulation command from a physical-robot one.
+SIM_ONLY_DEPLOY_FLAG = "--disable-crc-check"
 
 
 class ContractError(RuntimeError):
@@ -414,6 +420,10 @@ def collect_refusals(
         reasons.append("unsafe_dds_domain")
 
     if str(sonic_mode).strip().lower() != "sim":
+        reasons.append("unsafe_sonic_mode")
+    elif SIM_ONLY_DEPLOY_FLAG not in {str(token) for token in argv}:
+        # Declaring sim mode is not enough: the command itself must carry the
+        # simulation-only flag, or the deploy would expect a real robot stream.
         reasons.append("unsafe_sonic_mode")
 
     forbidden = {name for name in physical_interfaces if name != SIM_DDS_INTERFACE}

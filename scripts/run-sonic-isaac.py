@@ -275,6 +275,12 @@ class Metrics:
         self._read_root = None
         self._last_accepted_at: float | None = None
         self._last_quat: tuple[float, ...] | None = None
+        self.root_yaw_deg = 0.0
+        self.net_xy_m = 0.0
+        self.max_speed_mps = 0.0
+        self.trace: list[list[float]] = []
+        self._trace_every = 20  # 10 Hz at the 200 Hz physics rate
+        self._steps = 0
         self.passive_since: float | None = None
         self.stop_to_passive_ms: float | None = None
 
@@ -306,6 +312,11 @@ class Metrics:
         self.rate = RateMeter()
         self.rejected_commands = 0
         self.accepted_commands = 0
+        self.root_yaw_deg = 0.0
+        self.net_xy_m = 0.0
+        self.max_speed_mps = 0.0
+        self.trace = []
+        self._steps = 0
 
     def command_seen(self, command: LowCmdFrame, now: float, *, accepted: bool) -> None:
         if accepted:
@@ -321,7 +332,7 @@ class Metrics:
     def observe(self, step) -> None:
         if self.measurement_started is None or self._read_root is None:
             return
-        root_pos, quat = self._read_root()
+        root_pos, quat, lin_vel = self._read_root()
         if self.initial_root_pos is None:
             self.initial_root_pos = root_pos
         if any(not math.isfinite(value) for value in root_pos + quat):
@@ -329,6 +340,24 @@ class Metrics:
             return
         self._last_quat = quat
         self.root_xy_final = (root_pos[0], root_pos[1])
+        roll, pitch, yaw = quat_to_rpy(quat)
+        self.root_yaw_deg = math.degrees(yaw)
+        speed = math.hypot(lin_vel[0], lin_vel[1])
+        self.max_speed_mps = max(self.max_speed_mps, speed)
+        self.net_xy_m = math.hypot(
+            root_pos[0] - self.initial_root_pos[0], root_pos[1] - self.initial_root_pos[1]
+        )
+        self._steps += 1
+        if self._steps % self._trace_every == 0:
+            self.trace.append(
+                [
+                    round(self._steps * PHYSICS_DT, 4),
+                    round(root_pos[0], 5),
+                    round(root_pos[1], 5),
+                    round(speed, 5),
+                    round(self.root_yaw_deg, 4),
+                ]
+            )
         self.root_z_min = min(self.root_z_min, root_pos[2])
         self.root_z_final = root_pos[2]
         roll, pitch, _yaw = quat_to_rpy(quat)
@@ -395,6 +424,11 @@ class Metrics:
             "lowcmd_accepted": self.accepted_commands,
             "lowcmd_rejected": self.rejected_commands,
             "stop_to_passive_ms": self.stop_to_passive_ms,
+            "root_yaw_deg": self.root_yaw_deg,
+            "net_xy_m": self.net_xy_m,
+            "max_speed_mps": self.max_speed_mps,
+            "trace_columns": ["t_s", "x_m", "y_m", "speed_mps", "yaw_deg"],
+            "trace": self.trace,
         }
 
 
@@ -451,10 +485,12 @@ def build_scene(profile: Profile):
     return SonicSceneCfg(num_envs=1, env_spacing=2.5, replicate_physics=False)
 
 
-def read_root_state(robot: object) -> tuple[tuple[float, ...], tuple[float, ...]]:
+def read_root_state(robot: object):
+    """Root pose and linear velocity in world frame."""
     pos = tuple(float(value) for value in robot.data.root_pos_w[0].tolist())
     quat = tuple(float(value) for value in robot.data.root_quat_w[0].tolist())
-    return pos, quat
+    lin = tuple(float(value) for value in robot.data.root_lin_vel_w[0].tolist())
+    return pos, quat, lin
 
 
 def read_body_q_dq(robot: object, body_ids: Sequence[int]):
@@ -618,6 +654,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--fall-test",
         action="store_true",
         help="Gate B: with no controller, confirm Play makes the robot fall",
+    )
+    parser.add_argument(
+        "--play-trigger",
+        type=Path,
+        help="wait for this file to appear before pressing Play (automated gates)",
+    )
+    parser.add_argument(
+        "--play-trigger-timeout",
+        type=float,
+        default=900.0,
+        help="give up waiting for --play-trigger after this many seconds",
     )
     parser.add_argument(
         "--settle-frames",
@@ -811,7 +858,27 @@ def _run(args: argparse.Namespace, profile: Profile, simulation_app) -> tuple[in
         "gui_responsive": hold_updates > 0,
     }
 
-    if args.auto_play:
+    if args.play_trigger is not None:
+        # The controller must be armed before physics can flow, otherwise the
+        # robot would fall while SONIC is still loading its models.
+        waited = 0.0
+        while not args.play_trigger.is_file():
+            if waited >= args.play_trigger_timeout:
+                print(json.dumps({"event": "play_trigger_timeout"}), file=sys.stderr, flush=True)
+                _write_evidence(args.evidence_path, {
+                    "status": "play_trigger_timeout",
+                    "robot_profile": profile.name,
+                    "waited_s": waited,
+                })
+                return EXIT_BROKEN, {"status": "play_trigger_timeout"}
+            simulation_app.update()
+            link.publish(build_state_frame())
+            time.sleep(0.002)
+            waited += 0.002
+        diagnostics["play_trigger_wait_s"] = waited
+        print(json.dumps({"event": "play_trigger_seen", "waited_s": waited}), flush=True)
+
+    if args.auto_play or args.play_trigger is not None:
         sim.play()
         print(json.dumps({"event": "auto_play"}), flush=True)
     diagnostics["root_z_at_play"] = float(robot.data.root_pos_w[0][2])

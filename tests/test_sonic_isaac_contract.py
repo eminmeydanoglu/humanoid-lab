@@ -85,7 +85,7 @@ def safe_kwargs(**overrides):
         domain_id=SIM_DDS_DOMAIN_ID,
         sonic_mode="sim",
         requested_interface="lo",
-        argv=["g1_deploy_onnx_ref", "lo", "--input-type", "keyboard", "sim"],
+        argv=["g1_deploy_onnx_ref", "lo", "--input-type", "keyboard", "--disable-crc-check"],
         physical_interfaces=["lo", "enp129s0", "wlp130s0"],
         existing_session=None,
         own_pid=4242,
@@ -301,6 +301,19 @@ class LauncherGateTest(unittest.TestCase):
         reasons = collect_refusals(**safe_kwargs(sonic_mode="real"))
         self.assertIn("unsafe_sonic_mode", reasons)
 
+    def test_refuses_command_without_the_simulation_flag(self) -> None:
+        # Declaring sim mode is not enough: a command without the simulation
+        # flag would drive the deploy as if a real robot were streaming lowcmd.
+        reasons = collect_refusals(
+            **safe_kwargs(argv=["g1_deploy_onnx_ref", "lo", "--input-type", "keyboard"])
+        )
+        self.assertIn("unsafe_sonic_mode", reasons)
+
+    def test_simulation_flag_is_what_makes_the_command_safe(self) -> None:
+        from sonic_isaac_contract import SIM_ONLY_DEPLOY_FLAG
+
+        self.assertEqual(SIM_ONLY_DEPLOY_FLAG, "--disable-crc-check")
+
     def test_refuses_real_interface_argument(self) -> None:
         reasons = collect_refusals(**safe_kwargs(requested_interface="enp129s0"))
         self.assertIn("unsafe_physical_interface", reasons)
@@ -315,15 +328,19 @@ class LauncherGateTest(unittest.TestCase):
 
     def test_allows_loopback_ip_in_argv(self) -> None:
         self.assertEqual(
-            collect_refusals(**safe_kwargs(argv=["--zmq-host", "127.0.0.1"])), ()
+            collect_refusals(
+                **safe_kwargs(argv=["--zmq-host", "127.0.0.1", "--disable-crc-check"])
+            ),
+            ()
         )
 
     def test_does_not_mistake_paths_for_addresses(self) -> None:
+        sim = "--disable-crc-check"
         self.assertEqual(
-            collect_refusals(**safe_kwargs(argv=["file:///opt/humanoid-lab/x.xml"])), ()
+            collect_refusals(**safe_kwargs(argv=["file:///opt/humanoid-lab/x.xml", sim])), ()
         )
         self.assertEqual(
-            collect_refusals(**safe_kwargs(argv=["--obs-config", "policy/release/o.yaml"])), ()
+            collect_refusals(**safe_kwargs(argv=["--obs-config", "policy/release/o.yaml", sim])), ()
         )
 
     def test_refuses_concurrent_session(self) -> None:

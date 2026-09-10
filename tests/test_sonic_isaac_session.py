@@ -188,7 +188,7 @@ class LaunchGateWiringTest(unittest.TestCase):
             domain_id=SIM_DDS_DOMAIN_ID,
             sonic_mode="sim",
             requested_interface="lo",
-            argv=["g1_deploy_onnx_ref", "lo", "sim"],
+            argv=["g1_deploy_onnx_ref", "lo", "--disable-crc-check"],
             physical_interfaces=["lo", "enp129s0"],
             existing_session=None,
             own_pid=1,
