@@ -212,6 +212,9 @@ class DeployArgvTest(unittest.TestCase):
         spec.loader.exec_module(module)
 
         argv = module.deploy_argv(robot="g1-29dof", input_mode="keyboard")
+        # A dedicated ZMQ debug port keeps concurrent/stale deploys from
+        # colliding on the deploy's own default.
+        self.assertIn("--zmq-out-port", argv)
         planner = argv[argv.index("--planner-file") + 1]
         self.assertTrue(
             any(token in planner for token in ("V0", "V1", "V2")),

@@ -5,10 +5,15 @@
   "lib_dir": "/data/models/sonic-deploy/lib",
   "models_dir": "/data/models/sonic-isaac/sonic_v1_1",
   "planner": "/data/models/sonic-isaac/planner/target_vel/V2/planner_sonic.onnx",
-  "planner_version_tokens": ["V0", "V1", "V2"],
+  "planner_version_tokens": [
+    "V0",
+    "V1",
+    "V2"
+  ],
   "reference_dir": "/opt/src/sonic/gear_sonic_deploy/reference/example",
   "keyboard_input_type": "keyboard",
   "f310_input_type": "f310_bridge",
   "dds_interface": "lo",
-  "sim_marker": "--disable-crc-check"
+  "sim_marker": "--disable-crc-check",
+  "zmq_out_port": 5558
 }

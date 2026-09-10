@@ -122,6 +122,9 @@ def deploy_argv(*, robot: str, input_mode: str, interface: str = SIM_DDS_INTERFA
         "--encoder-file", str(models / "model_encoder.onnx"),
         "--planner-file", str(planner),
         "--input-type", f310_type if input_mode == "f310" else keyboard_type,
+        # The deploy always binds a ZMQ debug socket; give it a dedicated port
+        # so a stale or concurrent deploy cannot collide with this one.
+        "--zmq-out-port", str(config.get("zmq_out_port", 5558)),
         config.get("sim_marker", SIM_ONLY_DEPLOY_FLAG),
     ]
 
@@ -637,13 +640,25 @@ def _drive_auto_keys(*, args, paths, record_children, deploy, play_trigger,
     return 0 if outcome == "runner_exited" else 6
 
 
-def _terminate_child(child: ChildProcess) -> None:
+def _terminate_child(child: ChildProcess, timeout_s: float = 8.0) -> None:
+    """TERM then KILL: the deploy does not always exit on SIGTERM alone."""
     try:
         os.kill(child.pid, signal.SIGTERM)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         return
-    except PermissionError:
-        return
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child.pid, 0)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            return
+        time.sleep(0.2)
+    try:
+        os.kill(child.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def command_accept(args: argparse.Namespace) -> int:
