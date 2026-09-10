@@ -401,6 +401,17 @@ class SourceContractTest(unittest.TestCase):
     def test_play_trigger_waits_instead_of_playing_on_a_timer(self) -> None:
         self.assertIn("while not args.play_trigger.is_file():", self.source)
 
+    def test_state_frame_builder_matches_read_root_state_arity(self) -> None:
+        """read_root_state returns pose + linear velocity; the builder must agree."""
+        import inspect
+
+        arity = len(inspect.getsource(runner.read_root_state).splitlines())
+        self.assertIn("root_lin_vel_w", inspect.getsource(runner.read_root_state))
+        builder = inspect.getsource(runner._run)
+        self.assertIn("pos, quat, lin = read_root_state(robot)", builder)
+        self.assertNotIn("pos, quat = read_root_state(robot)", builder)
+        self.assertGreater(arity, 0)
+
     def test_motion_metrics_expose_the_drive_acceptance_quantities(self) -> None:
         for key in ("net_xy_m", "root_yaw_deg", "max_speed_mps", "trace"):
             self.assertIn(f'"{key}"', self.source)

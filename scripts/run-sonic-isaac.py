@@ -799,8 +799,7 @@ def _run(args: argparse.Namespace, profile: Profile, simulation_app) -> tuple[in
     def build_state_frame() -> StateFrame:
         """The loop publishes this every frame; publishing stays in one place."""
         state_snapshot["tick"] += 1
-        pos, quat = read_root_state(robot)
-        lin = tuple(float(v) for v in robot.data.root_lin_vel_w[0].tolist())
+        pos, quat, lin = read_root_state(robot)
         ang = tuple(float(v) for v in robot.data.root_ang_vel_w[0].tolist())
         q = tuple(float(robot.data.joint_pos[0, i]) for i in body_ids)
         dq = tuple(float(robot.data.joint_vel[0, i]) for i in body_ids)
