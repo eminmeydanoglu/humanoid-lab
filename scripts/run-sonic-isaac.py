@@ -79,15 +79,35 @@ HANDS_CONTROLLED_BY_SONIC = False
 # --------------------------------------------------------------------------- #
 
 
+def physx_timestamp() -> float:
+    """PhysX's own simulation clock.
+
+    ``SimulationContext.current_time`` is only advanced by ``step()``, so it
+    cannot prove that an ``app.update()`` frame did not step physics. PhysX's
+    timestamp can.
+    """
+    try:
+        import omni.physx
+
+        return float(omni.physx.get_physx_interface().get_simulation_timestamp())
+    except Exception:  # noqa: BLE001
+        return float("nan")
+
+
 def reset_simulation_paused(sim: object, timeline: object | None) -> None:
     """``sim.reset()`` first, then pause; the ordering matters.
 
-    ``reset()`` initialises the PhysX tensor views.  Pausing afterwards keeps
-    them valid so the GUI Play button can advance physics later.
+    ``reset()`` initialises the PhysX tensor views and leaves the timeline
+    playing.  Pausing afterwards keeps those views valid while nothing
+    advances, so a later GUI Play can take over.
     """
     sim.reset()
     if timeline is not None:
         timeline.pause()
+    if hasattr(sim, "pause"):
+        # pause() only clears SimulationContext's own playing flag; the GUI
+        # timeline stays authoritative for step_frame().
+        sim.pause()
 
 
 def step_frame(
@@ -129,6 +149,7 @@ def run_interactive_app(
     apply_effort,
     duration_s: float | None = None,
     warmup_s: float = 0.0,
+    settle_frames: int = 0,
     on_play=None,
     on_physics_step=None,
 ) -> int:
@@ -136,6 +157,7 @@ def run_interactive_app(
     physics_steps = 0
     play_started_at: float | None = None
     measurement_started_at: float | None = None
+    settle_remaining = 0
 
     while simulation_app.is_running():
         now = time.monotonic()
@@ -147,10 +169,23 @@ def run_interactive_app(
         playing = timeline.is_playing()
         if playing and play_started_at is None:
             play_started_at = now
+            settle_remaining = max(0, int(settle_frames))
             print(json.dumps({"event": "timeline_play_started"}), flush=True)
+
+        if playing and settle_remaining > 0:
+            # Kit can advance physics by the whole paused interval on the
+            # resume frame. Hold the reset pose until that backlog is spent;
+            # nothing is measured and no command is applied meanwhile.
+            simulation_app.update()
             if on_play is not None:
                 on_play(now)
+            settle_remaining -= 1
+            metrics.observe(None)
+            continue
+
         if playing and measurement_started_at is None and (now - play_started_at) >= warmup_s:
+            if on_play is not None:
+                on_play(now)
             measurement_started_at = now
             metrics.start_measurement(now)
             print(json.dumps({"event": "measurement_started", "warmup_s": warmup_s}), flush=True)
@@ -398,6 +433,7 @@ def build_scene(profile: Profile):
     import isaaclab.sim as sim_utils
     from isaaclab.assets import ArticulationCfg, AssetBaseCfg
     from isaaclab.scene import InteractiveSceneCfg
+    from isaaclab.utils import configclass
     from isaaclab_assets.robots.unitree import G1_29DOF_CFG, G1_INSPIRE_FTP_CFG
 
     template = G1_29DOF_CFG if profile.name == "g1-29dof" else G1_INSPIRE_FTP_CFG
@@ -407,14 +443,10 @@ def build_scene(profile: Profile):
     robot_cfg.spawn.articulation_props.fix_root_link = False
     robot_cfg.spawn.rigid_props.disable_gravity = False
 
-    namespace = "{ENV_REGEX_NS}"
-
-    @dataclass
+    @configclass
     class SonicSceneCfg(InteractiveSceneCfg):
-        ground: AssetBaseCfg = AssetBaseCfg(
-            prim_path="/World/ground", spawn=sim_utils.GroundPlaneCfg()
-        )
-        robot: ArticulationCfg = robot_cfg.replace(prim_path=f"{namespace}/Robot")
+        ground = AssetBaseCfg(prim_path="/World/ground", spawn=sim_utils.GroundPlaneCfg())
+        robot: ArticulationCfg = robot_cfg.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
     return SonicSceneCfg(num_envs=1, env_spacing=2.5, replicate_physics=False)
 
@@ -463,14 +495,17 @@ def zero_body_drives(robot: object, body_ids: Sequence[int]) -> None:
     body_set = set(int(index) for index in body_ids)
     for actuator in robot.actuators.values():
         names = list(getattr(actuator, "joint_names", []))
+        # Actuator gain tensors are shaped (num_envs, joints_in_group).
+        stiffness = actuator.stiffness
+        damping = actuator.damping
         for position, name in enumerate(names):
             try:
                 joint_index = robot.joint_names.index(name)
             except ValueError:
                 continue
             if joint_index in body_set:
-                actuator.stiffness[position] = 0.0
-                actuator.damping[position] = 0.0
+                stiffness[:, position] = 0.0
+                damping[:, position] = 0.0
     robot.write_joint_stiffness_to_sim(0.0, joint_ids=list(body_ids))
     robot.write_joint_damping_to_sim(0.0, joint_ids=list(body_ids))
 
@@ -584,6 +619,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Gate B: with no controller, confirm Play makes the robot fall",
     )
+    parser.add_argument(
+        "--settle-frames",
+        type=int,
+        default=20,
+        help="frames to hold the reset pose after Play before measuring",
+    )
     parser.add_argument("--dump-dir", type=Path)
     from isaaclab.app import AppLauncher
 
@@ -625,8 +666,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps({"event": "failed", "reason": str(exc)}), file=sys.stderr, flush=True)
         exit_code = EXIT_BROKEN
     finally:
-        simulation_app.close()
-    os._exit(exit_code)
+        # Kit's shutdown routinely takes many minutes; the process is finished
+        # either way, so flush and leave without waiting on the teardown.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(exit_code)
 
 
 def _write_evidence(path: Path | None, payload: dict) -> None:
@@ -637,6 +681,7 @@ def _write_evidence(path: Path | None, payload: dict) -> None:
 
 
 def _run(args: argparse.Namespace, profile: Profile, simulation_app) -> tuple[int, dict]:
+    import torch
     import isaaclab.sim as sim_utils
     from isaaclab.scene import InteractiveScene
     from omni.timeline import get_timeline_interface
@@ -646,6 +691,12 @@ def _run(args: argparse.Namespace, profile: Profile, simulation_app) -> tuple[in
     )
     scene_cfg = build_scene(profile)
     scene = InteractiveScene(scene_cfg)
+    # The Inspire asset keeps a disabled world joint above the pelvis; PhysX
+    # cannot create the articulation until the root moves to the pelvis. This
+    # has to happen after the prims exist and before sim.reset().
+    from isaac_g1_free_base import configure_free_base_articulation
+
+    free_base_overridden = configure_free_base_articulation()
     sim.reset()
 
     robot = scene["robot"]
@@ -654,6 +705,19 @@ def _run(args: argparse.Namespace, profile: Profile, simulation_app) -> tuple[in
     validate_limits(limits)
     mapping = build_joint_mapping(SONIC_BODY_JOINT_NAMES, list(robot.joint_names))
 
+    # Record where the articulation actually sits, so a height regression is
+    # visible in the evidence rather than inferred from the thresholds.
+    diagnostics = {
+        "root_link": robot.data.body_names[0],
+        "asset_dof_count": len(robot.joint_names),
+        "body_dof_count": len(body_ids),
+        "hand_dof_count": len(hand_ids),
+        "body_ids": body_ids,
+        "free_base_override_applied": free_base_overridden,
+        "root_z_after_scene_reset": float(robot.data.root_pos_w[0][2]),
+        "default_joint_pos": [float(v) for v in robot.data.default_joint_pos[0].tolist()],
+    }
+
     timeline = get_timeline_interface()
 
     # Freeze the standing pose before anything can advance, then zero the
@@ -661,9 +725,13 @@ def _run(args: argparse.Namespace, profile: Profile, simulation_app) -> tuple[in
     default_pos = robot.data.default_joint_pos.clone()
     robot.write_joint_state_to_sim(default_pos, robot.data.default_joint_vel.clone().zero_())
     robot.set_joint_position_target(default_pos)
-    zero_body_drives(robot, body_ids)
 
     reset_simulation_paused(sim, timeline)
+    zero_body_drives(robot, body_ids)
+    diagnostics["root_z_after_reset_paused"] = float(robot.data.root_pos_w[0][2])
+    diagnostics["stiffness_after_zero"] = [
+        float(robot.data.joint_stiffness[0, index]) for index in body_ids[:6]
+    ]
 
     actuation = BodyActuation([limit.effort_max for limit in limits])
     metrics = Metrics()
@@ -681,28 +749,27 @@ def _run(args: argparse.Namespace, profile: Profile, simulation_app) -> tuple[in
 
     state_snapshot = {"tick": 0}
 
-    def publish_state() -> None:
+    def build_state_frame() -> StateFrame:
+        """The loop publishes this every frame; publishing stays in one place."""
         state_snapshot["tick"] += 1
         pos, quat = read_root_state(robot)
         lin = tuple(float(v) for v in robot.data.root_lin_vel_w[0].tolist())
         ang = tuple(float(v) for v in robot.data.root_ang_vel_w[0].tolist())
         q = tuple(float(robot.data.joint_pos[0, i]) for i in body_ids)
         dq = tuple(float(robot.data.joint_vel[0, i]) for i in body_ids)
-        link.publish(
-            StateFrame(
-                tick_us=int(time.monotonic() * 1e6),
-                root_pos=pos,
-                root_quat_wxyz=quat,
-                root_lin_vel=lin,
-                root_ang_vel=ang,
-                root_acc=(0.0, 0.0, 0.0),
-                torso_quat_wxyz=quat,
-                torso_gyro=ang,
-                body_q=q,
-                body_dq=dq,
-                body_ddq=(0.0,) * BODY_JOINT_COUNT,
-                body_tau_est=(0.0,) * BODY_JOINT_COUNT,
-            )
+        return StateFrame(
+            tick_us=int(time.monotonic() * 1e6),
+            root_pos=pos,
+            root_quat_wxyz=quat,
+            root_lin_vel=lin,
+            root_ang_vel=ang,
+            root_acc=(0.0, 0.0, 0.0),
+            torso_quat_wxyz=quat,
+            torso_gyro=ang,
+            body_q=q,
+            body_dq=dq,
+            body_ddq=(0.0,) * BODY_JOINT_COUNT,
+            body_tau_est=(0.0,) * BODY_JOINT_COUNT,
         )
 
     if args.ready_file is not None:
@@ -718,28 +785,56 @@ def _run(args: argparse.Namespace, profile: Profile, simulation_app) -> tuple[in
             + "\n"
         )
 
-    # Paused hold: the GUI stays responsive and physics must not advance. The
-    # simulation clock is the observable, not a promise from the loop.
-    hold_clock_before = float(sim.current_time)
+    # Paused hold: the GUI stays responsive and physics must not advance. Both
+    # the PhysX clock and the robot's own pose are observed, because
+    # SimulationContext.current_time does not track app.update() stepping.
+    hold_root_before = float(robot.data.root_pos_w[0][2])
+    hold_clock_before = physx_timestamp()
     hold_started = time.monotonic()
     hold_updates = 0
     while (time.monotonic() - hold_started) < args.paused_hold:
         simulation_app.update()
-        publish_state()
+        link.publish(build_state_frame())
         hold_updates += 1
-    hold_clock_after = float(sim.current_time)
+    hold_clock_after = physx_timestamp()
+    hold_root_after = float(robot.data.root_pos_w[0][2])
     paused_hold = {
         "seconds": args.paused_hold,
         "app_updates": hold_updates,
-        "sim_time_before": hold_clock_before,
-        "sim_time_after": hold_clock_after,
-        "physics_advanced": hold_clock_after != hold_clock_before,
+        "physx_time_before": hold_clock_before,
+        "physx_time_after": hold_clock_after,
+        "root_z_before": hold_root_before,
+        "root_z_after": hold_root_after,
+        # The pose is the authoritative observable; the PhysX timestamp is
+        # reported but may be unavailable, and NaN compares unequal.
+        "physics_advanced": bool(hold_root_after != hold_root_before),
         "gui_responsive": hold_updates > 0,
     }
 
     if args.auto_play:
         sim.play()
         print(json.dumps({"event": "auto_play"}), flush=True)
+    diagnostics["root_z_at_play"] = float(robot.data.root_pos_w[0][2])
+    diagnostics["physx_time_at_play"] = physx_timestamp()
+
+    # Kit can burst-step physics on the paused -> playing transition, which
+    # would drop the robot before the measurement window opens. Re-freeze the
+    # reset pose at Play so every run starts from the same standing state.
+    reset_root_pos = robot.data.root_pos_w[0].clone()
+    reset_root_quat = robot.data.root_quat_w[0].clone()
+    zero_velocity = robot.data.default_joint_vel.clone().zero_()
+
+    def freeze_at_play(_now: float) -> None:
+        from isaaclab.utils.math import convert_quat
+
+        robot.write_root_pose_to_sim(
+            torch.cat([reset_root_pos, convert_quat(reset_root_quat, to="wxyz")]).unsqueeze(0)
+        )
+        robot.write_root_velocity_to_sim(torch.zeros((1, 6), device=robot.device))
+        robot.write_joint_state_to_sim(default_pos, zero_velocity)
+        robot.set_joint_position_target(default_pos)
+        scene.write_data_to_sim()
+        diagnostics["root_z_at_play_refrozen"] = float(robot.data.root_pos_w[0][2])
 
     steps = run_interactive_app(
         simulation_app,
@@ -749,11 +844,13 @@ def _run(args: argparse.Namespace, profile: Profile, simulation_app) -> tuple[in
         actuation=actuation,
         link=link,
         metrics=metrics,
-        read_state=publish_state,
+        read_state=build_state_frame,
         read_body_q_dq=read_body_q_dq(robot, body_ids),
         apply_effort=apply_effort,
         duration_s=args.duration,
         warmup_s=0.0 if args.fall_test else args.warmup,
+        settle_frames=args.settle_frames,
+        on_play=freeze_at_play,
         on_physics_step=recorder.maybe_record,
     )
 
@@ -771,6 +868,7 @@ def _run(args: argparse.Namespace, profile: Profile, simulation_app) -> tuple[in
         "physics_dt": PHYSICS_DT,
         "physics_steps": steps,
         "paused_hold": paused_hold,
+        "diagnostics": diagnostics,
         "hands_controlled_by_sonic": HANDS_CONTROLLED_BY_SONIC,
         "hand_joint_count": len(hand_ids),
         "hand_q_final": list(hand_state.q),
