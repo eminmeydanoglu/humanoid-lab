@@ -1,8 +1,9 @@
 # eski_kotu — arşivlenmiş eski implementasyon
 
-Bu dizin, `en_iyi_plan.md` öncesi SONIC / GR00T / CloudWalk / F310 Isaac hattına
-ait dosyaları tek yerde toplar. Hiçbir dosya silinmedi; tamamı `git mv` ile
-taşındı, geçmiş `git log --follow` ile izlenebilir.
+Bu dizin, `en_iyi_plan.md` öncesi SONIC / GR00T / CloudWalk / F310 / ROMP
+hattına ait dosyaları tek yerde toplar. Hiçbir dosya silinmedi: checkout'taki
+izlenen dosyalar `git mv` ile taşındı, yalnız Raider'da bulunan ROMP dosyaları
+da senkronizasyon öncesi stash'ten bu ağaca korunarak alındı.
 
 ## Neden burada
 
@@ -28,7 +29,8 @@ archive/eski_kotu/
 │               native/*.cpp, fixtures/*.json
 ├── configs/    cloudwalk_scene.json, cloudwalk_wood.png,
 │               sonic_isaac_deploy.json, sonic_v1_1_safe_standing_reference.json
-├── patches/    sonic-f310-bridge-input.patch, sonic-f310-bridge-runtime-diagnostics.patch
+├── patches/    sonic-f310-bridge-*.patch, sonic-deploy-sim-domain.patch
+├── romp_teleop/ eski ROMP poz akışı, SONIC köprüsü, tanı araçları ve örnek NPZ'ler
 ├── bug_repor.md, cloud.md, groot-n17-finetuning.md
 └── README.md
 ```

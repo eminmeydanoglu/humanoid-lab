@@ -1,0 +1,29 @@
+diff --git a/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/dex3_hands.hpp b/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/dex3_hands.hpp
+index 7644154..bb81414 100644
+--- a/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/dex3_hands.hpp
++++ b/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/dex3_hands.hpp
+@@ -68,7 +68,7 @@ public:
+     {
+         if (!networkInterface.empty())
+         {
+-            unitree::robot::ChannelFactory::Instance()->Init(0, networkInterface.c_str());
++            unitree::robot::ChannelFactory::Instance()->Init(42, networkInterface.c_str());
+         }
+ 
+         // Left hand namespaces
+diff --git a/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/src/g1_deploy_onnx_ref.cpp b/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/src/g1_deploy_onnx_ref.cpp
+index a35f0b3..8142d57 100644
+--- a/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/src/g1_deploy_onnx_ref.cpp
++++ b/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/src/g1_deploy_onnx_ref.cpp
+@@ -2181,8 +2181,9 @@ class G1Deploy {
+         model_path(model_file_path),
+         planner_path(planner_file_path) {
+       
+-      // Initialize ChannelFactory
+-      ChannelFactory::Instance()->Init(0, networkInterface);
++      // Simulation isolation: a physical G1 uses DDS domain 0 by default,
++      // so the simulated Unitree topics must never share its domain.
++      ChannelFactory::Instance()->Init(42, networkInterface);
+ 
+       // Initialize Dex3 hands (ChannelFactory already initialized above)
+       dex3_hands_.initialize("");
