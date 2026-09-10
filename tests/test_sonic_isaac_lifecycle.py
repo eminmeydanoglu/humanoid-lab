@@ -261,7 +261,10 @@ class InteractiveLoopTest(unittest.TestCase):
         self.assertIn("update", called)
         self.assertNotIn("render", called)
 
-        app = FakeApp(2)
+        app = FakeApp(5)
+        self.assertEqual(app.updates, 0)
+        runner.refresh_viewport(FakeSim(), app)
+        self.assertEqual(app.updates, 1, "one call presents one frame")
         runner.refresh_viewport(FakeSim(), app)
         self.assertEqual(app.updates, 2)
 
