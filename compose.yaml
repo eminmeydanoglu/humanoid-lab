@@ -68,11 +68,18 @@ services:
       - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/diagnostics:/data/diagnostics
       - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/runtime:/data/runtime:ro
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # F310/joystick access for the SONIC input adapter.  The cgroup rule is
+      # scoped to the input-event major rather than making the container
+      # privileged; setup.sh writes the host input group's numeric GID.
+      - /dev/input:/dev/input
     network_mode: host
     ipc: host
+    device_cgroup_rules:
+      - "c 13:* rwm"
     # /isaac-sim 750 isaac-sim; compose exec /etc/group supplemental group'ları çözmez
     group_add:
       - isaac-sim
+      - ${HOST_INPUT_GID:?set HOST_INPUT_GID in .env}
     deploy:
       resources:
         reservations:

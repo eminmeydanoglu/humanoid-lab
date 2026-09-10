@@ -1,0 +1,401 @@
+#!/usr/bin/env python3
+"""Timeline-lifecycle tests driving the shipped runner's real functions.
+
+The runner module is loaded with importlib exactly the way
+``test_cloudwalk_isaac_lifecycle.py`` loads its runner, so these assertions run
+against the shipped code and not a copy.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+RUNNER = ROOT / "scripts" / "run-sonic-isaac.py"
+sys.path.insert(0, str(ROOT / "tools"))
+
+from sonic_isaac_actuation import BodyActuation  # noqa: E402
+from sonic_isaac_contract import BODY_JOINT_COUNT  # noqa: E402
+from sonic_isaac_ipc import LowCmdFrame  # noqa: E402
+
+
+def load_runner():
+    spec = importlib.util.spec_from_file_location("run_sonic_isaac_lifecycle", RUNNER)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    # dataclasses resolve their module through sys.modules while the body runs.
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+runner = load_runner()
+
+
+class FakeApp:
+    """Frame-counted app. ``is_running`` advances the clock because the shipped
+    loop only calls ``update()`` while paused; during Play it relies on
+    ``sim.step()`` to drive the application."""
+
+    def __init__(self, frames: int) -> None:
+        self.frames = frames
+        self.remaining = frames
+        self.updates = 0
+
+    @property
+    def iteration(self) -> int:
+        """Zero-based index of the frame currently being processed."""
+        return self.frames - self.remaining - 1
+
+    def is_running(self) -> bool:
+        if self.remaining <= 0:
+            return False
+        self.remaining -= 1
+        return True
+
+    def update(self) -> None:
+        self.updates += 1
+
+
+class FakeTimeline:
+    """Play schedule indexed by app iteration.
+
+    ``is_playing`` is queried by both the loop and ``step_frame``, so it must be
+    idempotent within an iteration -- the real Isaac timeline is.
+    """
+
+    def __init__(self, playing: list[bool], app: FakeApp | None = None) -> None:
+        self._playing = list(playing)
+        self._app = app
+        self._cursor = 0
+        self.pauses = 0
+
+    def is_playing(self) -> bool:
+        index = self._app.iteration if self._app is not None else self._cursor
+        if self._app is None and len(self._playing) > 1:
+            self._cursor += 1
+        return self._playing[min(index, len(self._playing) - 1)]
+
+    def pause(self) -> None:
+        self.pauses += 1
+
+
+class FakeSim:
+    def __init__(self) -> None:
+        self.steps = 0
+        self.current_time = 0.0
+
+    def reset(self) -> None:
+        self.reset_called = True
+
+    def step(self) -> None:
+        self.steps += 1
+        self.current_time += 0.005
+
+    def get_physics_dt(self) -> float:
+        return 0.005
+
+
+class FakeScene:
+    def __init__(self) -> None:
+        self.writes = 0
+        self.updates = 0
+
+    def write_data_to_sim(self) -> None:
+        self.writes += 1
+
+    def update(self, dt) -> None:
+        self.updates += 1
+
+
+class FakeLink:
+    def __init__(self, commands=None) -> None:
+        self.published = 0
+        self.accepted = 0
+        self.commands = list(commands or [])
+
+    def accept(self) -> bool:
+        self.accepted += 1
+        return True
+
+    def publish(self, state) -> bool:
+        self.published += 1
+        return True
+
+    def take_command(self):
+        return self.commands.pop(0) if self.commands else None
+
+    def snapshot(self) -> dict:
+        return {}
+
+
+def vector(value: float) -> tuple[float, ...]:
+    return (value,) * BODY_JOINT_COUNT
+
+
+def command(sequence: int, *, kp: float = 0.0, q: float = 0.0) -> LowCmdFrame:
+    return LowCmdFrame(
+        sequence=sequence, q=vector(q), dq=vector(0.0), tau=vector(0.0),
+        kp=vector(kp), kd=vector(0.0),
+    )
+
+
+def make_metrics(body_ids=(0, 1, 2)):
+    metrics = runner.Metrics()
+    from sonic_isaac_contract import JointLimits
+
+    limits = [
+        JointLimits(f"j{i}", -3.0, 3.0, 88.0, 32.0) for i in range(len(body_ids))
+    ]
+    metrics.bind(
+        body_ids=body_ids,
+        limits=limits,
+        read_joint_pos=lambda: (0.0,) * len(body_ids),
+        read_root=lambda: ((0.0, 0.0, 0.7), (1.0, 0.0, 0.0, 0.0)),
+    )
+    return metrics
+
+
+class ResetOrderingTest(unittest.TestCase):
+    def test_reset_completes_before_timeline_is_paused(self) -> None:
+        order: list[str] = []
+        sim = FakeSim()
+        sim.reset = lambda: order.append("reset")
+        timeline = FakeTimeline([False])
+        timeline.pause = lambda: order.append("pause")
+        runner.reset_simulation_paused(sim, timeline)
+        self.assertEqual(order, ["reset", "pause"])
+
+    def test_reset_tolerates_a_missing_timeline(self) -> None:
+        runner.reset_simulation_paused(FakeSim(), None)
+
+
+class StepFrameTest(unittest.TestCase):
+    def test_paused_frame_updates_app_without_stepping_physics(self) -> None:
+        app, sim, scene = FakeApp(1), FakeSim(), FakeScene()
+        advanced = runner.step_frame(app, FakeTimeline([False]), sim, scene)
+        self.assertFalse(advanced)
+        self.assertEqual(app.updates, 1)
+        self.assertEqual(sim.steps, 0)
+        self.assertEqual(scene.writes, 0)
+
+    def test_playing_frame_writes_step_and_update_in_order(self) -> None:
+        order: list[str] = []
+        app, sim, scene = FakeApp(1), FakeSim(), FakeScene()
+        sim.step = lambda: order.append("step")
+        scene.write_data_to_sim = lambda: order.append("write")
+        scene.update = lambda dt: order.append("update")
+        advanced = runner.step_frame(
+            app, FakeTimeline([True]), sim, scene,
+            efforts=vector(1.0), apply_effort=lambda efforts: order.append("effort"),
+        )
+        self.assertTrue(advanced)
+        self.assertEqual(order, ["effort", "write", "step", "update"])
+
+    def test_effort_is_not_written_while_paused(self) -> None:
+        calls: list = []
+        app, sim, scene = FakeApp(1), FakeSim(), FakeScene()
+        runner.step_frame(
+            app, FakeTimeline([False]), sim, scene,
+            efforts=vector(1.0), apply_effort=lambda efforts: calls.append(efforts),
+        )
+        self.assertEqual(calls, [])
+
+
+class InteractiveLoopTest(unittest.TestCase):
+    def run_loop(self, playing, frames, *, commands=None, actuation=None, link=None):
+        app, sim, scene = FakeApp(frames), FakeSim(), FakeScene()
+        link = link or FakeLink(commands)
+        actuation = actuation or BodyActuation([88.0] * BODY_JOINT_COUNT)
+        metrics = make_metrics()
+        applied: list = []
+        steps = runner.run_interactive_app(
+            app,
+            FakeTimeline(playing, app),
+            sim,
+            scene,
+            actuation=actuation,
+            link=link,
+            metrics=metrics,
+            read_state=lambda: None,
+            read_body_q_dq=lambda: (vector(0.0), vector(0.0)),
+            apply_effort=lambda efforts: applied.append(efforts),
+        )
+        return steps, sim, applied, link, metrics
+
+    def test_physics_advances_only_while_playing(self) -> None:
+        steps, sim, applied, _link, _metrics = self.run_loop(
+            [False, False, True, True, False], frames=5
+        )
+        self.assertEqual(steps, 2)
+        self.assertEqual(sim.steps, 2)
+        self.assertEqual(len(applied), 2)
+
+    def test_state_is_published_every_frame_including_paused(self) -> None:
+        _steps, _sim, _applied, link, _metrics = self.run_loop(
+            [False, False, False], frames=3
+        )
+        self.assertEqual(link.published, 3)
+
+    def test_no_controller_means_every_applied_effort_is_zero(self) -> None:
+        _steps, _sim, applied, _link, metrics = self.run_loop([True, True, True], frames=3)
+        self.assertTrue(applied)
+        for efforts in applied:
+            self.assertEqual(efforts, (0.0,) * BODY_JOINT_COUNT)
+        self.assertEqual(metrics.passive_steps, 3)
+        self.assertEqual(metrics.controlled_steps, 0)
+
+    def test_command_received_while_paused_is_cached_not_applied(self) -> None:
+        link = FakeLink([command(1, kp=100.0, q=0.5)])
+        steps, _sim, applied, _link, metrics = self.run_loop(
+            [False, True], frames=2, link=link
+        )
+        self.assertEqual(steps, 1)
+        # The command cached while paused is applied on the first playing frame.
+        self.assertEqual(applied[0][0], 50.0)
+        # It arrived before the measurement window opened, so it is not part of
+        # the run's lowcmd frequency statistics.
+        self.assertEqual(metrics.accepted_commands, 0)
+
+    def test_command_received_during_the_window_is_counted(self) -> None:
+        link = FakeLink([command(1, kp=100.0, q=0.5), command(2, kp=100.0, q=0.5)])
+        _steps, _sim, _applied, _link, metrics = self.run_loop(
+            [True, True, True], frames=3, link=link
+        )
+        self.assertEqual(metrics.accepted_commands, 2)
+        self.assertGreaterEqual(metrics.rate.count, 2)
+
+    def test_stale_command_returns_the_body_to_passive(self) -> None:
+        link = FakeLink([command(1, kp=100.0, q=0.5)])
+        actuation = BodyActuation([88.0] * BODY_JOINT_COUNT, max_age_s=0.0)
+        _steps, _sim, applied, _link, metrics = self.run_loop(
+            [True, True], frames=2, link=link, actuation=actuation
+        )
+        # First frame may apply the fresh command; once it is older than the
+        # zero-length window every effort must be zero.
+        self.assertEqual(applied[-1], (0.0,) * BODY_JOINT_COUNT)
+        self.assertGreaterEqual(metrics.passive_steps, 1)
+
+    def test_out_of_order_command_is_rejected(self) -> None:
+        link = FakeLink([command(5, kp=100.0, q=0.5), command(5, kp=100.0, q=0.9)])
+        _steps, _sim, _applied, _link, metrics = self.run_loop([True, True], frames=2, link=link)
+        self.assertEqual(metrics.rejected_commands, 1)
+
+    def test_duration_stops_the_run_even_while_running(self) -> None:
+        steps, sim, _applied, _link, _metrics = self.run_loop([True] * 50, frames=50)
+        # duration_s is None here, so the loop runs until the app stops.
+        self.assertEqual(steps, 50)
+
+
+class MetricsTest(unittest.TestCase):
+    def test_fall_is_detected_from_the_root_drop(self) -> None:
+        metrics = runner.Metrics()
+        heights = iter([0.75, 0.70, 0.30])
+
+        def read_root():
+            z = next(heights)
+            return (0.0, 0.0, z), (1.0, 0.0, 0.0, 0.0)
+
+        metrics.bind(body_ids=(), limits=(), read_joint_pos=lambda: (), read_root=read_root)
+        metrics.start_measurement(0.0)
+        for _ in range(3):
+            metrics.observe(None)
+        summary = metrics.summary()
+        self.assertAlmostEqual(summary["root_z_drop"], 0.45, places=9)
+        self.assertTrue(metrics.fall_observed())
+
+    def test_small_drop_but_tipped_over_also_counts_as_a_fall(self) -> None:
+        metrics = runner.Metrics()
+        # Pelvis rotated 90 degrees: up-Z collapses to ~0.
+        poses = [
+            ((0.0, 0.0, 0.75), (1.0, 0.0, 0.0, 0.0)),
+            ((0.0, 0.0, 0.74), (0.7071, 0.7071, 0.0, 0.0)),
+        ]
+
+        def read_root():
+            return poses.pop(0)
+
+        metrics.bind(body_ids=(), limits=(), read_joint_pos=lambda: (), read_root=read_root)
+        metrics.start_measurement(0.0)
+        metrics.observe(None)
+        metrics.observe(None)
+        self.assertLessEqual(metrics.summary()["pelvis_up_z_min"], 0.50)
+        self.assertTrue(metrics.fall_observed())
+
+    def test_standing_run_is_not_reported_as_a_fall(self) -> None:
+        metrics = runner.Metrics()
+
+        def read_root():
+            return (0.0, 0.0, 0.74), (1.0, 0.0, 0.0, 0.0)
+
+        metrics.bind(body_ids=(), limits=(), read_joint_pos=lambda: (), read_root=read_root)
+        metrics.start_measurement(0.0)
+        for _ in range(5):
+            metrics.observe(None)
+        self.assertFalse(metrics.fall_observed())
+
+    def test_joint_limit_violation_is_counted(self) -> None:
+        from sonic_isaac_contract import JointLimits
+
+        metrics = runner.Metrics()
+        metrics.bind(
+            body_ids=(0,),
+            limits=[JointLimits("j0", -0.5, 0.5, 88.0, 32.0)],
+            read_joint_pos=lambda: (9.0,),
+            read_root=lambda: ((0.0, 0.0, 0.7), (1.0, 0.0, 0.0, 0.0)),
+        )
+        metrics.start_measurement(0.0)
+        metrics.observe(None)
+        self.assertEqual(metrics.summary()["joint_limit_violations"], 1)
+
+    def test_quat_to_rpy_recovers_a_known_rotation(self) -> None:
+        roll, pitch, yaw = runner.quat_to_rpy((0.7071067811865476, 0.7071067811865475, 0.0, 0.0))
+        self.assertAlmostEqual(roll, 1.5707963267948966, places=6)
+        self.assertAlmostEqual(pitch, 0.0, places=6)
+        self.assertAlmostEqual(yaw, 0.0, places=6)
+
+    def test_summary_reports_none_instead_of_infinity(self) -> None:
+        metrics = runner.Metrics()
+        summary = metrics.summary()
+        self.assertIsNone(summary["root_z_min"])
+        self.assertIsNone(summary["pelvis_up_z_min"])
+
+
+class SourceContractTest(unittest.TestCase):
+    """Pin the invariants that must not silently drift in the runner source."""
+
+    def setUp(self) -> None:
+        self.source = RUNNER.read_text()
+
+    def test_physics_runs_at_two_hundred_hertz(self) -> None:
+        from sonic_isaac_contract import PHYSICS_DT, PHYSICS_HZ
+
+        self.assertEqual(PHYSICS_HZ, 200)
+        self.assertAlmostEqual(PHYSICS_DT, 0.005, places=9)
+        self.assertIn("dt=PHYSICS_DT", self.source)
+
+    def test_body_drives_are_zeroed(self) -> None:
+        self.assertIn("write_joint_stiffness_to_sim(0.0", self.source)
+        self.assertIn("write_joint_damping_to_sim(0.0", self.source)
+        self.assertIn("zero_body_drives(robot, body_ids)", self.source)
+
+    def test_effort_target_is_used_instead_of_a_position_target(self) -> None:
+        self.assertIn("set_joint_effort_target", self.source)
+
+    def test_inspire_profile_is_made_free_based_with_gravity(self) -> None:
+        self.assertIn("fix_root_link = False", self.source)
+        self.assertIn("disable_gravity = False", self.source)
+
+    def test_hands_are_declared_uncontrolled(self) -> None:
+        self.assertIn("HANDS_CONTROLLED_BY_SONIC = False", self.source)
+
+    def test_timeline_is_not_auto_played_without_an_explicit_flag(self) -> None:
+        self.assertIn("--auto-play", self.source)
+        self.assertIn("if args.auto_play:", self.source)
+
+
+if __name__ == "__main__":
+    unittest.main()

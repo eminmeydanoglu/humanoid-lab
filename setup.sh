@@ -157,6 +157,13 @@ chmod 700 "$DATA_ROOT/hf-cache"
 echo "data root: $DATA_ROOT (UID/GID: $UID_NUM/$GID_NUM)"
 
 append_env() { grep -q "^$1=" .env || printf '%s=%s\n' "$1" "$2" >> .env; }
+set_env() { # update in place; the value must track the host, not the first run
+  if grep -q "^$1=" .env; then
+    sed -i "s|^$1=.*|$1=$2|" .env
+  else
+    printf '%s=%s\n' "$1" "$2" >> .env
+  fi
+}
 append_env DEVELOPER_UID "$UID_NUM"
 append_env DEVELOPER_GID "$GID_NUM"
 append_env ISAAC_SIM_IMAGE "${CONTAINER_ISAAC_SIM_IMAGE:-nvcr.io/nvidia/isaac-sim}"
@@ -167,6 +174,11 @@ append_env UV_SHA256 "$UV_SHA256"
 append_env REPOSITORIES_ISAAC_LAB_COMMIT "$REPOSITORIES_ISAAC_LAB_COMMIT"
 append_env REPOSITORIES_SONIC_COMMIT "$REPOSITORIES_SONIC_COMMIT"
 append_env REPOSITORIES_ISAAC_GROOT_COMMIT "$REPOSITORIES_ISAAC_GROOT_COMMIT"
+
+INPUT_GID="$(getent group input | cut -d: -f3)"
+[ -n "$INPUT_GID" ] || die "host has no 'input' group — /dev/input joystick access cannot be granted"
+set_env HOST_INPUT_GID "$INPUT_GID"
+echo "input group GID: $INPUT_GID (container joins it for F310 access)"
 
 say "docker compose build dev"
 docker compose --env-file .env build --progress=plain dev
