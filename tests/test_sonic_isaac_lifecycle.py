@@ -592,3 +592,95 @@ class ViewportFrameTest(unittest.TestCase):
             self.assertEqual(result["frames"], 5)
             self.assertTrue(path.is_file())
             self.assertGreater(path.stat().st_size, 0)
+
+
+class ShutdownTest(unittest.TestCase):
+    """Closing must not leave the desktop reporting the window as unresponsive."""
+
+    def setUp(self) -> None:
+        self.source = RUNNER.read_text()
+
+    def test_shutdown_stops_the_timeline_before_closing(self) -> None:
+        order: list[str] = []
+
+        class App:
+            def update(self) -> None:
+                order.append("update")
+
+            def close(self) -> None:
+                order.append("close")
+
+        class Timeline:
+            def stop(self) -> None:
+                order.append("stop")
+
+        class Sim:
+            def stop(self) -> None:
+                order.append("sim_stop")
+
+        report = runner.shutdown_app(App(), Timeline(), Sim(), settle_s=0.05,
+                                     close_timeout_s=5.0)
+        self.assertTrue(report["timeline_stopped"])
+        self.assertTrue(report["closed"])
+        self.assertFalse(report["timed_out"])
+        # Timeline stops first, the UI gets pumped, and close happens last.
+        self.assertLess(order.index("stop"), order.index("update"))
+        self.assertEqual(order[-1], "close")
+
+    def test_shutdown_is_bounded_when_close_hangs(self) -> None:
+        import time as _time
+
+        class HangingApp:
+            def update(self) -> None:
+                pass
+
+            def close(self) -> None:
+                _time.sleep(30)
+
+        started = _time.monotonic()
+        report = runner.shutdown_app(HangingApp(), None, None, settle_s=0.0,
+                                     close_timeout_s=0.5)
+        elapsed = _time.monotonic() - started
+        self.assertTrue(report["timed_out"])
+        self.assertFalse(report["closed"])
+        # Must return promptly rather than blocking on Kit's teardown.
+        self.assertLess(elapsed, 5.0)
+
+    def test_shutdown_tolerates_a_missing_timeline(self) -> None:
+        class App:
+            def update(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+        report = runner.shutdown_app(App(), None, None, settle_s=0.0, close_timeout_s=1.0)
+        self.assertFalse(report["timeline_stopped"])
+        self.assertTrue(report["closed"])
+
+    def test_shutdown_survives_a_failing_close(self) -> None:
+        class BrokenApp:
+            def update(self) -> None:
+                raise RuntimeError("update failed")
+
+            def close(self) -> None:
+                pass
+
+        report = runner.shutdown_app(BrokenApp(), None, None, settle_s=0.05,
+                                     close_timeout_s=1.0)
+        # BrokenApp.update raises and has no close(); the helper must still
+        # return a report instead of propagating.
+        self.assertIn("closed", report)
+        self.assertFalse(report["closed"])
+
+    def test_main_registers_handles_for_shutdown(self) -> None:
+        self.assertIn('_SIM["sim"] = sim', self.source)
+        self.assertIn('_TIMELINE["timeline"] = timeline', self.source)
+        self.assertIn("shutdown_app(simulation_app,", self.source)
+        self.assertNotIn("simulation_app.close()\n        os._exit", self.source)
+
+    def test_startup_pumps_the_app_so_the_window_answers(self) -> None:
+        self.assertIn("def pump_app", self.source)
+        self.assertIn("pump_app(simulation_app, 2)", self.source)
+
+

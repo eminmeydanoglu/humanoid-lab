@@ -59,6 +59,10 @@ from sonic_isaac_ipc import (  # noqa: E402
 EXIT_OK = 0
 EXIT_CONTRACT = 2
 
+# Handles the shutdown path needs, recorded once the objects exist.
+_SIM: dict = {}
+_TIMELINE: dict = {}
+
 
 @dataclass(frozen=True)
 class Profile:
@@ -79,6 +83,64 @@ HANDS_CONTROLLED_BY_SONIC = False
 # --------------------------------------------------------------------------- #
 # Timeline lifecycle and the per-frame step
 # --------------------------------------------------------------------------- #
+
+
+def pump_app(simulation_app: object, frames: int = 2) -> None:
+    """Run a few app frames so the window keeps answering the desktop.
+
+    Isaac's startup work happens on the main thread; without pumping, the window
+    is reported as "not responding" until the scene is ready.
+    """
+    for _ in range(max(0, int(frames))):
+        try:
+            simulation_app.update()
+        except Exception:  # noqa: BLE001
+            return
+
+
+def shutdown_app(simulation_app: object, timeline: object | None, sim: object | None,
+                 *, settle_s: float = 1.5, close_timeout_s: float = 20.0) -> dict:
+    """Stop the timeline and close Kit without a force-quit dialog.
+
+    Kit's teardown can take minutes or hang, and killing the process outright is
+    what makes the desktop report the window as unresponsive. The timeline is
+    stopped first, a few frames are pumped so the UI repaints its final state,
+    then close() runs on a helper thread with a bounded wait.
+    """
+    import threading
+
+    report = {"timeline_stopped": False, "closed": False, "timed_out": False}
+    try:
+        if timeline is not None:
+            timeline.stop()
+            report["timeline_stopped"] = True
+    except Exception as exc:  # noqa: BLE001
+        report["timeline_error"] = str(exc)
+    try:
+        if sim is not None and hasattr(sim, "stop"):
+            sim.stop()
+    except Exception:  # noqa: BLE001
+        pass
+
+    deadline = time.monotonic() + max(0.0, settle_s)
+    while time.monotonic() < deadline:
+        try:
+            simulation_app.update()
+        except Exception:  # noqa: BLE001
+            break
+
+    close = getattr(simulation_app, "close", None)
+    if close is None:
+        report["close_unavailable"] = True
+        return report
+    closer = threading.Thread(target=close, daemon=True)
+    closer.start()
+    closer.join(timeout=close_timeout_s)
+    if closer.is_alive():
+        report["timed_out"] = True
+    else:
+        report["closed"] = True
+    return report
 
 
 def physx_timestamp() -> float:
@@ -852,8 +914,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps({"event": "failed", "reason": str(exc)}), file=sys.stderr, flush=True)
         exit_code = EXIT_BROKEN
     finally:
-        # Kit's shutdown routinely takes many minutes; the process is finished
-        # either way, so flush and leave without waiting on the teardown.
+        # Stop the timeline and let Kit close itself, so the desktop does not
+        # report the window as unresponsive. Exiting outright is what triggers
+        # the force-quit prompt.
+        report = shutdown_app(simulation_app, _TIMELINE.get("timeline"), _SIM.get("sim"))
+        print(json.dumps({"event": "shutdown", **report}), flush=True)
         sys.stdout.flush()
         sys.stderr.flush()
         os._exit(exit_code)
@@ -887,6 +952,9 @@ def _run(args: argparse.Namespace, profile: Profile, simulation_app) -> tuple[in
     sim = sim_utils.SimulationContext(
         sim_utils.SimulationCfg(dt=PHYSICS_DT, device=args.device, use_fabric=True)
     )
+    _SIM["sim"] = sim
+    # Give the window a frame early so the desktop does not mark it unresponsive.
+    pump_app(simulation_app, 2)
     if str(args.device).startswith("cuda") and not sim.is_fabric_enabled():
         raise ContractError(
             "GPU simulation requires Fabric to render physics transforms; "
@@ -927,6 +995,7 @@ def _run(args: argparse.Namespace, profile: Profile, simulation_app) -> tuple[in
     }
 
     timeline = get_timeline_interface()
+    _TIMELINE["timeline"] = timeline
 
     # Start from SONIC's own default standing pose: the policy is trained around
     # it, and the asset's initial state (hip pitch -0.10, knee 0.30) would put
