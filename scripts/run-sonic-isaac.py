@@ -505,6 +505,19 @@ def build_scene(profile: Profile):
 
     @configclass
     class SonicSceneCfg(InteractiveSceneCfg):
+        # Isaac renders in "Stage Lights" mode, so the scene needs its own
+        # lights: without them the viewport is black and only silhouettes show.
+        dome_light = AssetBaseCfg(
+            prim_path="/World/DomeLight",
+            spawn=sim_utils.DomeLightCfg(intensity=1500.0, color=(0.85, 0.87, 0.9)),
+        )
+        key_light = AssetBaseCfg(
+            prim_path="/World/KeyLight",
+            spawn=sim_utils.DistantLightCfg(intensity=3000.0, color=(1.0, 0.97, 0.92)),
+            init_state=AssetBaseCfg.InitialStateCfg(
+                pos=(2.0, 2.0, 6.0), rot=(0.82, 0.35, 0.30, 0.34)
+            ),
+        )
         ground = AssetBaseCfg(prim_path="/World/ground", spawn=sim_utils.GroundPlaneCfg())
         robot: ArticulationCfg = robot_cfg.replace(prim_path="{ENV_REGEX_NS}/Robot")
 

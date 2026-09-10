@@ -398,6 +398,12 @@ class SourceContractTest(unittest.TestCase):
         self.assertIn("fix_root_link = False", self.source)
         self.assertIn("disable_gravity = False", self.source)
 
+    def test_scene_provides_its_own_lights(self) -> None:
+        """Stage Lights mode with no lights renders the scene black."""
+        self.assertIn("DomeLightCfg", self.source)
+        self.assertIn("DistantLightCfg", self.source)
+        self.assertIn("/World/DomeLight", self.source)
+
     def test_hands_are_declared_uncontrolled(self) -> None:
         self.assertIn("HANDS_CONTROLLED_BY_SONIC = False", self.source)
 
