@@ -414,6 +414,34 @@ class SourceContractTest(unittest.TestCase):
         self.assertIn("def viewport_diagnostics", self.source)
         self.assertIn('"viewport": viewport_diagnostics()', self.source)
 
+    def test_evidence_is_written_even_with_a_non_serializable_value(self) -> None:
+        """A stray Sdf.Path must not destroy the whole run record."""
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "evidence.json"
+
+            class NotPrimitive:
+                def __str__(self) -> str:
+                    return "not-primitive"
+
+            runner._write_evidence(path, {"ok": True, "weird": NotPrimitive()})
+            payload = json.loads(path.read_text())
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["weird"], "not-primitive")
+
+    def test_viewport_diagnostics_are_json_safe(self) -> None:
+        """Camera handles are Sdf.Path values, which json cannot encode."""
+        import inspect
+        import json
+
+        source = inspect.getsource(runner.viewport_diagnostics)
+        self.assertIn("str(viewport.get_active_camera())", source)
+        self.assertIn("str(product)", source)
+        # The helper must be callable (and JSON-safe) outside a Kit app.
+        json.dumps(runner.viewport_diagnostics())
+
     def test_hands_are_declared_uncontrolled(self) -> None:
         self.assertIn("HANDS_CONTROLLED_BY_SONIC = False", self.source)
 

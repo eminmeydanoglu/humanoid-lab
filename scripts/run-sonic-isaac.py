@@ -630,10 +630,12 @@ def viewport_diagnostics() -> dict:
         from omni.kit.viewport.utility import get_active_viewport
 
         viewport = get_active_viewport()
-        info["render_product_path"] = getattr(viewport, "render_product_path", None)
-        info["resolution"] = list(getattr(viewport, "resolution", ()) or ())
+        product = getattr(viewport, "render_product_path", None)
+        info["render_product_path"] = None if product is None else str(product)
+        info["resolution"] = [int(v) for v in (getattr(viewport, "resolution", ()) or ())]
         try:
-            info["camera_path"] = viewport.get_active_camera()
+            # The camera handle is an Sdf.Path, which is not JSON serializable.
+            info["camera_path"] = str(viewport.get_active_camera())
         except Exception:  # noqa: BLE001
             info["camera_path"] = None
     except Exception as exc:  # noqa: BLE001
@@ -843,10 +845,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _write_evidence(path: Path | None, payload: dict) -> None:
+    """Write the run record; a stray non-primitive must not lose the evidence."""
     if path is None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n")
 
 
 def _run(args: argparse.Namespace, profile: Profile, simulation_app) -> tuple[int, dict]:
