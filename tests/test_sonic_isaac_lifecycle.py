@@ -432,6 +432,18 @@ class SourceContractTest(unittest.TestCase):
         self.assertIn("set_camera_view", self.source)
         self.assertIn("camera_view_set", self.source)
 
+    def test_fabric_is_enabled_so_the_viewport_renders_physics(self) -> None:
+        """Without fabric the renderer keeps showing the initial pose."""
+        self.assertIn('"/physics/fabricEnabled", True', self.source)
+        self.assertIn('"/physics/updateToUsd", False', self.source)
+        self.assertIn("SimulationManager.enable_fabric(True)", self.source)
+        self.assertIn("attach_stage_to_usd_context()", self.source)
+        # Fabric is enabled before the context is constructed.
+        self.assertLess(
+            self.source.index("enable_fabric(True)"),
+            self.source.index("sim_utils.SimulationContext("),
+        )
+
     def test_evidence_records_which_viewport_was_captured(self) -> None:
         """An unusable recording must be explainable from the evidence."""
         self.assertIn("def viewport_diagnostics", self.source)

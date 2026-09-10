@@ -862,9 +862,25 @@ def _run(args: argparse.Namespace, profile: Profile, simulation_app) -> tuple[in
     from isaaclab.scene import InteractiveScene
     from omni.timeline import get_timeline_interface
 
+    # Fabric must be enabled before the context exists: the renderer reads
+    # physics transforms from fabric, and without it the viewport keeps showing
+    # the initial pose while the timeline advances -- a frozen picture.
+    import carb
+    from isaacsim.core.simulation_manager import SimulationManager
+
+    physics_settings = carb.settings.get_settings()
+    physics_settings.set_bool("/physics/fabricEnabled", True)
+    physics_settings.set_bool("/physics/updateToUsd", False)
+    SimulationManager.enable_fabric(True)
+
     sim = sim_utils.SimulationContext(
         sim_utils.SimulationCfg(dt=PHYSICS_DT, device=args.device, use_fabric=True)
     )
+    if str(args.device).startswith("cuda") and not sim.is_fabric_enabled():
+        raise ContractError(
+            "GPU simulation requires Fabric to render physics transforms; "
+            "without it the viewport cannot show the robot moving"
+        )
     scene_cfg = build_scene(profile)
     scene = InteractiveScene(scene_cfg)
     # The Inspire asset keeps a disabled world joint above the pelvis; PhysX
@@ -873,6 +889,10 @@ def _run(args: argparse.Namespace, profile: Profile, simulation_app) -> tuple[in
     from isaac_g1_free_base import configure_free_base_articulation
 
     free_base_overridden = configure_free_base_articulation()
+    # Hands the authored stage to the render context so the viewport renders it.
+    from isaaclab.sim.utils.stage import attach_stage_to_usd_context
+
+    attach_stage_to_usd_context()
     sim.reset()
 
     robot = scene["robot"]
@@ -890,6 +910,7 @@ def _run(args: argparse.Namespace, profile: Profile, simulation_app) -> tuple[in
         "hand_dof_count": len(hand_ids),
         "body_ids": body_ids,
         "free_base_override_applied": free_base_overridden,
+        "fabric_enabled": bool(sim.is_fabric_enabled()),
         "root_z_after_scene_reset": float(robot.data.root_pos_w[0][2]),
         "default_joint_pos": [float(v) for v in robot.data.default_joint_pos[0].tolist()],
     }
