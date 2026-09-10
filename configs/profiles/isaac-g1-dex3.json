@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "profile_id": "isaac-g1-29dof-dex3-head-camera",
+  "robot": {
+    "name": "g1-29dof-dex3",
+    "body_dofs": 29,
+    "asset_kind": "usd",
+    "asset_reference": "/opt/src/sonic/gear_sonic/data/robots/g1/g1_29dof_with_hand_rev_1_0.usd",
+    "asset_provenance": "pinned SONIC gear_sonic G1 rev 1.0 Dex3 asset; 7 joints per hand",
+    "initial_position_m": [0.0, 0.0, 0.8],
+    "hand": {
+      "kind": "dex3",
+      "dofs": 14,
+      "behavior": "passive",
+      "joint_name_patterns": ["_hand_thumb_", "_hand_middle_", "_hand_index_"]
+    }
+  },
+  "camera": {
+    "name": "head_camera",
+    "parent_link": "torso_link",
+    "resolution": [640, 480],
+    "focal_length_mm": 15.1159925892,
+    "horizontal_aperture_mm": 20.955,
+    "position_m": [0.0576235, 0.01753, 0.41987],
+    "rotation_wxyz": [0.9149596678, 0.0, 0.4035452964, 0.0]
+  },
+  "simulation": {"physics_dt": 0.005}
+}

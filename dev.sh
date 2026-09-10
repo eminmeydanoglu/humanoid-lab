@@ -169,6 +169,18 @@ case "${1:-}" in
     up_once
     DC exec dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && cd /workspace/humanoid-lab && exec /opt/venvs/isaac-sonic/bin/python scripts/run-cloudwalk-isaac.py --interactive --capture-path outputs/cloudwalk-gui.jpg "$@"' cloudwalk-sim "${@:2}"
     ;;
+  isaac-g1)
+    profile="${2:-}"
+    case "$profile" in
+      no_hands) profile_file=configs/profiles/isaac-g1-no_hands.json ;;
+      inspire-ftp) profile_file=configs/profiles/isaac-g1-inspire-ftp.json ;;
+      dex3) profile_file=configs/profiles/isaac-g1-dex3.json ;;
+      *) echo "usage: $0 isaac-g1 {no_hands|inspire-ftp|dex3} [--test passive-fall] [--headless] [--duration SECONDS]" >&2; exit 2 ;;
+    esac
+    up_once
+    # shellcheck disable=SC2016 # Positional parameters expand inside the container shell.
+    DC exec dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && cd /workspace/humanoid-lab && exec python scripts/run-isaac-g1.py --profile "$1" "${@:2}"' isaac-g1 "$profile_file" "${@:3}"
+    ;;
   cloudwalk-controller)
     case "${2:-}" in
       start) exec ./scripts/run-cloudwalk-controller.sh ;;
@@ -253,7 +265,7 @@ case "${1:-}" in
     exit 2
     ;;
   *)
-    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|cloudwalk-sim|cloudwalk-controller {start|status|stop}|doctor|smoke|groot-finetune-smoke|sync|fetch-models|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
+    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|isaac-g1 {no_hands|inspire-ftp|dex3}|cloudwalk-sim|cloudwalk-controller {start|status|stop}|doctor|smoke|groot-finetune-smoke|sync|fetch-models|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
     exit 2
     ;;
 esac

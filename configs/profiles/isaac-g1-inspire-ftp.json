@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "profile_id": "isaac-g1-29dof-inspire-ftp-head-camera",
+  "robot": {
+    "name": "g1-29dof-inspire-ftp",
+    "body_dofs": 29,
+    "asset_kind": "isaaclab_config",
+    "asset_reference": "G1_INSPIRE_FTP_CFG",
+    "asset_provenance": "pinned isaaclab_assets.robots.unitree.G1_INSPIRE_FTP_CFG",
+    "initial_position_m": [0.0, 0.0, 0.8],
+    "hand": {
+      "kind": "inspire-ftp",
+      "dofs": 24,
+      "behavior": "passive",
+      "joint_name_patterns": ["_thumb_", "_index_", "_middle_", "_ring_", "_pinky_"]
+    }
+  },
+  "camera": {
+    "name": "head_camera",
+    "parent_link": "torso_link",
+    "resolution": [640, 480],
+    "focal_length_mm": 15.1159925892,
+    "horizontal_aperture_mm": 20.955,
+    "position_m": [0.0576235, 0.01753, 0.41987],
+    "rotation_wxyz": [0.9149596678, 0.0, 0.4035452964, 0.0]
+  },
+  "simulation": {"physics_dt": 0.005}
+}
