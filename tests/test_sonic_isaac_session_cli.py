@@ -171,6 +171,65 @@ class AutoKeysTest(unittest.TestCase):
         self.assertIn('play_trigger.write_text', self.source)
 
 
+class PortPreflightTest(unittest.TestCase):
+    """A busy IPC port must refuse the start rather than silently starve."""
+
+    def test_start_refuses_when_the_ipc_port_is_occupied(self) -> None:
+        import socket
+        import tempfile
+
+        loopback = ROOT / "containers" / "cyclonedds-sim.xml"
+        holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        holder.bind(("127.0.0.1", 0))
+        port = holder.getsockname()[1]
+        holder.listen(1)
+        try:
+            with tempfile.TemporaryDirectory() as runtime:
+                result = run_cli(
+                    ["--ipc-port", str(port), "start", "--robot", "g1-29dof",
+                     "--input", "acceptance"],
+                    env_overrides={"CYCLONEDDS_URI": f"file://{loopback}",
+                                   "ROS_DOMAIN_ID": "42"},
+                    runtime_dir=runtime,
+                )
+            self.assertNotEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertIn("ipc_port_in_use", payload.get("refused", []))
+            self.assertFalse((Path(runtime) / "session.json").exists())
+        finally:
+            holder.close()
+
+
+class OrphanLivenessTest(unittest.TestCase):
+    """Cleanup must be able to signal processes that are not our children."""
+
+    def test_pid_exists_and_port_helpers(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import importlib.util
+        import socket
+
+        spec = importlib.util.spec_from_file_location("session_cli_live", CLI)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["session_cli_live"] = module
+        spec.loader.exec_module(module)
+
+        self.assertTrue(module._pid_exists(os.getpid()))
+        self.assertFalse(module._pid_exists(999_999))
+        # An orphaned pid (not our child) must still read as alive.
+        self.assertTrue(module._child_alive(os.getpid()))
+
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.listen(1)
+        try:
+            self.assertFalse(module._port_is_free(port))
+        finally:
+            probe.close()
+        self.assertTrue(module._port_is_free(port))
+
+
 class DeployArgvTest(unittest.TestCase):
     def test_deploy_command_is_simulation_only(self) -> None:
         sys.path.insert(0, str(ROOT / "scripts"))

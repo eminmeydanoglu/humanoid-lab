@@ -264,6 +264,11 @@ def command_start(args: argparse.Namespace) -> int:
         print(json.dumps({"started": False, "refused": list(reasons)}, indent=2))
         return 2
 
+    if not _port_is_free(args.ipc_port):
+        print(json.dumps({"started": False, "refused": ["ipc_port_in_use"],
+                          "port": args.ipc_port}, indent=2))
+        return 2
+
     stamp = time.strftime("%Y%m%d-%H%M%S")
     evidence = paths.evidence_dir / f"{stamp}-{args.robot}-{args.input}.json"
     isaac_argv = [
@@ -530,6 +535,28 @@ def _wait_deploy_ready(deploy: "PtyChild", *, timeout_s: float, quiet_s: float) 
     return {"ready": False, "reason": "timeout", "waited_s": time.monotonic() - started}
 
 
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _port_is_free(port: int, host: str = "127.0.0.1") -> bool:
+    """True when nothing is listening on the loopback port."""
+    import socket as _socket
+
+    with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as probe:
+        try:
+            probe.bind((host, int(port)))
+        except OSError:
+            return False
+    return True
+
+
 def _child_exit_code(pid: int | None) -> int | None:
     """Return the exit code once our own child has exited, else None.
 
@@ -542,7 +569,8 @@ def _child_exit_code(pid: int | None) -> int | None:
     try:
         reaped, status = os.waitpid(pid, os.WNOHANG)
     except ChildProcessError:
-        return None
+        # Not our child (for example an orphan from a previous run).
+        return None if _pid_exists(pid) else 0
     except OSError:
         return None
     if reaped == 0:
@@ -655,10 +683,15 @@ def _drive_auto_keys(*, args, paths, record_children, deploy, play_trigger,
 
 
 def _child_alive(pid: int) -> bool:
+    """Liveness that also handles processes that are not our own children.
+
+    A run killed by a timeout leaves orphans behind; refusing to signal them
+    would let a stale owner keep the IPC port and silently starve the next run.
+    """
     try:
         reaped, _ = os.waitpid(pid, os.WNOHANG)
     except ChildProcessError:
-        return False
+        return _pid_exists(pid)
     except OSError:
         return False
     return reaped == 0
