@@ -60,7 +60,7 @@ doğrulanmıştır:
 | Durum | Beklenen | Nasıl ölçülür | Son ölçüm |
 |---|---|---|---|
 | Kontrolcü yok | Robot düşer | `--test passive-fall` | PASS, `robot_fell` + kamera akıyor |
-| Test kontrolcüsü | Hedef eklemler fiziksel tepki verir | `--test controlled-hold` | PASS, 5 eklem izlendi, ilerleme 0.84 |
+| Test kontrolcüsü | Hedef eklemler fiziksel tepki verir | `--test controlled-hold` | PASS, 5 eklem izlendi, ilerleme 0.92 |
 | Komut kesilince | TTL sonrası pasif | `--test controlled-hold` | PASS, `passive_after_command_stop` |
 | SONIC geçerli | Robot ayakta kalır | `--test controller-hold` | PASS, bant bırakıldıktan sonra ~40 s kök yüksekliği 0.757–0.79 m |
 | SONIC öldürüldü | TTL içinde pasif ve düşer | `--test controller-hold` + `SIGKILL` | PASS, son komuttan **51 tick (0.255 s)** sonra pasif, kök 0.09 m |

@@ -951,8 +951,9 @@ Kapıyı kapatmadan önce kalanlar:
    envelope'a (`schema_version`, `run_id`, `source_component`, source timestamp,
    `valid_from_tick`) yükseltmek.
 2. 64D standing/canned latent'i typed fixture olarak ve kaynak/hash provenance'ı
-   ile repo sözleşmesine almak; mevcut upstream reference/planner dosya yolu tek
-   başına bu deliverable'ı kapatmaz.
+   ile repo sözleşmesine almak; action scheduler'ın `valid_from_tick`, replace ve
+   timeout semantiğini uygulamak. Mevcut upstream reference/planner dosya yolu
+   tek başına bu deliverable'ı kapatmaz.
 3. İki terminaldeki Isaac ve SONIC süreçlerini tek `start/status/stop/reset`
    lifecycle altında birleştirmek. Mevcut güvenli reset controller aktifken
    isteği reddeder; SONIC history'sini koordine ederek temizleyen reset henüz yoktur.
