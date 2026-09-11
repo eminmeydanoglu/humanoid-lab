@@ -33,32 +33,35 @@ kurulum komutlarini yazdirir; `--verify-digests` Isaac Sim digest'ini NGC'den ce
 ## 3. Isaac G1 simulatoru (Kapi 1)
 
 Yalnız Isaac Lab, G1 asset'i ve head camera kullanır; SONIC,
-GR00T, CloudWalk, DDS veya baska bir controller yuklemez. Fizik dongusunun tek
+GR00T, CloudWalk, DDS veya başka bir controller yüklemez. Fizik döngüsünün tek
 sahibi `SimulatorService`tir.
 
 ```bash
-./dev.sh isaac-g1 dex3                     # GUI, dogrudan Play
+./dev.sh isaac-g1 dex3                     # akıcı ana GUI, doğrudan Play
 ./dev.sh isaac-g1 inspire-ftp
 ./dev.sh isaac-g1 no_hands --headless
-./dev.sh isaac-g1 dex3 --test passive-fall # controller'siz dusus kabulu
+./dev.sh isaac-g1 dex3 --head-camera-window # ikinci head-camera viewport'u
+./dev.sh isaac-g1 dex3 --test passive-fall # controller'siz düşüş kabulü
 ```
 
-Seçenekler: `--test passive-fall`, `--headless`, `--duration SECONDS`,
-`--device {cpu,cuda}`. Normal çalışma
+Seçenekler: `--test passive-fall`, `--headless`, `--head-camera-window`,
+`--duration SECONDS`, `--device {cpu,cuda}`. Normal çalışma
 `COMPLETED` ile biter; düşüş PASS/FAIL kabulü yalnız `--test passive-fall`
 verildiğinde uygulanır.
 
 Tek robotlu bu sahnede fizik varsayılan olarak CPU'da, dört worker thread ile çalışır;
 `--device cuda` açık bir geri dönüş seçeneğidir. Fizik zaman adımı 0,005 saniyedir
-(200 Hz simülasyon zamanı); gerçek çalışma hızı terminalde ayrıca raporlanır. RTX render
-ve kamera her sekiz fizik adımında güncellenir. Bu ayrım RTX görsel ayarlarını, ışıkları,
-materyalleri ve kamera çözünürlüğünü değiştirmez; yalnızca her fizik adımında aynı
-sahneyi gereksiz yere yeniden çizmeyi önler.
+(200 Hz simülasyon zamanı); gerçek çalışma hızı terminalde ayrıca raporlanır. Ana RTX
+viewport her sekiz fizik adımında güncellenir. Dış döngü bu render aralığının sahibidir;
+Kit'in iç güncelleme adımı `1`dir. Aynı aralığın iki kat uygulanması render çağrısını
+yaklaşık 40 ms bekletiyor ve RTF'yi yarıya düşürüyordu.
 
-GUI koşularında `G1 Simulator` penceresi ve sensörün RGB buffer'ını gösteren
-`G1 Head Camera` paneli açılır; kamera paneli ayrı viewport veya fizik döngüsü
-oluşturmaz. `Reset Robot` başlangıç pozunu geri yükler ve timeline'ı paused
-bırakır. Koşuyu `Ctrl-C` veya pencereyi kapatarak durdur.
+Normal GUI koşusu yalnız ana viewport'u ve `G1 Simulator` kontrol penceresini açar.
+Bu viewer yolu RTX balanced görüntü, DL denoiser ve desteklenen GPU'da DLSS Frame
+Generation kullanır. Terminaldeki FPS gerçek render çağrısıdır; üretilen sunum karelerini
+saymaz. `--head-camera-window` 640×480 sensörü ve GPU-backed ikinci viewport'u açar;
+ek render maliyeti beklenir. `Reset Robot` başlangıç pozunu geri yükler ve timeline'ı
+paused bırakır. Koşuyu `Ctrl-C` veya pencereyi kapatarak durdur.
 
 Simülatör özel MP4, trajectory, JSONL veya provenance kaydı üretmez. Passive-fall
 kabulü kamera boyutunu ve değişen frame sayısını bounded sayaç/hash ile ölçer;
@@ -70,10 +73,11 @@ display artık mevcut değilse ve hostta tek bir aktif X11 socket'i varsa bu dis
 otomatik seçilir; böylece masaüstünün yeniden girişten sonra `:0` ile `:1` arasında
 değişmesi Isaac penceresini sessizce bozmaz.
 
-Raider'da Isaac Sim 5.1 bazen `simulation_app.close()` çağrısından dönmez. CLI
-normal kapanışı 20 saniye bekler; süre aşılırsa `forced_exit=true` yazarak yalnız
-kendi process'ini sonlandırır. Bu yol force-quit penceresi veya orphan process
-bırakmaz, fakat graceful Kit shutdown kanıtı sayılmaz.
+Raider'da Isaac Sim 5.1 bazen `simulation_app.close()` çağrısından dönmez. CLI GUI'de
+en fazla 2 saniye (headless koşuda 20 saniye) bekler; süre aşılırsa
+`forced_exit=true` yazarak yalnız kendi sürecini sonlandırır. `dev.sh` ayrıca tekil
+çalışma kilidi ve PID/process-group temizliği uygular; kesilen SSH/terminal istemcisi
+arka planda Isaac süreci bırakamaz. Bu, graceful Kit shutdown kanıtı değildir.
 
 ### Isaac Lab demolari
 

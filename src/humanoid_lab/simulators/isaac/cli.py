@@ -19,6 +19,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--profile", type=Path, required=True)
     parser.add_argument("--duration", type=float)
     parser.add_argument("--test", choices=("passive-fall",))
+    parser.add_argument(
+        "--head-camera-window",
+        action="store_true",
+        help="open a second GPU viewport for the head camera (costs render throughput)",
+    )
     from isaaclab.app import AppLauncher
 
     AppLauncher.add_app_launcher_args(parser)
@@ -51,6 +56,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             simulation_app,
             duration=args.duration,
             show_ui=not args.headless,
+            show_head_camera=args.head_camera_window,
             test_mode=args.test,
         )
         summary = service.run()
@@ -64,7 +70,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             target=lambda: simulation_app.close(wait_for_replicator=False), daemon=True
         )
         closer.start()
-        closer.join(timeout=20.0)
+        # Kit 5.1 can deadlock its GUI teardown after the window has stopped
+        # pumping events. Keep the visible unresponsive window bounded; the
+        # process wrapper also guarantees that no container child survives.
+        closer.join(timeout=2.0 if not args.headless else 20.0)
         closed = not closer.is_alive()
         print(
             json.dumps(

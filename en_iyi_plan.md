@@ -817,9 +817,17 @@ frame üretti. Normal profil doğrudan Play başlar; paused başlangıç seçene
 - Ek `simulation_app.update()`, `sim.forward()`, settle-frame ve sürekli
   refreeze/hold denemeleri reddedildi; final runtime'da bulunmaz.
 - Head camera için ikinci bir Isaac viewport açmak gereksiz render/timeline
-  etkileşimi ve yanıltıcı kamera davranışı oluşturdu. Kamera hâlâ robotun
-  `torso_link`ine bağlı ortak Isaac Lab sensörüdür; GUI artık sensörün bağımsız
-  RGB buffer'ını fizik adımı atmayan sıradan bir UI panelinde gösterir.
+  etkileşimi ve yanıltıcı kamera davranışı oluşturdu. Normal viewer bu nedenle
+  yalnız ana viewport'u açar. Kamera profilde korunur; `--head-camera-window`
+  verildiğinde veya `--test passive-fall` kabulünde robotun `torso_link`ine bağlı
+  640×480 Isaac Lab sensörü kurulur. İkinci pencere GPU-backed viewport'tur;
+  texture-to-host kopyası yapılmaz.
+- Resmî Isaac Lab ortam döngüsü gibi fizik `sim.step(render=False)` ile ilerler ve
+  dış sayaç her `render_interval=8` adımda `sim.render()` çağırır. Bu özel servis
+  dış render çizelgesinin sahibi olduğundan `SimulationContext` iç aralığı `1`dir;
+  aynı `8` değerinin içte de verilmesi Kit update çağrısını yaklaşık 40 ms bekletip
+  GUI'yi `RTF≈0,5 / 13 FPS` düzeyine indiriyordu. Raider GUI ölçümünde düzeltme
+  kararlı örnekleri `RTF=1,00–1,04 / 25–26 FPS` düzeyine çıkardı.
 - Milestone adı runtime tasarımına taşınmadı. Genel yol
   `humanoid_lab.simulators.isaac`, komut `./dev.sh isaac-g1 ...`, kabul davranışı
   ise yalnız açık `--test passive-fall` seçeneği altındadır.
@@ -828,10 +836,10 @@ frame üretti. Normal profil doğrudan Play başlar; paused başlangıç seçene
   socket yoksa hosttaki tek aktif X11 socket'ini seçer ve seçimi görünür biçimde
   bildirir.
 - Isaac Sim 5.1 `simulation_app.close()` çağrısı bu hostta hem ana thread hem
-  bounded worker denemesinde dönmeyebilir. CLI önce 20 saniye normal kapanışı
-  bekler, sonra sonucu `forced_exit=true` olarak açıkça bildirip process'i
-  sonlandırır. Kabul koşularında force-quit dialog veya orphan process kalmadı;
-  bu davranış graceful Kit shutdown olarak yorumlanmaz.
+  bounded worker denemesinde dönmeyebilir. CLI GUI'de en fazla 2 saniye, headless
+  koşuda 20 saniye bekler; sonra `forced_exit=true` bildirip süreci sonlandırır.
+  `dev.sh` tekil çalışma kilidi ile sinyal/HUP sonrasında doğrulamalı process-group
+  temizliği uygular. Bu davranış graceful Kit shutdown olarak yorumlanmaz.
 - Eski CloudWalk/SONIC ağırlıklı implementasyon aktif runtime ile karışmaması
   için `archive/eski_kotu/` altında saklandı.
 

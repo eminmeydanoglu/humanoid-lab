@@ -30,12 +30,14 @@ class SimulatorService:
         *,
         duration: float,
         show_ui: bool,
+        show_head_camera: bool,
         test_mode: str | None,
     ) -> None:
         self.profile = profile
         self.app = simulation_app
         self.duration = duration
         self.show_ui = show_ui
+        self.show_head_camera = show_head_camera
         self.test_mode = test_mode
         self.state = TimelineState.STARTING
         self.tick = 0
@@ -47,7 +49,6 @@ class SimulatorService:
         self._hand_ids: list[int] = []
         self._control_window: Any = None
         self._head_camera_panel: Any = None
-        self._head_camera_provider: Any = None
         self._pending_ui_reset = False
         self._device = profile.device
         self._is_rendering = False
@@ -55,6 +56,9 @@ class SimulatorService:
         self._wall_physics_elapsed = 0.0
         self._last_perf_report = self._run_started
         self._last_perf_tick = 0
+        self._perf_step_seconds = 0.0
+        self._perf_render_seconds = 0.0
+        self._perf_render_count = 0
         self._last_paused_render = 0.0
         self._root_z: list[float] = []
         self._root_up: list[float] = []
@@ -88,7 +92,18 @@ class SimulatorService:
                 dt=self.profile.physics_dt,
                 device=self._device,
                 use_fabric=use_fabric,
-                render_interval=self.profile.render_interval,
+                # This service owns the outer render cadence. Passing the same
+                # interval here makes Kit wait that full period again inside
+                # app.update(), effectively charging it twice.
+                render_interval=1,
+                render=sim_utils.RenderCfg(
+                    rendering_mode="balanced",
+                    enable_dlssg=self.show_ui
+                    and self.test_mode is None
+                    and not self.show_head_camera,
+                    enable_dl_denoiser=True,
+                    dlss_mode=1,
+                ),
             )
         )
         print('{"event":"isaac_g1_start","stage":"interactive_scene"}', flush=True)
@@ -134,6 +149,9 @@ class SimulatorService:
         self._wall_physics_elapsed = 0.0
         self._last_perf_report = time.monotonic()
         self._last_perf_tick = 0
+        self._perf_step_seconds = 0.0
+        self._perf_render_seconds = 0.0
+        self._perf_render_count = 0
         self._root_z.clear()
         self._root_up.clear()
         self._camera_frames = 0
@@ -166,21 +184,27 @@ class SimulatorService:
 
     def _open_ui(self) -> None:
         from omni import ui
+        from omni.kit.viewport.utility import create_viewport_window
+        from pxr import Sdf
 
-        self._head_camera_panel = ui.Window(
-            "G1 Head Camera",
-            width=430,
-            height=330,
-            position_x=980,
-            position_y=500,
-            raster_policy=ui.RasterPolicy.NEVER,
-        )
-        with self._head_camera_panel.frame:
-            self._head_camera_provider = ui.ByteImageProvider()
-            ui.ImageWithProvider(
-                self._head_camera_provider,
-                fill_policy=ui.IwpFillPolicy.IWP_PRESERVE_ASPECT_FIT,
+        if self.show_head_camera:
+            camera = self.profile.camera
+            camera_path = Sdf.Path(
+                f"/World/envs/env_0/Robot/{camera.parent_link}/{camera.name}"
             )
+            # Keep the camera texture on the GPU. ByteImageProvider required a
+            # synchronous texture-to-host copy and a second RGB-to-RGBA copy on
+            # every rendered frame, stalling both physics and the main viewport.
+            self._head_camera_panel = create_viewport_window(
+                name="G1 Head Camera",
+                width=430,
+                height=330,
+                position_x=980,
+                position_y=500,
+                camera_path=camera_path,
+            )
+            if self._head_camera_panel is None:
+                raise RuntimeError("failed to create the GPU-backed head-camera viewport")
         self._control_window = ui.Window(
             "G1 Simulator", width=300, height=110, position_x=1090, position_y=120
         )
@@ -222,7 +246,7 @@ class SimulatorService:
         camera_path = f"{{ENV_REGEX_NS}}/Robot/{camera.parent_link}/{camera.name}"
 
         @configclass
-        class IsaacG1SceneCfg(InteractiveSceneCfg):
+        class IsaacG1BaseSceneCfg(InteractiveSceneCfg):
             ground = AssetBaseCfg(prim_path="/World/ground", spawn=sim_utils.GroundPlaneCfg())
             dome_light = AssetBaseCfg(
                 prim_path="/World/DomeLight",
@@ -233,6 +257,9 @@ class SimulatorService:
                 spawn=sim_utils.DistantLightCfg(intensity=2800.0, color=(1.0, 0.95, 0.88)),
             )
             robot: ArticulationCfg = robot_cfg
+
+        @configclass
+        class IsaacG1CameraSceneCfg(IsaacG1BaseSceneCfg):
             head_camera = CameraCfg(
                 prim_path=camera_path,
                 update_period=self.profile.camera_update_period,
@@ -249,7 +276,12 @@ class SimulatorService:
                 ),
             )
 
-        return IsaacG1SceneCfg(num_envs=1, env_spacing=2.5, replicate_physics=False)
+        scene_cfg = (
+            IsaacG1CameraSceneCfg
+            if self.test_mode == "passive-fall" or self.show_head_camera
+            else IsaacG1BaseSceneCfg
+        )
+        return scene_cfg(num_envs=1, env_spacing=2.5, replicate_physics=False)
 
     def _configure_free_base_if_needed(self) -> None:
         import omni.usd
@@ -325,41 +357,34 @@ class SimulatorService:
             return None
 
     def _consume_head_camera_frame(self) -> None:
+        """Read a frame only when the explicit acceptance test needs evidence."""
         image = self._head_camera_rgb()
         if image is None:
             return
-        if self.test_mode == "passive-fall":
-            digest = hashlib.blake2b(image, digest_size=16).digest()
-            if self._previous_camera_digest is not None and digest != self._previous_camera_digest:
-                self._camera_changed_frames += 1
-            self._previous_camera_digest = digest
-            self._camera_frames += 1
-            self._camera_shape = [int(value) for value in image.shape]
-        if self._head_camera_provider is None:
-            return
-        try:
-            import numpy as np
-
-            rgba = np.empty((*image.shape[:2], 4), dtype=np.uint8)
-            rgba[..., :3] = image
-            rgba[..., 3] = 255
-            self._head_camera_provider.set_data_array(
-                rgba, [int(image.shape[1]), int(image.shape[0])]
-            )
-        except (TypeError, ValueError):
-            return
+        digest = hashlib.blake2b(image, digest_size=16).digest()
+        if self._previous_camera_digest is not None and digest != self._previous_camera_digest:
+            self._camera_changed_frames += 1
+        self._previous_camera_digest = digest
+        self._camera_frames += 1
+        self._camera_shape = [int(value) for value in image.shape]
 
     def _step_physics(self) -> None:
         """Advance physics once, refreshing render and sensors on their own cadence."""
-        self._robot.set_joint_effort_target(0.0)
+        step_started = time.perf_counter()
         self._scene.write_data_to_sim()
         self._sim.step(render=False)
         self.tick += 1
         rendered = self._is_rendering and self.tick % self.profile.render_interval == 0
         if rendered:
+            self._perf_step_seconds += time.perf_counter() - step_started
+            render_started = time.perf_counter()
             self._sim.render()
+            self._perf_render_seconds += time.perf_counter() - render_started
+            self._perf_render_count += 1
+            step_started = time.perf_counter()
         self._scene.update(self.profile.physics_dt)
-        if rendered:
+        self._perf_step_seconds += time.perf_counter() - step_started
+        if rendered and self.test_mode == "passive-fall":
             self._consume_head_camera_frame()
         if self.test_mode == "passive-fall":
             self._root_z.append(float(self._robot.data.root_pos_w[0, 2]))
@@ -383,13 +408,24 @@ class SimulatorService:
             return
         physics_hz = (self.tick - self._last_perf_tick) / elapsed
         render_fps = physics_hz / self.profile.render_interval if self._is_rendering else 0.0
+        ticks = self.tick - self._last_perf_tick
+        step_ms = 1000.0 * self._perf_step_seconds / ticks if ticks else 0.0
+        render_ms = (
+            1000.0 * self._perf_render_seconds / self._perf_render_count
+            if self._perf_render_count
+            else 0.0
+        )
         print(
             f"[isaac-g1] physics={physics_hz:.1f} Hz  render={render_fps:.1f} FPS  "
-            f"RTF={physics_hz * self.profile.physics_dt:.2f}x  device={self._device}",
+            f"RTF={physics_hz * self.profile.physics_dt:.2f}x  "
+            f"step={step_ms:.2f} ms  render_call={render_ms:.2f} ms  device={self._device}",
             flush=True,
         )
         self._last_perf_report = now
         self._last_perf_tick = self.tick
+        self._perf_step_seconds = 0.0
+        self._perf_render_seconds = 0.0
+        self._perf_render_count = 0
 
     def run(self) -> dict[str, Any]:
         self.start()

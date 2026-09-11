@@ -43,7 +43,7 @@ class IsaacG1ProfileTests(unittest.TestCase):
 
 
 class IsaacG1SimulationConfigTests(unittest.TestCase):
-    def test_shipped_profiles_resolve_to_cpu_and_25hz(self) -> None:
+    def test_shipped_profiles_resolve_to_cpu_and_smooth_render_cadence(self) -> None:
         for path in sorted((ROOT / "configs/profiles").glob("isaac-g1-*.json")):
             profile = RunProfile.load(path)
             self.assertEqual(profile.device, "cpu")
@@ -92,9 +92,12 @@ class IsaacG1SourceInvariantTests(unittest.TestCase):
         source = (ROOT / "src/humanoid_lab/simulators/isaac/service.py").read_text()
         self.assertIn('ui.Button("Reset Robot"', source)
         self.assertIn('"G1 Head Camera",', source)
-        self.assertIn("ui.ByteImageProvider()", source)
-        self.assertIn("set_data_array", source)
-        self.assertNotIn("create_viewport_window", source)
+        self.assertIn("create_viewport_window", source)
+        self.assertIn("camera_path=camera_path", source)
+        self.assertIn("if self.show_head_camera:", source)
+        self.assertIn('if self.test_mode == "passive-fall" or self.show_head_camera', source)
+        self.assertNotIn("ui.ByteImageProvider()", source)
+        self.assertNotIn("set_data_array", source)
         self.assertIn("clicked_fn=self._request_reset_from_ui", source)
         request_body = source[
             source.index("    def _request_reset_from_ui") : source.index("    def _open_ui")
@@ -136,7 +139,10 @@ class IsaacG1SourceInvariantTests(unittest.TestCase):
             source,
         )
         self.assertIn("device=self._device", source)
-        self.assertIn("render_interval=self.profile.render_interval", source)
+        self.assertIn("render_interval=1", source)
+        self.assertIn('rendering_mode="balanced"', source)
+        self.assertIn("enable_dlssg=self.show_ui", source)
+        self.assertIn("enable_dl_denoiser=True", source)
         self.assertIn("update_period=self.profile.camera_update_period", source)
 
 if __name__ == "__main__":

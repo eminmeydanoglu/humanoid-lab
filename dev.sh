@@ -56,8 +56,11 @@ cleanup_isaac_demo() { # $1 = container-side pidfile
   # client is interrupted. The pidfile is per invocation, so cleanup cannot
   # affect another demo or an interactive development shell.
   local pidfile="$1"
+  local container_id
+  container_id="$(DC ps -q dev 2>/dev/null)" || return 0
+  [ -n "$container_id" ] || return 0
   # shellcheck disable=SC2016 # Variables in this string expand in the container.
-  DC exec -T dev bash -lc '
+  docker exec "$container_id" bash -lc '
     pidfile=$1
     [ -r "$pidfile" ] || exit 0
     read -r pid <"$pidfile" || exit 0
@@ -67,6 +70,11 @@ cleanup_isaac_demo() { # $1 = container-side pidfile
       # The demo starts in its own session, so this also stops subprocesses
       # started by Isaac Sim rather than leaving an orphaned Kit process.
       kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+      for _ in {1..20}; do
+        [ ! -d "/proc/$pid" ] && break
+        sleep 0.1
+      done
+      [ ! -d "/proc/$pid" ] || kill -KILL -- "-$pid" 2>/dev/null || true
     fi
     rm -f -- "$pidfile"
   ' -- "$pidfile" >/dev/null 2>&1 || true
@@ -127,7 +135,7 @@ isaac_demo() {
   }
   trap on_isaac_demo_signal INT TERM HUP
   # shellcheck disable=SC2016 # Variables in this string expand in the container.
-  DC exec -e DISPLAY="$DISPLAY" dev bash -lc '
+  DC exec -T -e DISPLAY="$DISPLAY" dev bash -lc '
     source /opt/humanoid-lab/entrypoint.sh
     use-isaac-sonic
     # Keep Kit extension discovery scoped to Isaac Lab rather than the repo.
@@ -165,6 +173,84 @@ isaac_demo() {
   return "$rc"
 }
 
+cleanup_isaac_g1() { # $1 = container-side pidfile
+  local pidfile="$1"
+  local container_id
+  container_id="$(DC ps -q dev 2>/dev/null)" || return 0
+  [ -n "$container_id" ] || return 0
+  # shellcheck disable=SC2016 # Variables in this string expand in the container.
+  docker exec "$container_id" bash -lc '
+    pidfile=$1
+    [ -r "$pidfile" ] || exit 0
+    read -r pid <"$pidfile" || exit 0
+    case "$pid" in (*[!0-9]*|"") rm -f -- "$pidfile"; exit 0;; esac
+    if [ -r "/proc/$pid/cmdline" ] &&
+       tr "\\0" " " <"/proc/$pid/cmdline" | grep -Fq "scripts/run-isaac-g1.py"; then
+      kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+      # Do not let a disconnected compose-exec client leave Kit behind.
+      for _ in {1..20}; do
+        [ ! -d "/proc/$pid" ] && break
+        sleep 0.1
+      done
+      [ ! -d "/proc/$pid" ] || kill -KILL -- "-$pid" 2>/dev/null || true
+    fi
+    rm -f -- "$pidfile"
+  ' -- "$pidfile" >/dev/null 2>&1 || true
+}
+
+run_isaac_g1() { # $1 = profile path; remaining args belong to the runner
+  local profile_file="$1"
+  local pidfile="/tmp/humanoid-lab-isaac-g1-$$-$RANDOM.pid"
+  local exec_pid=""
+  local rc
+  shift
+
+  on_isaac_g1_signal() {
+    cleanup_isaac_g1 "$pidfile"
+    if [ -n "$exec_pid" ]; then
+      kill "$exec_pid" 2>/dev/null || true
+      wait "$exec_pid" 2>/dev/null || true
+    fi
+    exit 143
+  }
+  trap on_isaac_g1_signal INT TERM HUP
+  # shellcheck disable=SC2016 # Variables in this string expand in the container.
+  DC exec -T -e DISPLAY="$DISPLAY" dev bash -lc '
+    source /opt/humanoid-lab/entrypoint.sh
+    use-isaac-sonic
+    # Avoid treating every repository or /tmp entry as a Kit extension.
+    mkdir -p /tmp/humanoid-lab-kit-cwd
+    cd /tmp/humanoid-lab-kit-cwd
+    pidfile=$1
+    profile_file=$2
+    shift 2
+    exec 9>/tmp/humanoid-lab-isaac-g1.lock
+    if ! flock -n 9; then
+      echo "error: another Isaac G1 simulation is already running" >&2
+      exit 3
+    fi
+    rm -f -- "$pidfile"
+    setsid python /workspace/humanoid-lab/scripts/run-isaac-g1.py \
+      --profile "/workspace/humanoid-lab/$profile_file" "$@" &
+    isaac_pid=$!
+    printf "%s\n" "$isaac_pid" >"$pidfile"
+    cleanup_runner() {
+      kill -- "-$isaac_pid" 2>/dev/null || kill "$isaac_pid" 2>/dev/null || true
+      rm -f -- "$pidfile"
+    }
+    trap "cleanup_runner; exit 143" INT TERM HUP
+    if wait "$isaac_pid"; then rc=0; else rc=$?; fi
+    trap - INT TERM HUP
+    rm -f -- "$pidfile"
+    exit "$rc"
+  ' -- "$pidfile" "$profile_file" "$@" &
+  exec_pid=$!
+  if wait "$exec_pid"; then rc=0; else rc=$?; fi
+  trap - INT TERM HUP
+  cleanup_isaac_g1 "$pidfile"
+  return "$rc"
+}
+
 case "${1:-}" in
   "")
     up_once
@@ -199,7 +285,7 @@ case "${1:-}" in
       no_hands) profile_file=configs/profiles/isaac-g1-no_hands.json ;;
       inspire-ftp) profile_file=configs/profiles/isaac-g1-inspire-ftp.json ;;
       dex3) profile_file=configs/profiles/isaac-g1-dex3.json ;;
-      *) echo "usage: $0 isaac-g1 {no_hands|inspire-ftp|dex3} [--test passive-fall] [--headless] [--duration SECONDS]" >&2; exit 2 ;;
+      *) echo "usage: $0 isaac-g1 {no_hands|inspire-ftp|dex3} [--test passive-fall] [--headless] [--head-camera-window] [--duration SECONDS]" >&2; exit 2 ;;
     esac
     headless=0
     for arg in "${@:3}"; do
@@ -207,8 +293,7 @@ case "${1:-}" in
     done
     [ "$headless" -eq 1 ] || require_x11_display
     up_once
-    # shellcheck disable=SC2016 # Positional parameters expand inside the container shell.
-    DC exec -e DISPLAY="$DISPLAY" dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && cd /workspace/humanoid-lab && exec python scripts/run-isaac-g1.py --profile "$1" "${@:2}"' isaac-g1 "$profile_file" "${@:3}"
+    run_isaac_g1 "$profile_file" "${@:3}"
     ;;
   doctor)
     ./doctor.sh
