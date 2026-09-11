@@ -744,8 +744,8 @@ Kurallar:
 
 - `READY`, input almak için hazır olduğunu kanıtlar; davranış başarısı değildir.
 - Controller start, simulator timeline'ını otomatik değiştirmez.
-- Simulator start varsayılan olarak Play yapabilir; `--start-paused` yalnız
-  açık kullanıcı/debug seçeneğidir.
+- Simulator normal profillerde doğrudan Play başlar; paused başlangıç Kapı 1
+  komut sözleşmesinin parçası değildir.
 - Reset yeni `episode_id` üretir ve bütün cached state/action/command'ları
   geçersiz kılar.
 - Stop önce command üretimini keser, simulator'ı passive yapar, sonra process'leri
@@ -781,21 +781,26 @@ Kurallar:
 
 ## Kapı 1 — Temiz Isaac G1 Platformu
 
-**Durum: TAMAMLANDI — 10 Eylül 2026**
+**Durum: TAMAMLANDI — 11 Eylül 2026'da yeniden doğrulandı**
 
 Kapı 1, Raider üzerinde hem Inspire FTP hem Dex3 varyantı için ayrı Isaac
 süreçlerinde doğrulandı. Controller olmadan robotlar passive actuator, serbest
 kök, gravity ve ground collision ile doğal olarak düştü; fizik tick'leri monoton
 ilerledi, robotlar zeminde sınırlandı ve ortak 640×480 head camera kesintisiz
-frame üretti. Dex3 GUI koşusunda otomatik başlangıç, görünür düşüş ve
-`Reset Robot` sonrası başlangıç pozuna dönüp pause olma ekran görüntüsüyle de
-doğrulandı. Son kabul koşuları:
+frame üretti. Normal profil doğrudan Play başlar; paused başlangıç seçeneği Kapı
+1 kapsamından çıkarıldı. Son kabul koşuları:
 
-- `isaac-g1-inspire-final-acceptance`: PASS, 110 tick, 0,710 m root düşüşü;
-- `isaac-g1-dex3-final-acceptance`: PASS, 148 tick, 0,726 m root düşüşü;
-- `isaac-g1-ui-final-proof`: düşüş → Reset → başlangıç pozu + PAUSED görsel kanıtı;
+- `isaac-g1-inspire-ftp --test passive-fall --headless`: PASS, 2.383 tick,
+  0,727 m root düşüşü, 297 adet 640×480 kamera frame'i ve 296 frame değişimi;
+- `isaac-g1-dex3 --test passive-fall --headless`: PASS, 2.698 tick, 0,730 m
+  root düşüşü, 337 adet 640×480 kamera frame'i ve 336 frame değişimi;
+- `isaac-g1-dex3` GUI: aktif X display otomatik seçilerek doğrudan Play,
+  görünür düşüş ve akan kamera kullanıcı tarafından doğrulandı; normal koşu
+  25.544 fizik tick'iyle `COMPLETED` oldu;
+- `isaac-g1-no_hands --test passive-fall --headless`: PASS, 1.384 tick,
+  0,721 m root düşüşü ve 173 adet 640×480 kamera frame'i;
 - `./dev.sh smoke`: 13 PASS, 0 WARN/BLOCKED/FAIL;
-- `./doctor.sh`: PASS; Python testleri 12/12 ve shell testleri 45/45 PASS.
+- `./doctor.sh`: PASS; Python testleri 10/10 ve üç shell test betiği PASS.
 
 #### Kapanışta öğrenilen sorunlar ve kararlar
 
@@ -818,6 +823,15 @@ doğrulandı. Son kabul koşuları:
 - Milestone adı runtime tasarımına taşınmadı. Genel yol
   `humanoid_lab.simulators.isaac`, komut `./dev.sh isaac-g1 ...`, kabul davranışı
   ise yalnız açık `--test passive-fall` seçeneği altındadır.
+- Raider masaüstü yeniden açıldığında aktif X display `:0`dan `:1`e geçebilir.
+  GUI komutu çağıran terminalin canlı `DISPLAY` değerini korur; yapılandırılmış
+  socket yoksa hosttaki tek aktif X11 socket'ini seçer ve seçimi görünür biçimde
+  bildirir.
+- Isaac Sim 5.1 `simulation_app.close()` çağrısı bu hostta hem ana thread hem
+  bounded worker denemesinde dönmeyebilir. CLI önce 20 saniye normal kapanışı
+  bekler, sonra sonucu `forced_exit=true` olarak açıkça bildirip process'i
+  sonlandırır. Kabul koşularında force-quit dialog veya orphan process kalmadı;
+  bu davranış graceful Kit shutdown olarak yorumlanmaz.
 - Eski CloudWalk/SONIC ağırlıklı implementasyon aktif runtime ile karışmaması
   için `archive/eski_kotu/` altında saklandı.
 
@@ -849,9 +863,8 @@ demo kalıbından türetilmiş küçük, tek sahipli ve güvenilir G1 simulator 
 - Paused loop'ta yalnız `sim.render()` bulunur.
 - Body controller yokken bütün body drive'ları gerçekten passive olur.
 - El actuator davranışı `HandSpec`te açıkça tanımlanır; body'yi tutamaz.
-- Recorder `get_data(do_array_copy=True)` veya anında writer yoluyla bağımsız
-  frame saklar.
-- RAM'de sınırsız RGBA frame biriktirilmez.
+- Kabul sırasında kamera çözünürlüğü ve frame değişimi bounded sayaç/hash ile
+  ölçülür; frame dizisi RAM'de veya diskte biriktirilmez.
 
 ### Deliverable'lar
 
@@ -860,10 +873,10 @@ demo kalıbından türetilmiş küçük, tek sahipli ve güvenilir G1 simulator 
 3. `g1-29dof + dex3 + head-camera` çalıştırılabilir profili.
 4. İç fizik referansı olarak `g1-29dof + none` profili.
 5. GUI ve headless için aynı runner.
-6. Dinamik graph/status çıktısı.
-7. Video, frame metrikleri ve tensor trajectory evidence'i.
-8. Asset/joint/collision/mass/inertia/provenance raporu.
-9. Temiz start, reset, pause, play ve stop komutları.
+6. Saniyelik fizik/render/RTF durum çıktısı.
+7. Bounded passive-fall ve head-camera kabul metrikleri.
+8. Profile yükleme ile runtime joint/asset doğrulamaları.
+9. Temiz start, doğrudan Play, Reset ve stop davranışları.
 
 ### Zorunlu kabul testleri
 
@@ -887,9 +900,9 @@ koşullarıyla:
 - root yüksekliği ve/veya pelvis yönelimi değişir;
 - robot belirlenen pencere içinde gerçekten düşer;
 - floor collision sonrası world altına sınırsız kaçmaz;
-- ardışık head-camera ve viewport frame'leri bağımsızdır;
-- frame hash/changed-pixel metrikleri robot hareketini gösterir;
-- recording açık/kapalı trajectory tolerans içinde aynıdır;
+- head-camera 640×480 RGB frame üretir;
+- bounded frame hash metriği ardışık head-camera görüntülerinin değiştiğini
+  gösterir;
 - uygulama force-quit dialog veya orphan process bırakmadan kapanır.
 
 Ana görünür kapı:

@@ -77,6 +77,7 @@ class IsaacG1SourceInvariantTests(unittest.TestCase):
             step_body,
         )
         self.assertIn("if rendered:", step_body)
+        self.assertIn("self._consume_head_camera_frame()", step_body)
         self.assertEqual(run_body.count("self._step_physics()"), 2)
         self.assertNotIn("self._sim.render()", run_body)
         self.assertIn("self._render_paused()", run_body)
@@ -120,6 +121,9 @@ class IsaacG1SourceInvariantTests(unittest.TestCase):
         self.assertIn('parser.add_argument("--test", choices=("passive-fall",))', cli)
         self.assertIn('if self.test_mode == "passive-fall"', service)
         self.assertIn('"result": "COMPLETED"', service)
+        self.assertIn('"head_camera_shape": self._camera_shape', service)
+        self.assertIn('"head_camera_flowing": self._camera_frames >= 2', service)
+        self.assertNotIn('"clean_stop": True', service)
 
     def test_fabric_is_conditional_on_the_physics_device(self) -> None:
         source = SERVICE.read_text()

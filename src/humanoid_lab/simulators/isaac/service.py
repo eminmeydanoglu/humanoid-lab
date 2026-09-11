@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -57,6 +58,10 @@ class SimulatorService:
         self._last_paused_render = 0.0
         self._root_z: list[float] = []
         self._root_up: list[float] = []
+        self._camera_frames = 0
+        self._camera_shape: list[int] | None = None
+        self._camera_changed_frames = 0
+        self._previous_camera_digest: bytes | None = None
 
     def _transition(self, state: TimelineState) -> None:
         self.state = state
@@ -131,6 +136,10 @@ class SimulatorService:
         self._last_perf_tick = 0
         self._root_z.clear()
         self._root_up.clear()
+        self._camera_frames = 0
+        self._camera_shape = None
+        self._camera_changed_frames = 0
+        self._previous_camera_digest = None
         self._transition(TimelineState.PLAYING if should_resume else TimelineState.PAUSED)
         if should_resume and not self._timeline.is_playing():
             self.play()
@@ -297,12 +306,10 @@ class SimulatorService:
         if hasattr(self._sim, "set_camera_view"):
             self._sim.set_camera_view(eye=(2.6, 2.4, 1.6), target=(0.0, 0.0, 0.65))
 
-    def _update_head_camera_panel(self) -> None:
-        if self._head_camera_provider is None:
-            return
+    def _head_camera_rgb(self) -> Any | None:
         camera = self._scene["head_camera"].data.output.get("rgb")
         if camera is None:
-            return
+            return None
         try:
             import numpy as np
 
@@ -312,8 +319,27 @@ class SimulatorService:
             if image.ndim == 4:
                 image = image[0]
             if image.ndim != 3 or image.shape[-1] not in (3, 4):
-                return
-            image = np.ascontiguousarray(image[..., :3].astype(np.uint8, copy=False))
+                return None
+            return np.ascontiguousarray(image[..., :3].astype(np.uint8, copy=False))
+        except (TypeError, ValueError):
+            return None
+
+    def _consume_head_camera_frame(self) -> None:
+        image = self._head_camera_rgb()
+        if image is None:
+            return
+        if self.test_mode == "passive-fall":
+            digest = hashlib.blake2b(image, digest_size=16).digest()
+            if self._previous_camera_digest is not None and digest != self._previous_camera_digest:
+                self._camera_changed_frames += 1
+            self._previous_camera_digest = digest
+            self._camera_frames += 1
+            self._camera_shape = [int(value) for value in image.shape]
+        if self._head_camera_provider is None:
+            return
+        try:
+            import numpy as np
+
             rgba = np.empty((*image.shape[:2], 4), dtype=np.uint8)
             rgba[..., :3] = image
             rgba[..., 3] = 255
@@ -334,7 +360,7 @@ class SimulatorService:
             self._sim.render()
         self._scene.update(self.profile.physics_dt)
         if rendered:
-            self._update_head_camera_panel()
+            self._consume_head_camera_frame()
         if self.test_mode == "passive-fall":
             self._root_z.append(float(self._robot.data.root_pos_w[0, 2]))
             root_quat = tuple(float(value) for value in self._robot.data.root_quat_w[0].tolist())
@@ -436,7 +462,10 @@ class SimulatorService:
             "physics_tick_monotonic": self.tick > 1,
             "robot_fell": fell,
             "floor_bounded": bool(self._root_z and minimum_z >= thresholds.minimum_root_z),
-            "clean_stop": True,
+            "head_camera_shape": self._camera_shape
+            == [self.profile.camera.height, self.profile.camera.width, 3],
+            "head_camera_flowing": self._camera_frames >= 2
+            and self._camera_changed_frames >= 1,
         }
         result = "PASS" if all(checks.values()) else "FAIL"
         return {
@@ -448,4 +477,7 @@ class SimulatorService:
             "minimum_root_z": minimum_z,
             "root_drop_m": drop,
             "pelvis_up_change": up_change,
+            "head_camera_frames": self._camera_frames,
+            "head_camera_changed_frames": self._camera_changed_frames,
+            "head_camera_shape": self._camera_shape,
         }

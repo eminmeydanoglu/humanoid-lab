@@ -49,18 +49,31 @@ Seçenekler: `--test passive-fall`, `--headless`, `--duration SECONDS`,
 verildiğinde uygulanır.
 
 Tek robotlu bu sahnede fizik varsayılan olarak CPU'da, dört worker thread ile çalışır;
-`--device cuda` açık bir geri dönüş seçeneğidir. Fizik 200 Hz'de ilerler, RTX render
-ve kamera 25 Hz'de güncellenir. Bu ayrım RTX görsel ayarlarını, ışıkları,
+`--device cuda` açık bir geri dönüş seçeneğidir. Fizik zaman adımı 0,005 saniyedir
+(200 Hz simülasyon zamanı); gerçek çalışma hızı terminalde ayrıca raporlanır. RTX render
+ve kamera her sekiz fizik adımında güncellenir. Bu ayrım RTX görsel ayarlarını, ışıkları,
 materyalleri ve kamera çözünürlüğünü değiştirmez; yalnızca her fizik adımında aynı
 sahneyi gereksiz yere yeniden çizmeyi önler.
 
-GUI kosularinda `G1 Simulator` penceresi ve sensorun RGB buffer'ini gosteren
-`G1 Head Camera` paneli acilir; kamera paneli ayri viewport veya fizik dongusu
-olusturmaz. `Reset Robot` baslangic pozunu geri yukler ve timeline'i paused
-birakir. Kosuyu `Ctrl-C` veya pencereyi kapatarak durdur.
+GUI koşularında `G1 Simulator` penceresi ve sensörün RGB buffer'ını gösteren
+`G1 Head Camera` paneli açılır; kamera paneli ayrı viewport veya fizik döngüsü
+oluşturmaz. `Reset Robot` başlangıç pozunu geri yükler ve timeline'ı paused
+bırakır. Koşuyu `Ctrl-C` veya pencereyi kapatarak durdur.
 
-Simülatör özel MP4, trajectory, JSONL veya provenance kaydı üretmez. Performans
-değerleri çalışırken terminale saniyede bir yazılır.
+Simülatör özel MP4, trajectory, JSONL veya provenance kaydı üretmez. Passive-fall
+kabulü kamera boyutunu ve değişen frame sayısını bounded sayaç/hash ile ölçer;
+görüntü dizisini RAM'de veya diskte biriktirmez. Performans değerleri çalışırken
+terminale saniyede bir yazılır.
+
+GUI komutları çağıran terminalin canlı `DISPLAY` değerini kullanır. `.env` içindeki
+display artık mevcut değilse ve hostta tek bir aktif X11 socket'i varsa bu display
+otomatik seçilir; böylece masaüstünün yeniden girişten sonra `:0` ile `:1` arasında
+değişmesi Isaac penceresini sessizce bozmaz.
+
+Raider'da Isaac Sim 5.1 bazen `simulation_app.close()` çağrısından dönmez. CLI
+normal kapanışı 20 saniye bekler; süre aşılırsa `forced_exit=true` yazarak yalnız
+kendi process'ini sonlandırır. Bu yol force-quit penceresi veya orphan process
+bırakmaz, fakat graceful Kit shutdown kanıtı sayılmaz.
 
 ### Isaac Lab demolari
 

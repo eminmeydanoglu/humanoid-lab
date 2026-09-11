@@ -65,7 +65,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         closer.start()
         closer.join(timeout=20.0)
-        print(json.dumps({"event": "isaac_g1_app_close", "closed": not closer.is_alive()}), flush=True)
+        closed = not closer.is_alive()
+        print(
+            json.dumps(
+                {"event": "isaac_g1_app_close", "closed": closed, "forced_exit": not closed}
+            ),
+            flush=True,
+        )
         sys.stdout.flush()
         sys.stderr.flush()
         os._exit(exit_code)
