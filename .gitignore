@@ -32,3 +32,4 @@ check_env.py
 docs/
 # buyuk model dosyalari
 .pretrained_checkpoints/
+AGENTS.md
