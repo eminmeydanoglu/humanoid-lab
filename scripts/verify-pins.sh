@@ -45,7 +45,8 @@ for name, r in d['repositories'].items():
         continue
     print('repo', name, r['url'], r.get('commit',''), r.get('release',''))
 for name, m in d['models'].items():
-    if not isinstance(m, dict):
+    if not isinstance(m, dict) or 'repo' not in m:
+        # A pinned local artifact (content hash), not a download.
         continue
     print('model', name, m['repo'], m.get('revision',''), str(m.get('gated','')).lower())
 PY

@@ -16,12 +16,21 @@ SERVICE = ROOT / "src/humanoid_lab/simulators/isaac/service.py"
 
 class IsaacG1ProfileTests(unittest.TestCase):
     def test_all_shipped_profiles_are_valid_and_distinct(self) -> None:
-        profiles = [RunProfile.load(path) for path in sorted((ROOT / "configs/profiles").glob("isaac-g1-*.json"))]
-        self.assertEqual(len(profiles), 3)
+        base_profiles = [
+            "isaac-g1-no_hands.json",
+            "isaac-g1-inspire-ftp.json",
+            "isaac-g1-dex3.json",
+        ]
+        profiles = [
+            RunProfile.load(ROOT / "configs/profiles" / name) for name in base_profiles
+        ]
         self.assertEqual({profile.robot.hand.kind for profile in profiles}, {"no_hands", "inspire-ftp", "dex3"})
         self.assertTrue(all(profile.robot.body_dofs == 29 for profile in profiles))
         self.assertTrue(all(profile.camera.width == 640 and profile.camera.height == 480 for profile in profiles))
         self.assertEqual({profile.robot.hand.dofs for profile in profiles}, {0, 14, 24})
+        # The base platform profiles declare no controller: that is what keeps
+        # Gate 1 behaviour reproducible while control paths are added.
+        self.assertTrue(all(profile.controller is None for profile in profiles))
 
     def test_rejects_non_29dof_body(self) -> None:
         source = json.loads((ROOT / "configs/profiles/isaac-g1-no_hands.json").read_text())
@@ -57,6 +66,13 @@ class IsaacG1SimulationConfigTests(unittest.TestCase):
 
 
 class IsaacG1SourceInvariantTests(unittest.TestCase):
+    def test_normal_runs_have_no_implicit_five_minute_timeout(self) -> None:
+        cli = (ROOT / "src/humanoid_lab/simulators/isaac/cli.py").read_text()
+        self.assertNotIn("else 300.0", cli)
+        self.assertIn("if args.duration is None and args.test:", cli)
+        service = SERVICE.read_text()
+        self.assertIn("self.duration is None", service)
+
     def test_runner_has_no_controller_or_policy_imports(self) -> None:
         source = (ROOT / "src/humanoid_lab/simulators/isaac/service.py").read_text()
         for forbidden in ("sonic_isaac", "cloudwalk", "groot", "StateLink", "LowCmd"):
@@ -95,7 +111,7 @@ class IsaacG1SourceInvariantTests(unittest.TestCase):
         self.assertIn("create_viewport_window", source)
         self.assertIn("camera_path=camera_path", source)
         self.assertIn("if self.show_head_camera:", source)
-        self.assertIn('if self.test_mode == "passive-fall" or self.show_head_camera', source)
+        self.assertIn('if self.test_mode is not None or self.show_head_camera', source)
         self.assertNotIn("ui.ByteImageProvider()", source)
         self.assertNotIn("set_data_array", source)
         self.assertIn("clicked_fn=self._request_reset_from_ui", source)
@@ -118,15 +134,98 @@ class IsaacG1SourceInvariantTests(unittest.TestCase):
             reset_branch.index("self._step_physics()"),
             reset_branch.index("self.pause()"),
         )
-    def test_passive_fall_acceptance_is_an_explicit_test_mode(self) -> None:
+    def test_acceptance_modes_are_explicit_and_measured(self) -> None:
         cli = (ROOT / "src/humanoid_lab/simulators/isaac/cli.py").read_text()
         service = (ROOT / "src/humanoid_lab/simulators/isaac/service.py").read_text()
-        self.assertIn('parser.add_argument("--test", choices=("passive-fall",))', cli)
+        self.assertIn(
+            'parser.add_argument("--test", choices=("passive-fall", "controlled-hold", "controller-hold"))',
+            cli,
+        )
         self.assertIn('if self.test_mode == "passive-fall"', service)
+        self.assertIn('if self.test_mode == "controlled-hold"', service)
+        self.assertIn('if self.test_mode == "controller-hold"', service)
         self.assertIn('"result": "COMPLETED"', service)
         self.assertIn('"head_camera_shape": self._camera_shape', service)
         self.assertIn('"head_camera_flowing": self._camera_frames >= 2', service)
         self.assertNotIn('"clean_stop": True', service)
+
+    def test_controller_override_can_only_disable_a_profile_controller(self) -> None:
+        """Provider configuration belongs to the profile; a CLI override must
+        not accidentally open an unconfigured DDS domain or partial controller."""
+        cli = (ROOT / "src/humanoid_lab/simulators/isaac/cli.py").read_text()
+        self.assertIn('choices=("none",)', cli)
+        self.assertIn("safe passive fallback", cli)
+
+    def test_commands_reach_the_solver_by_one_path(self) -> None:
+        """The controller's torque is the torque; the asset's actuator models
+        compute their own effort and would silently discard it."""
+        source = SERVICE.read_text()
+        self.assertEqual(source.count("set_dof_actuation_forces"), 1)
+        self.assertIn("self._flush_effort()", source)
+        # The staged effort is the only thing written per tick; the asset's own
+        # effort path is not used for control.
+        write_body = source[
+            source.index("    def _write_effort") : source.index("    def _flush_effort")
+        ]
+        self.assertNotIn("set_joint_effort_target", write_body)
+        self.assertIn("self._effort_target[0, list(indices)] = tensor", write_body)
+
+    def test_passive_behaviour_is_untouched_without_a_controller(self) -> None:
+        source = SERVICE.read_text()
+        step_body = source[source.index("    def _step_physics") : source.index("    def _render_paused")]
+        self.assertIn("self._apply_control()", step_body)
+        control_body = source[
+            source.index("    def _apply_control") : source.index("    def _apply_body_command")
+        ]
+        # No controller configured means the loop never even polls one.
+        self.assertIn("if self._controller is None:\n            return", control_body)
+
+    def test_command_timeout_returns_the_robot_to_passive(self) -> None:
+        source = SERVICE.read_text()
+        control_body = source[
+            source.index("    def _apply_control") : source.index("    def _apply_body_command")
+        ]
+        self.assertIn("command.is_valid_at(self.tick)", control_body)
+        self.assertIn("self._go_passive()", control_body)
+        self.assertIn("self._control_mode = PASSIVE", control_body)
+
+    def test_a_bad_command_cannot_kill_the_loop(self) -> None:
+        """Undecodable, non-finite or mis-ordered output must degrade to passive,
+        not raise out of the physics loop."""
+        source = SERVICE.read_text()
+        control_body = source[
+            source.index("    def _apply_control") : source.index("    def _apply_body_command")
+        ]
+        self.assertIn("except CommandError as error:", control_body)
+        self.assertIn("self._rejected_commands += 1", control_body)
+        self.assertIn("self._go_passive()", control_body)
+        status_body = source[
+            source.index("    def _controller_status") : source.index("    def _controller_hold_acceptance")
+        ]
+        self.assertIn('"rejected_commands": self._rejected_commands', status_body)
+
+    def test_reset_is_refused_while_a_controller_is_driving(self) -> None:
+        """A reset teleports the articulation while the controller still holds
+        state from the previous episode; mixing the two is not allowed."""
+        source = SERVICE.read_text()
+        body = source[
+            source.index("    def _request_reset_from_ui") : source.index("    def _open_ui")
+        ]
+        self.assertIn("if self._control_mode == CONTROLLED:", body)
+        self.assertIn("isaac_g1_ui_reset_refused", body)
+        # Only the non-controlled path may queue work for the loop.
+        refused, _, rest = body.partition('"isaac_g1_ui_reset_refused"')
+        self.assertIn("return", rest.split("self._pending_ui_reset = True")[0])
+        self.assertIn("self._pending_ui_reset = True", rest)
+
+    def test_a_new_episode_invalidates_old_commands(self) -> None:
+        source = (ROOT / "src/humanoid_lab/controllers/sonic_dds.py").read_text()
+        publish_body = source[
+            source.index("    def publish_state") : source.index("    def _publish_loop")
+        ]
+        self.assertIn("if state.episode_id != self._episode_id:", publish_body)
+        for cleared in ("self._low_command = None", "self._left_hand_command = None"):
+            self.assertIn(cleared, publish_body)
 
     def test_fabric_is_conditional_on_the_physics_device(self) -> None:
         source = SERVICE.read_text()

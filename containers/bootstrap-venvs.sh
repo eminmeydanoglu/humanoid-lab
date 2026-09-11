@@ -39,12 +39,55 @@ record_current() {
   mv -f "$temporary" "$STATE_ROOT/$name.sha256"
 }
 
+# Unitree DDS bindings (unitree_sdk2py + cyclonedds). The Isaac-side simulator
+# bridge speaks the same Unitree topics as the official MuJoCo loop, so the
+# Isaac environment needs these bindings too.
+install_unitree_dds() {
+  local venv="$VENV_ROOT/$1"
+  # cyclonedds has no CPython wheel and must build against the image prefix.
+  uv pip install --python "$venv/bin/python" cyclonedds==0.10.2
+  cp -a /opt/src/sonic/external_dependencies/unitree_sdk2_python/unitree_sdk2py \
+    "$venv/lib/python3.11/site-packages/"
+  # Unitree SDK ships legacy CycloneDDS XML. CycloneDDS 0.10 on Ubuntu 24.04
+  # requires the current namespace/schema spelling; simulation stays loopback-only.
+  python3 /opt/humanoid-lab/patch-unitree-cyclonedds-config.py "$venv/lib/python3.11/site-packages/unitree_sdk2py/core/channel_config.py"
+}
+
+has_unitree_dds() {
+  "$VENV_ROOT/$1/bin/python" -c 'import cyclonedds, unitree_sdk2py' >/dev/null 2>&1
+}
+
+# The Dex3 G1 body is a git-lfs file inside the pinned SONIC checkout. Image
+# builds cannot fetch lfs content on this host, so the asset is materialized
+# here, into the persistent data root, and verified by content hash; the run
+# profile references the copy rather than /opt/src.
+materialize_sonic_asset() {
+  local dest="$1"
+  local want="$2"
+  if [ -f "$dest" ] && [ "$(sha256sum "$dest" | cut -d' ' -f1)" = "$want" ]; then
+    echo "[asset] sonic Dex3 G1 usd: present ($(basename "$dest"))"
+    return 0
+  fi
+  local source=/opt/src/sonic/gear_sonic/data/robots/g1/g1_29dof_with_hand_rev_1_0.usd
+  [ -f "$source" ] || { echo "[asset] source missing: $source" >&2; return 1; }
+  git -C /opt/src/sonic lfs pull --include "gear_sonic/data/robots/g1/g1_29dof_with_hand_rev_1_0.usd" >/dev/null 2>&1 || true
+  mkdir -p "$(dirname "$dest")"
+  cp "$source" "$dest"
+  local got
+  got="$(sha256sum "$dest" | cut -d' ' -f1)"
+  if [ "$got" != "$want" ]; then
+    echo "[asset] hash mismatch for $dest: $got != $want" >&2
+    return 1
+  fi
+  echo "[asset] sonic Dex3 G1 usd: materialized ($(basename "$dest"))"
+}
+
 sync_isaac_sonic() {
   local name=isaac-sonic
   local lockfile="$LOCKS_ROOT/isaac-sonic/uv.lock"
   local current
   current="$(fingerprint "$lockfile" /opt/src/isaaclab /opt/src/sonic)"
-  if is_current "$name" "$current"; then
+  if is_current "$name" "$current" && has_unitree_dds "$name"; then
     echo "[venv] $name: lock and sources unchanged"
     return
   fi
@@ -61,6 +104,7 @@ sync_isaac_sonic() {
     -e /opt/src/isaaclab/source/isaaclab_tasks \
     -e /opt/src/isaaclab/source/isaaclab_rl \
     -e '/opt/src/sonic/gear_sonic[training]'
+  install_unitree_dds "$name"
   "$VENV_ROOT/$name/bin/python" -c 'import isaaclab, gear_sonic, rsl_rl, torch; assert torch.__version__.startswith("2.7.0")'
   record_current "$name" "$current"
 }
@@ -70,7 +114,7 @@ sync_sonic_sim() {
   local lockfile="$LOCKS_ROOT/sonic-sim/uv.lock"
   local current
   current="$(fingerprint "$lockfile" /opt/src/sonic)"
-  if is_current "$name" "$current"; then
+  if is_current "$name" "$current" && has_unitree_dds "$name"; then
     echo "[venv] $name: lock and sources unchanged"
     return
   fi
@@ -78,13 +122,7 @@ sync_sonic_sim() {
   echo "[venv] $name: provisioning lock-pinned environment"
   uv venv --allow-existing --python 3.11 "$VENV_ROOT/$name"
   UV_PROJECT_ENVIRONMENT="$VENV_ROOT/$name" uv sync --frozen --no-dev --project "$LOCKS_ROOT/sonic-sim"
-  # cyclonedds has no CPython 3.11 wheel and must build against the image prefix.
-  uv pip install --python "$VENV_ROOT/$name/bin/python" cyclonedds==0.10.2
-  cp -a /opt/src/sonic/external_dependencies/unitree_sdk2_python/unitree_sdk2py \
-    "$VENV_ROOT/$name/lib/python3.11/site-packages/"
-  # Unitree SDK ships legacy CycloneDDS XML. CycloneDDS 0.10 on Ubuntu 24.04
-  # requires the current namespace/schema spelling; simulation stays loopback-only.
-  python3 /workspace/humanoid-lab/containers/patch-unitree-cyclonedds-config.py "$VENV_ROOT/$name/lib/python3.11/site-packages/unitree_sdk2py/core/channel_config.py"
+  install_unitree_dds "$name"
   uv pip uninstall --python "$VENV_ROOT/$name/bin/python" gear-sonic || true
   uv pip install --python "$VENV_ROOT/$name/bin/python" --no-deps -e '/opt/src/sonic/gear_sonic[sim]'
   "$VENV_ROOT/$name/bin/python" -c 'import mujoco, gear_sonic, unitree_sdk2py'
@@ -123,3 +161,13 @@ sync_groot() {
 sync_isaac_sonic
 sync_sonic_sim
 sync_groot
+
+# The container already exports HUMANOID_DATA_ROOT with the in-container path
+# (/data); the repository's .env holds the host path and must not be used here.
+DATA_ROOT="${HUMANOID_DATA_ROOT:-/data}"
+if ! materialize_sonic_asset \
+  "$DATA_ROOT/models/sonic-assets/g1_29dof_with_hand_rev_1_0.usd" \
+  "a7a2bab76981d19a1d76adecdfffec9b52afa34df9ba8e288ccedf410d3ce6bd"; then
+  echo "[asset] WARN: the Dex3 G1 asset is not available; profiles using it will fail." >&2
+  echo "[asset] WARN: retry with ./dev.sh sync (needs network access to github.com)." >&2
+fi

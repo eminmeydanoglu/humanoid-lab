@@ -937,6 +937,36 @@ Bu dörtlünün biri yoksa Kapı 1 geçmez.
 
 ## Kapı 2 — Tek SONIC Controller Hattı
 
+### Durum (2026-09-11)
+
+**Entegrasyon kilometre taşı çalışıyor; Kapı 2 henüz resmen kapanmış
+sayılmamalıdır.** Tek Isaac actuation yolu, deterministik test controller'ı,
+Unitree DDS üzerinden SONIC adapter'ı, isim bazlı 29-DoF eşleme, effort
+sınırlama, TTL/passive fallback, Dex3/Inspire profilleri ve gerçek TTY sahibi
+upstream keyboard akışı uygulanmış ve Raider'da ölçülmüştür.
+
+Kapıyı kapatmadan önce kalanlar:
+
+1. `CompleteRobotCommand` ve controller state mesajlarını bölüm 4'teki tam
+   envelope'a (`schema_version`, `run_id`, `source_component`, source timestamp,
+   `valid_from_tick`) yükseltmek.
+2. 64D standing/canned latent'i typed fixture olarak ve kaynak/hash provenance'ı
+   ile repo sözleşmesine almak; mevcut upstream reference/planner dosya yolu tek
+   başına bu deliverable'ı kapatmaz.
+3. İki terminaldeki Isaac ve SONIC süreçlerini tek `start/status/stop/reset`
+   lifecycle altında birleştirmek. Mevcut güvenli reset controller aktifken
+   isteği reddeder; SONIC history'sini koordine ederek temizleyen reset henüz yoktur.
+4. Inspire ve Dex3 için doğrudan hand probe'larını ve her iki varyantı kapsayan
+   otomatik kabul matrisini tamamlamak.
+5. Keyboard tuşu/state/command/hareket korelasyonunu, terminal kopmasını ve
+   orphan/port temizliğini tek self-contained run dizininde otomatik PASS/FAIL
+   kanıtına dönüştürmek; eski ikinci controller/actuation yollarının kaldırma
+   listesini yayımlamak.
+
+Bu ayrım mimari yönü değiştirmez: DDS robot-emulation sınırı, upstream SONIC'i
+Isaac'e özel bir decoder fork'undan koruduğu için doğru ana tasarımdır. Kalan
+işler esas olarak sözleşme tamamlama, orkestrasyon ve tekrarlanabilir kanıttır.
+
 ### Hedef
 
 Kapı 1'deki tek simulator API'sine önce test controller, sonra upstream SONIC

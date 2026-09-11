@@ -18,7 +18,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", type=Path, required=True)
     parser.add_argument("--duration", type=float)
-    parser.add_argument("--test", choices=("passive-fall",))
+    parser.add_argument("--test", choices=("passive-fall", "controlled-hold", "controller-hold"))
+    parser.add_argument(
+        "--controller",
+        choices=("none",),
+        help="disable the controller declared by the profile (safe passive fallback)",
+    )
     parser.add_argument(
         "--head-camera-window",
         action="store_true",
@@ -32,8 +37,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     # AppLauncher owns --device; only an explicit flag overrides the profile default.
     raw = list(sys.argv[1:] if argv is None else argv)
     args.device_explicit = any(item == "--device" or item.startswith("--device=") for item in raw)
-    if args.duration is None:
-        args.duration = 12.0 if args.test or args.headless else 300.0
+    # Interactive simulator runs are services: without an explicit duration
+    # they stay alive until the window, terminal, or container is stopped.
+    # Acceptance tests remain bounded when their caller omits --duration.
+    if args.duration is None and args.test:
+        args.duration = 12.0
     return args
 
 
@@ -58,6 +66,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             show_ui=not args.headless,
             show_head_camera=args.head_camera_window,
             test_mode=args.test,
+            controller_provider=args.controller,
         )
         summary = service.run()
         print(json.dumps(summary, indent=2, sort_keys=True), flush=True)
@@ -75,15 +84,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         # process wrapper also guarantees that no container child survives.
         closer.join(timeout=2.0 if not args.headless else 20.0)
         closed = not closer.is_alive()
-        print(
-            json.dumps(
-                {"event": "isaac_g1_app_close", "closed": closed, "forced_exit": not closed}
-            ),
-            flush=True,
-        )
-        sys.stdout.flush()
-        sys.stderr.flush()
-        os._exit(exit_code)
+        try:
+            print(
+                json.dumps(
+                    {
+                        "event": "isaac_g1_app_close",
+                        "closed": closed,
+                        "forced_exit": not closed,
+                        "exit_code": exit_code,
+                    }
+                ),
+                flush=True,
+            )
+            sys.stdout.flush()
+            sys.stderr.flush()
+        finally:
+            # Kit may replace or close a stream during its stuck teardown.
+            # Preserve the already-decided run result even if a final flush
+            # raises; the process wrapper owns any remaining child cleanup.
+            os._exit(exit_code)
 
 
 if __name__ == "__main__":

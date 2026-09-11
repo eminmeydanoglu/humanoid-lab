@@ -33,6 +33,9 @@ def sha256_of(path, chunk=1 << 20):
 
 rc = 0
 for name, m in models.items():
+    if 'repo' not in m:
+        # A pinned local artifact verified by content hash, not a download.
+        continue
     repo, rev = m['repo'], m['revision']
     variant = m.get('variant', '')
     if not rev:

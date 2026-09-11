@@ -143,7 +143,7 @@ isaac_demo() {
     pidfile=$1
     demo=$2
     shift 2
-    rm -f -- "$pidfile"
+    rm -f -- "$pidfile" "${pidfile}.status"
     setsid python "/opt/src/isaaclab/scripts/demos/$demo" "$@" &
     demo_pid=$!
     printf "%s\n" "$demo_pid" >"$pidfile"
@@ -194,16 +194,22 @@ cleanup_isaac_g1() { # $1 = container-side pidfile
       done
       [ ! -d "/proc/$pid" ] || kill -KILL -- "-$pid" 2>/dev/null || true
     fi
-    rm -f -- "$pidfile"
+    rm -f -- "$pidfile" "${pidfile}.status"
   ' -- "$pidfile" >/dev/null 2>&1 || true
 }
 
 run_isaac_g1() { # $1 = profile path; remaining args belong to the runner
   local profile_file="$1"
   local pidfile="/tmp/humanoid-lab-isaac-g1-$$-$RANDOM.pid"
+  local statusfile="${pidfile}.status"
+  local container_id
   local exec_pid=""
+  local recorded_rc=""
   local rc
   shift
+
+  container_id="$(DC ps -q dev)"
+  [ -n "$container_id" ] || { echo "error: dev container is not running" >&2; return 2; }
 
   on_isaac_g1_signal() {
     cleanup_isaac_g1 "$pidfile"
@@ -215,37 +221,49 @@ run_isaac_g1() { # $1 = profile path; remaining args belong to the runner
   }
   trap on_isaac_g1_signal INT TERM HUP
   # shellcheck disable=SC2016 # Variables in this string expand in the container.
-  DC exec -T -e DISPLAY="$DISPLAY" dev bash -lc '
+  # The Docker exec transport can report 1 when Kit needs the bounded os._exit
+  # teardown, even though the process and the in-container wait both return 0.
+  # The short-lived wrapper therefore records the authoritative child status.
+  docker exec -e DISPLAY="$DISPLAY" "$container_id" bash -lc '
     source /opt/humanoid-lab/entrypoint.sh
     use-isaac-sonic
     # Avoid treating every repository or /tmp entry as a Kit extension.
     mkdir -p /tmp/humanoid-lab-kit-cwd
     cd /tmp/humanoid-lab-kit-cwd
     pidfile=$1
-    profile_file=$2
-    shift 2
+    statusfile=$2
+    profile_file=$3
+    shift 3
     exec 9>/tmp/humanoid-lab-isaac-g1.lock
     if ! flock -n 9; then
       echo "error: another Isaac G1 simulation is already running" >&2
       exit 3
     fi
     rm -f -- "$pidfile"
+    rm -f -- "$statusfile"
     setsid python /workspace/humanoid-lab/scripts/run-isaac-g1.py \
       --profile "/workspace/humanoid-lab/$profile_file" "$@" &
     isaac_pid=$!
     printf "%s\n" "$isaac_pid" >"$pidfile"
     cleanup_runner() {
       kill -- "-$isaac_pid" 2>/dev/null || kill "$isaac_pid" 2>/dev/null || true
-      rm -f -- "$pidfile"
+      rm -f -- "$pidfile" "$statusfile"
     }
     trap "cleanup_runner; exit 143" INT TERM HUP
     if wait "$isaac_pid"; then rc=0; else rc=$?; fi
+    printf "{\"event\":\"isaac_g1_process_exit\",\"exit_code\":%s}\n" "$rc"
+    printf "%s\n" "$rc" >"$statusfile"
     trap - INT TERM HUP
     rm -f -- "$pidfile"
     exit "$rc"
-  ' -- "$pidfile" "$profile_file" "$@" &
+  ' -- "$pidfile" "$statusfile" "$profile_file" "$@" &
   exec_pid=$!
   if wait "$exec_pid"; then rc=0; else rc=$?; fi
+  recorded_rc="$(docker exec "$container_id" bash -lc 'cat -- "$1" 2>/dev/null' -- "$statusfile" || true)"
+  case "$recorded_rc" in
+    0|1|2|3|126|127) rc="$recorded_rc" ;;
+  esac
+  docker exec "$container_id" rm -f -- "$statusfile" >/dev/null 2>&1 || true
   trap - INT TERM HUP
   cleanup_isaac_g1 "$pidfile"
   return "$rc"
@@ -295,6 +313,98 @@ case "${1:-}" in
     up_once
     run_isaac_g1 "$profile_file" "${@:3}"
     ;;
+  isaac-g1-test-controller)
+    [ "${2:-}" = "dex3" ] || { echo "usage: $0 isaac-g1-test-controller dex3 [--headless] [--head-camera-window] [--duration SECONDS]" >&2; exit 2; }
+    headless=0
+    for arg in "${@:3}"; do
+      [ "$arg" != "--headless" ] || headless=1
+    done
+    [ "$headless" -eq 1 ] || require_x11_display
+    up_once
+    run_isaac_g1 configs/profiles/isaac-g1-scripted-hold-dex3.json \
+      --test controlled-hold "${@:3}"
+    ;;
+  isaac-g1-sonic)
+    profile="${2:-}"
+    case "$profile" in
+      dex3) profile_file=configs/profiles/isaac-g1-sonic-dex3.json ;;
+      inspire-ftp) profile_file=configs/profiles/isaac-g1-sonic-inspire-ftp.json ;;
+      *) echo "usage: $0 isaac-g1-sonic {dex3|inspire-ftp} [--headless] [--head-camera-window] [--duration SECONDS] [--controller none]" >&2; exit 2 ;;
+    esac
+    headless=0
+    for arg in "${@:3}"; do
+      [ "$arg" != "--headless" ] || headless=1
+    done
+    [ "$headless" -eq 1 ] || require_x11_display
+    up_once
+    run_isaac_g1 "$profile_file" "${@:3}"
+    ;;
+  sonic-controller)
+    # The official SONIC deployment in this terminal, exactly as the upstream
+    # documentation runs it: raw keyboard on this TTY, planner loaded, `]` to
+    # start. This launcher owns the Isaac-targeted controller role: a new
+    # invocation replaces an older controller started through this same path,
+    # without touching unmarked SONIC/MuJoCo deployments.
+    # The deployment owns this terminal's stdin; every variable below expands
+    # inside the container.
+    up_once
+    # shellcheck disable=SC2016
+    DC exec dev bash -lc '
+      source /opt/humanoid-lab/entrypoint.sh
+      cd /data/models/sonic-deploy
+      export LD_LIBRARY_PATH=/data/models/sonic-deploy/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+      export SONIC_MODELS_DIR=/data/models/sonic
+      export SONIC_REFERENCE_DIR=/data/models/sonic-isaac/reference/example
+      export SONIC_PLANNER=/data/models/sonic-isaac/planner/target_vel/V2/planner_sonic.onnx
+      case "$SONIC_PLANNER" in
+        *V0*|*V1*|*V2*) ;;
+        *) echo "error: the deployment reads its planner version token from the path;" >&2
+           echo "       planner version token (V0/V1/V2) missing in: $SONIC_PLANNER" >&2
+           exit 2 ;;
+      esac
+      controller_pidfile=/tmp/humanoid-lab-sonic-controller-isaac.pid
+      takeover_lock=/tmp/humanoid-lab-sonic-controller-isaac.takeover.lock
+      controller_target=isaac
+
+      is_isaac_controller() {
+        candidate=$1
+        case "$candidate" in (*[!0-9]*|"") return 1;; esac
+        [ -r "/proc/$candidate/environ" ] || return 1
+        [ -r "/proc/$candidate/cmdline" ] || return 1
+        tr "\0" "\n" <"/proc/$candidate/environ" |
+          grep -Fxq "HUMANOID_LAB_CONTROLLER_TARGET=$controller_target" || return 1
+        tr "\0" " " <"/proc/$candidate/cmdline" |
+          grep -Fq "g1_deploy_onnx_ref" || return 1
+      }
+
+      # Serialize only the short replacement transaction. The lock is released
+      # before exec so a later invocation can enter, stop this PID, and take over.
+      exec 8>"$takeover_lock"
+      flock 8
+      if [ -r "$controller_pidfile" ]; then
+        read -r previous_pid <"$controller_pidfile" || previous_pid=
+        if is_isaac_controller "$previous_pid" && [ "$previous_pid" != "$$" ]; then
+          echo "[sonic-controller] replacing previous Isaac controller pid=$previous_pid" >&2
+          kill -TERM "$previous_pid" 2>/dev/null || true
+          for _ in {1..50}; do
+            [ ! -d "/proc/$previous_pid" ] && break
+            sleep 0.1
+          done
+          [ ! -d "/proc/$previous_pid" ] || kill -KILL "$previous_pid" 2>/dev/null || true
+        fi
+      fi
+      export HUMANOID_LAB_CONTROLLER_TARGET="$controller_target"
+      printf "%s\n" "$$" >"$controller_pidfile"
+      flock -u 8
+      exec 8>&-
+      exec ./g1_deploy_onnx_ref lo \
+        "$SONIC_MODELS_DIR/sonic_v1_1/model_decoder.onnx" \
+        "$SONIC_REFERENCE_DIR" \
+        --obs-config "$SONIC_MODELS_DIR/sonic_v1_1/observation_config.yaml" \
+        --encoder-file "$SONIC_MODELS_DIR/sonic_v1_1/model_encoder.onnx" \
+        --planner-file "$SONIC_PLANNER" \
+        --input-type keyboard --output-type zmq --disable-crc-check'
+    ;;
   doctor)
     ./doctor.sh
     ;;
@@ -338,7 +448,7 @@ case "${1:-}" in
     exit 2
     ;;
   *)
-    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|isaac-g1 {no_hands|inspire-ftp|dex3}|doctor|smoke|groot-finetune-smoke|sync|fetch-models|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
+    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-sonic {dex3|inspire-ftp}|sonic-controller|doctor|smoke|groot-finetune-smoke|sync|fetch-models|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
     exit 2
     ;;
 esac

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "profile_id": "isaac-g1-29dof-dex3-head-camera",
+  "profile_id": "isaac-g1-29dof-dex3-scripted",
   "robot": {
     "name": "g1-29dof-dex3",
     "body_dofs": 29,
@@ -10,7 +10,7 @@
     "initial_position_m": [
       0.0,
       0.0,
-      0.8
+      0.792563
     ],
     "hand": {
       "kind": "dex3",
@@ -44,7 +44,40 @@
       0.0
     ]
   },
+  "controller": {
+    "provider": "scripted",
+    "torso_link": "torso_link",
+    "command_ttl_s": 0.25,
+    "hand_fallback": "passive",
+    "pose": "sonic_standing",
+    "gains": "sonic_deploy",
+    "effort_limits": "sonic_body",
+    "hold_seconds": 3.0,
+    "support_link": "pelvis",
+    "pose_offsets_rad": {
+      "left_shoulder_pitch_joint": 0.35,
+      "left_shoulder_roll_joint": 0.3,
+      "left_elbow_joint": 0.5,
+      "right_shoulder_pitch_joint": 0.35,
+      "waist_yaw_joint": 0.25
+    }
+  },
   "simulation": {
     "physics_dt": 0.005
+  },
+  "initial_pose": "sonic_standing",
+  "support": {
+    "kind": "pelvis_band",
+    "release": "controller_hold_then_motion",
+    "max_seconds": 30.0,
+    "point_m": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "linear_stiffness": 10000.0,
+    "linear_damping": 1000.0,
+    "angular_stiffness": 1000.0,
+    "angular_damping": 10.0
   }
 }

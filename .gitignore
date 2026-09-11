@@ -30,6 +30,9 @@ check_env.py
 # yerel notlar ve agent durumu
 .pi/
 docs/
+!docs/
+docs/*
+!docs/sonic-isaac.md
 # buyuk model dosyalari
 .pretrained_checkpoints/
 AGENTS.md

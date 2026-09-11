@@ -99,13 +99,13 @@ FROM sources AS dev
 # Runtime code is deliberately copied after the expensive source layer.  A
 # change to a shell helper therefore makes only this small final layer dirty.
 COPY locks/ /opt/locks/
-COPY containers/bootstrap-venvs.sh containers/entrypoint.sh containers/shell.sh containers/isaac-sim-env.sh containers/cyclonedds-sim.xml /opt/humanoid-lab/
-COPY patches/sonic-sim-dds-isolation.patch /opt/humanoid-lab/
+COPY containers/bootstrap-venvs.sh containers/entrypoint.sh containers/shell.sh containers/isaac-sim-env.sh containers/cyclonedds-sim.xml containers/patch-unitree-cyclonedds-config.py /opt/humanoid-lab/
 COPY scripts/smoke-test.sh scripts/fetch-groot-demo-data.sh scripts/groot-finetune-smoke.sh /opt/humanoid-lab/
 
 RUN set -eux; \
-    git -C /opt/src/sonic apply --check /opt/humanoid-lab/sonic-sim-dds-isolation.patch; \
-    git -C /opt/src/sonic apply /opt/humanoid-lab/sonic-sim-dds-isolation.patch; \
+    # Pinned upstream sources stay byte-identical: nothing here patches /opt/src.
+    test -z "$(git -c safe.directory='*' -C /opt/src/sonic status --porcelain)"; \
+    test -z "$(git -c safe.directory='*' -C /opt/src/isaaclab status --porcelain)"; \
     chmod 0755 /opt/humanoid-lab/*.sh; \
     chown -R "${DEVELOPER_UID}:${DEVELOPER_GID}" /opt/humanoid-lab /opt/src
 

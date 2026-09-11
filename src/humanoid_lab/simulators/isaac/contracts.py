@@ -13,6 +13,9 @@ from typing import Any, Mapping, Sequence
 DEVICE_PATTERN = re.compile(r"^(cpu|cuda(:\d+)?)$")
 DEFAULT_DEVICE = "cpu"
 DEFAULT_RENDER_INTERVAL = 8
+# Long enough to ride out a slow control tick, short enough that a vanished
+# controller leaves the robot passive well before it could look controlled.
+DEFAULT_COMMAND_TTL_S = 0.25
 
 
 class ContractError(ValueError):
@@ -123,6 +126,56 @@ class RobotSpec:
         )
 
 
+SUPPORT_KINDS = ("pelvis_band",)
+SUPPORT_RELEASES = ("controller_hold_then_motion",)
+
+
+@dataclass(frozen=True)
+class SupportSpec:
+    """Declared start-up support, mirroring the official simulator's holder.
+
+    The reference MuJoCo loop hangs the robot from a virtual spring band at the
+    waist and the operator releases it only after the controller is running.
+    Without that, a position-controlled humanoid is on the floor before the
+    controller starts. This is declared, logged, time-bounded, and absent
+    whenever no controller is attached.
+    """
+
+    kind: str
+    release: str
+    max_seconds: float
+    point_m: tuple[float, float, float]
+    linear_stiffness: float
+    linear_damping: float
+    angular_stiffness: float
+    angular_damping: float
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "SupportSpec":
+        kind = str(data["kind"])
+        if kind not in SUPPORT_KINDS:
+            raise ContractError(f"support.kind must be one of {SUPPORT_KINDS}")
+        release = str(data["release"])
+        if release not in SUPPORT_RELEASES:
+            raise ContractError(f"support.release must be one of {SUPPORT_RELEASES}")
+        max_seconds = float(data["max_seconds"])
+        if not math.isfinite(max_seconds) or max_seconds <= 0.0:
+            raise ContractError("support.max_seconds must be positive and finite")
+        return cls(
+            kind=kind,
+            release=release,
+            max_seconds=max_seconds,
+            point_m=_tuple(data["point_m"], 3, "support.point_m"),
+            linear_stiffness=float(data["linear_stiffness"]),
+            linear_damping=float(data["linear_damping"]),
+            angular_stiffness=float(data["angular_stiffness"]),
+            angular_damping=float(data["angular_damping"]),
+        )
+
+
+NAMED_POSES = ("sonic_standing",)
+
+
 @dataclass(frozen=True)
 class RunProfile:
     schema_version: int
@@ -132,6 +185,9 @@ class RunProfile:
     physics_dt: float
     device: str = DEFAULT_DEVICE
     render_interval: int = DEFAULT_RENDER_INTERVAL
+    controller: Mapping[str, Any] | None = None
+    initial_pose: str | None = None
+    support: SupportSpec | None = None
 
     @classmethod
     def load(cls, path: Path) -> "RunProfile":
@@ -144,13 +200,40 @@ class RunProfile:
         dt = float(data["simulation"]["physics_dt"])
         if not math.isfinite(dt) or dt <= 0.0:
             raise ContractError("physics_dt must be positive and finite")
+        controller = data.get("controller")
+        if controller is not None:
+            if not isinstance(controller, dict) or "provider" not in controller:
+                raise ContractError("controller must be an object with a provider")
+            controller = dict(controller)
+            ttl = float(controller.get("command_ttl_s", DEFAULT_COMMAND_TTL_S))
+            if not math.isfinite(ttl) or ttl <= 0.0:
+                raise ContractError("controller.command_ttl_s must be positive and finite")
+            controller["command_ttl_s"] = ttl
+            if "torso_link" not in controller:
+                raise ContractError("controller.torso_link is required when a controller is selected")
+        initial_pose = data.get("initial_pose")
+        if initial_pose is not None and str(initial_pose) not in NAMED_POSES:
+            raise ContractError(f"initial_pose must be one of {NAMED_POSES}")
+        support = data.get("support")
+        if support is not None and controller is None:
+            raise ContractError("a support band only means something with a controller attached")
         return cls(
             schema_version=1,
             profile_id=str(data["profile_id"]),
             robot=RobotSpec.from_dict(data["robot"]),
             camera=CameraSpec.from_dict(data["camera"]),
             physics_dt=dt,
+            controller=controller,
+            initial_pose=str(initial_pose) if initial_pose is not None else None,
+            support=SupportSpec.from_dict(support) if support is not None else None,
         )
+
+    @property
+    def command_ttl_s(self) -> float:
+        """How long a commanded drive stays valid without a refresh."""
+        if not self.controller:
+            return DEFAULT_COMMAND_TTL_S
+        return float(self.controller["command_ttl_s"])
 
     def with_device(self, device: str | None) -> "RunProfile":
         """Return the profile with an explicit CLI device override applied."""
@@ -197,6 +280,11 @@ class RunProfile:
                 "device": self.device,
                 "render_interval": self.render_interval,
             },
+            "controller": dict(self.controller) if self.controller else None,
+            "initial_pose": self.initial_pose,
+            "support": (
+                {"kind": self.support.kind, "release": self.support.release} if self.support else None
+            ),
         }
 
 

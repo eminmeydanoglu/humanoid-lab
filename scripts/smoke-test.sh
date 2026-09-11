@@ -74,6 +74,37 @@ if [ "$HAVE_ISAAC" = 1 ]; then
   fi
 fi
 
+# The Isaac side of the SONIC link needs the Unitree DDS bindings in the same
+# interpreter that runs Isaac, and the pinned deployment binary the profile
+# points at. Both have failed once already (missing bindings; a git-lfs pointer
+# where the Dex3 asset should be), so they are checked rather than assumed.
+if [ "$HAVE_ISAAC" = 1 ]; then
+  if "$PY_ISAAC" -c 'import cyclonedds, unitree_sdk2py' >/dev/null 2>&1; then
+    note PASS "isaac-sonic: Unitree DDS bindings (cyclonedds + unitree_sdk2py)"
+    PASS=$((PASS+1))
+  else
+    note FAIL "isaac-sonic: Unitree DDS bindings missing (SONIC bridge cannot run)"
+    FAIL=$((FAIL+1))
+  fi
+fi
+
+SONIC_DEX3_USD="$MODEL_ROOT/sonic-assets/g1_29dof_with_hand_rev_1_0.usd"
+if [ -f "$SONIC_DEX3_USD" ] && [ "$(head -c 5 "$SONIC_DEX3_USD")" != "versi" ]; then
+  note PASS "models: Dex3 G1 USD materialized ($(stat -c%s "$SONIC_DEX3_USD") bytes)"
+  PASS=$((PASS+1))
+else
+  note FAIL "models: Dex3 G1 USD missing or a git-lfs pointer ($SONIC_DEX3_USD); run ./dev.sh sync"
+  FAIL=$((FAIL+1))
+fi
+
+if [ -x "$MODEL_ROOT/sonic-deploy/g1_deploy_onnx_ref" ]; then
+  note PASS "models: pinned SONIC deployment binary present"
+  PASS=$((PASS+1))
+else
+  note BLOCKED "models: SONIC deployment binary missing ($MODEL_ROOT/sonic-deploy)"
+  BLOCK=$((BLOCK+1))
+fi
+
 if [ "$HAVE_SIM" = 1 ]; then
   if MUJOCO_GL=egl PYOPENGL_PLATFORM=egl "$PY_SIM" - <<'PY' >/dev/null 2>&1; then
 import pathlib

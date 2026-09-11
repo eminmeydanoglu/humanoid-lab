@@ -42,12 +42,14 @@ sahibi `SimulatorService`tir.
 ./dev.sh isaac-g1 no_hands --headless
 ./dev.sh isaac-g1 dex3 --head-camera-window # ikinci head-camera viewport'u
 ./dev.sh isaac-g1 dex3 --test passive-fall # controller'siz düşüş kabulü
+./dev.sh isaac-g1-test-controller dex3 --headless # deterministik komut/TTL kabulü
 ```
 
-Seçenekler: `--test passive-fall`, `--headless`, `--head-camera-window`,
-`--duration SECONDS`, `--device {cpu,cuda}`. Normal çalışma
-`COMPLETED` ile biter; düşüş PASS/FAIL kabulü yalnız `--test passive-fall`
-verildiğinde uygulanır.
+Genel seçenekler `--headless`, `--head-camera-window`, `--duration SECONDS` ve
+`--device {cpu,cuda}`'dır. Controller seçimi profile aittir; controller'lı bir
+profil yalnız güvenli pasif fallback için `--controller none` ile kapatılabilir.
+Normal çalışma `COMPLETED` ile biter; düşüş/hold kabulü yalnız ilgili
+test komutunda uygulanır.
 
 Tek robotlu bu sahnede fizik varsayılan olarak CPU'da, dört worker thread ile çalışır;
 `--device cuda` açık bir geri dönüş seçeneğidir. Fizik zaman adımı 0,005 saniyedir
@@ -99,8 +101,24 @@ penceresi (`--gui`) deneyseldir.
 > cokuyor. Bu nedenle `isaac-stream` komutu, surucu/Isaac Sim uyumlulugu
 > duzeltilene kadar korumali olarak basarisiz olur ve crash dongusu baslatmaz.
 
-## 4. Modeller (bir kez)
+## 3b. SONIC ile Isaac G1
 
+Isaac'teki G1'i resmî SONIC kontrolcüsüne bağlar. Upstream decoder, model ve
+planner semantiği korunur; pinli deployment binary'sinin tek kaynak farkı,
+simülasyon DDS'ini gerçek robot domain'inden ayıran domain `42` değişikliğidir.
+Isaac yalnız robotun Unitree DDS topiklerini konuşur. Kontrolcü ayrı bir
+terminalde, resmî inference'taki gibi planner ve klavye ile açılır.
+
+```bash
+./dev.sh isaac-g1-sonic dex3     # 1. terminal: Isaac + robot (ayrica inspire-ftp)
+./dev.sh sonic-controller        # 2. terminal: resmî SONIC (planner + klavye)
+```
+
+SONIC terminalinde `]` kontrolü başlatır, `T` referans hareketi çalar,
+`N`/`P` hareket değiştirir, `O` acil durdurur. Ayrıntı, kabul ölçütleri ve
+ölçülen davranış: `docs/sonic-isaac.md`.
+
+## 4. Modeller (bir kez)
 ```bash
 ./dev.sh hf-login       # HF token host cache'ine yazilir (image'e/.env'e girmaz)
 ./dev.sh fetch-models            # pinli model revision'lari + MODEL_PROVENANCE.json (sha256)

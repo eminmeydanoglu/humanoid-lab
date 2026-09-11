@@ -94,6 +94,34 @@ python_environments:
     note: Upstream pyproject + uv.lock frozen at 1a1837f2; PyTorch not installed separately.
 
 models:
+  sonic_deploy:
+    # Official C++ deployment (g1_deploy_onnx_ref) built from the pinned SONIC
+    # commit with the simulation DDS domain moved off the real robot's domain 0.
+    # It lives outside the image, so it is pinned by content hash like a
+    # checkpoint. Its TensorRT engines (.trt) are cached next to the models and
+    # deserialize from disk, so nothing is re-exported per run.
+    path: sonic-deploy
+    binary: g1_deploy_onnx_ref
+    binary_sha256: d194e7fec2b3393c3a9954abf119493da2c8b9372655ab8fbec8effabb014ddf
+    source_commit: a0732b642c0333077e127a2f56ab0014c196bca4
+    dds_domain_id: 42
+    required: true
+    note: >
+      Only observed delta from pristine upstream is ChannelFactory::Init's domain
+      id (42 instead of 0), the simulation-isolation change this repo's plan asks
+      for. Rebuilding it here would need the TensorRT development package, which
+      nothing else in the image requires.
+  sonic_g1_dex3_asset:
+    # The Dex3 G1 body lives as a git-lfs file inside the pinned SONIC checkout.
+    # Image builds cannot fetch lfs content on this host, so the asset is
+    # materialized into the persistent data root instead and referenced from
+    # there; the profile points at the copied file, not at /opt/src.
+    source_repo: https://github.com/NVlabs/GR00T-WholeBodyControl.git
+    source_commit: a0732b642c0333077e127a2f56ab0014c196bca4
+    source_path: gear_sonic/data/robots/g1/g1_29dof_with_hand_rev_1_0.usd
+    asset_sha256: a7a2bab76981d19a1d76adecdfffec9b52afa34df9ba8e288ccedf410d3ce6bd
+    dest_path: sonic-assets/g1_29dof_with_hand_rev_1_0.usd
+    required: true
   sonic:
     repo: nvidia/GEAR-SONIC
     variant: sonic_v1_1
