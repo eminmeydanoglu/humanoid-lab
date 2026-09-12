@@ -197,14 +197,40 @@ function render(result) {
     : result.text;
   $("answer").textContent = answer;
 
+  renderPromptBand(result);
   drawMarkers(result);
   renderMarkerList(result.markers || []);
 
   $("warnings").innerHTML = (result.warnings || [])
     .map((w) => `<div>${escapeHtml(w)}</div>`)
     .join("");
+  $("sentPromptPlain").textContent = naturalPrompt(result);
   $("sentPrompt").textContent = result.prompt_sent || "";
   $("runHint").textContent = "";
+}
+
+/* The prompt as natural language, without the chat-template scaffolding: on the frame we
+   want the instruction a person would read, not `<|im_start|>user …`. */
+function naturalPrompt(result) {
+  if (result.prompt && result.prompt.trim()) return result.prompt.trim();
+  return (result.prompt_sent || "")
+    .replace(/<\|[a-z_]+\|>/g, "")
+    .replace(/^(user|assistant|system)\s*/i, "")
+    .trim();
+}
+
+function renderPromptBand(result) {
+  const band = $("promptBand");
+  const text = naturalPrompt(result);
+  $("promptBandText").textContent = text;
+  band.hidden = !text;
+  band.classList.toggle("long", text.length > 120);
+  band.classList.toggle("verylong", text.length > 300);
+  band.classList.remove("truncated");
+  // The band is capped at a share of the frame; flag it when the text does not fit in full.
+  requestAnimationFrame(() => {
+    band.classList.toggle("truncated", band.scrollHeight > band.clientHeight + 2);
+  });
 }
 
 function drawMarkers(result) {

@@ -37,6 +37,20 @@ Adresler:
 
 Durdurmak için: `kill $(cat /tmp/er_web_8321.pid)`.
 
+## Prompt şeridi
+
+Her koşuda, modele giden prompt fotoğrafın üst kısmına büyük yazıyla basılır (koyu
+yarı saydam şerit). Şeritte **sadece doğal dildeki prompt** görünür; sohbet
+şablonunun `<|im_start|>user`, `<|vision_start|>`, `<|im_end|>` gibi token'ları
+şeride girmez. Şerit fotoğraf ile işaretçi katmanı arasında durur, böylece kırmızı
+işaretçiler her zaman şeridin üstünde kalır.
+
+Yazı boyutu metin uzunluğuna ve ekran genişliğine göre değişir (masaüstünde 19 px,
+mobilde 14 px; uzun promptlarda küçülür), şerit karenin en fazla %72'sini kaplar.
+Prompt sığmazsa alta bir solma efekti eklenir; tam metin her zaman görselin altındaki
+`Modele giden tam dize (şablon token'larıyla)` alanında durur. Ölçülen kaplama:
+masaüstünde %15, mobilde %24 (yıldız meyvesi karesi, `bbox` şablonu).
+
 ## Dosyalar
 
 | dosya | ne yapar |

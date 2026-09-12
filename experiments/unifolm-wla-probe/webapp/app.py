@@ -198,6 +198,7 @@ class App:
             **out,
             "model": request["model"],
             "mode": request["mode"],
+            "prompt": prompt,
             "frame_id": frame["id"],
             "frame_url": frame["url"],
             "frame_width": frame["width"],

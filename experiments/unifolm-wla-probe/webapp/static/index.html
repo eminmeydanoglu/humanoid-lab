@@ -83,12 +83,14 @@
       <div class="meta" id="meta"></div>
       <div class="canvasWrap" id="canvasWrap" hidden>
         <img id="resultImage" alt="seçilen kare">
+        <div class="promptBand" id="promptBand" hidden><span id="promptBandText"></span></div>
         <svg id="overlay" preserveAspectRatio="none"></svg>
       </div>
       <pre id="answer"></pre>
       <div id="markerList"></div>
       <div id="warnings"></div>
-      <div class="sentPrompt"><span>Modele giden prompt</span><code id="sentPrompt"></code></div>
+      <div class="sentPrompt"><span>Prompt (doğal dil)</span><code id="sentPromptPlain"></code></div>
+      <div class="sentPrompt"><span>Modele giden tam dize (şablon token'larıyla)</span><code id="sentPrompt"></code></div>
     </div>
   </section>
   </div>

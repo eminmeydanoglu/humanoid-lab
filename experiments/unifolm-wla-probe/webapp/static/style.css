@@ -210,6 +210,38 @@ summary { cursor: pointer; color: var(--muted); margin-bottom: 8px; }
 
 .canvasWrap img { display: block; width: 100%; height: auto; }
 
+/* The exact prompt that went to the model, printed on the frame itself. Sits between the
+   image and the marker overlay so markers stay visible on top of it. */
+.promptBand {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: 10px 13px 11px;
+  background: rgba(12, 17, 23, 0.72);
+  color: #ffffff;
+  font: 19px/1.4 ui-monospace, "SFMono-Regular", Menlo, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 72%;
+  overflow: hidden;
+  pointer-events: none;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
+}
+
+.promptBand.long { font-size: 15px; }
+.promptBand.verylong { font-size: 12.5px; }
+
+.promptBand.truncated::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 26px;
+  background: linear-gradient(rgba(12, 17, 23, 0), rgba(12, 17, 23, 0.95));
+}
+
 #overlay {
   position: absolute;
   inset: 0;
@@ -278,4 +310,11 @@ summary { cursor: pointer; color: var(--muted); margin-bottom: 8px; }
 @media (max-width: 900px) {
   main { grid-template-columns: 1fr; }
   .grid { grid-template-columns: repeat(4, 1fr); }
+}
+
+/* The frame is much smaller here, so the same band would eat most of it. */
+@media (max-width: 700px) {
+  .promptBand { font-size: 14px; padding: 8px 10px 9px; }
+  .promptBand.long { font-size: 12px; }
+  .promptBand.verylong { font-size: 11px; }
 }
