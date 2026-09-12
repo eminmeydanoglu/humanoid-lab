@@ -7,6 +7,14 @@ model + prompt, altta cevap. `Point modu`'nda modelin cevabındaki koordinatlar 
 ## Çalıştırma
 
 ```bash
+experiments/unifolm-wla-probe/webapp/serve.sh          # port 8321, oturumdan bağımsız
+PORT=9000 experiments/unifolm-wla-probe/webapp/serve.sh
+```
+
+Betik sunucuyu `setsid nohup` ile arka planda başlatır, PID'i `/tmp/er_web_<port>.pid`
+dosyasına yazar, log `/tmp/er_web.log`. Elle çalıştırmak istersen:
+
+```bash
 cd experiments/unifolm-wla-probe/webapp
 /home/aksoy-msi/code/humanoid-lab-main/data/venvs/unifolm-wla/bin/python app.py \
   --port 8321 --warm \
@@ -27,7 +35,7 @@ Adresler:
 | tailnet IP | http://100.126.18.76:8321/ |
 | MagicDNS (emin-1 dâhil) | http://aksoy-msi-raider-16-max-hx-b2wj.tail2e36f3.ts.net:8321/ |
 
-Durdurmak için: `ss -tlnp | grep 8321` ile PID'i bulup `kill <pid>`.
+Durdurmak için: `kill $(cat /tmp/er_web_8321.pid)`.
 
 ## Dosyalar
 
