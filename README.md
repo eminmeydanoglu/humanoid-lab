@@ -90,12 +90,61 @@ motion, `R` resets, `O` is the emergency stop. `Enter` to switch to planner to t
 | `setup.sh`, `dev.sh`, `doctor.sh` | host entry points: provisioning, container lifecycle and runs, diagnostics |
 | `compose.yaml`, `Dockerfile`, `containers/` | image and container definition, entrypoint, environment selectors, venv provisioning |
 | `configs/profiles/` | G1 run profiles: robot asset, hands, camera, controller, support band |
-| `src/humanoid_lab/` | simulator service, profile and command contracts, controller bridge |
-| `scripts/` | Isaac G1 runner, model fetching, lock rendering, checks |
+| `src/humanoid_lab/` | simulator service, profile and command contracts, controller bridge, GRAIL prompt layer |
+| `scripts/` | Isaac G1 runner, GRAIL prompt manifest, model fetching, lock rendering, checks |
 | `locks/` | frozen `uv` locks for the three Python environments |
 | `tests/` | `unittest` modules and shell checks |
 | `docs/` | SONIC-Isaac link notes with the measured acceptance results |
 | `versions.lock.yaml` | single source of every version pin |
+
+
+
+## GRAIL pickup_table prompt layer
+
+Every GRAIL source trajectory gets exactly one English instruction, derived from its file stem
+(`<task_family>__<object_asset_id>__<motion_variant>`, e.g. `pickup_table__apple_17__003`). The
+stems under `data/datasets/grail/data/pickup_table/robot/` are the only source of truth; nothing
+in the GRAIL release is read or modified.
+
+```bash
+python3 scripts/generate-grail-prompt-manifest.py \
+  --output data/outputs/grail/pickup_table_prompt_manifest.jsonl
+# --robot-dir defaults to data/datasets/grail/data/pickup_table/robot
+```
+
+The manifest is JSONL, sorted by `source_motion_id`, and each row carries `schema_version`,
+`prompt_policy_version`, `source_motion_id`, `task_family`, `object_asset_id`,
+`object_category_raw`, `object_name`, `motion_variant`, `prompt_template_id` and `instruction`.
+A malformed stem, a missing robot directory or an empty directory fails the run with exit code 2
+and leaves no output; a successful run replaces the output atomically.
+
+**Determinism.** The template is chosen by
+`sha256("sha256-first8be-mod-v1" + NUL + source_motion_id)`, first eight bytes big-endian, modulo
+the template count. Python's `hash()` is never used, so the same input yields the same row on
+every machine and every run. `PROMPT_POLICY_VERSION` in
+[`src/humanoid_lab/grail/prompts.py`](src/humanoid_lab/grail/prompts.py) identifies the template
+set, the selection algorithm and the label policy.
+
+**Camera variations.** A camera variation is a derived trajectory that replays one source motion;
+it keeps that motion's stem as its `source_motion_id`. Consumers therefore look the instruction up
+by id instead of re-deriving it, and every variation of one source trajectory shares one prompt:
+
+```python
+import json
+lookup = {row["source_motion_id"]: row["instruction"]
+          for row in map(json.loads, open(manifest_path))}
+instruction = lookup[source_motion_id]
+```
+
+**Templates and labels.** The first template family is only pick-and-lift off a table: six
+templates that use `pick up`, `grab`, `lift ... off the table` and `take ... from the table`, with
+no bring, place, hand-over, fetch or left/right hand wording. Each trajectory gets one template,
+so variations are spread across trajectories rather than duplicated per trajectory. Object labels
+are the raw category with underscores turned into spaces, except for reviewed categories in
+`OBJECT_NAME_OVERRIDES` (`alcohol` → "alcohol bottle", `bagged_food` → "bag of food", `bar` →
+"snack bar", `spray` → "spray bottle", and similar); the raw category is kept in the manifest.
+
+Tests: `PYTHONPATH=src python3 -m unittest tests.test_grail_prompts`.
 
 
 
