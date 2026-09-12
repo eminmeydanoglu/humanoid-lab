@@ -6,10 +6,10 @@ işleri burada çalıştırılır; başka bir host'a SSH gerekmez.
 
 ## Yerleşim
 
-- Checkout: `/home/aksoy-msi/code/humanoid-lab-sonic-isaac`
+- Checkout: `/home/aksoy-msi/code/humanoid-lab-main`
 - Container: `humanoid-lab-dev` (`humanoid-lab/dev:5.1.0`), checkout
   `/workspace/humanoid-lab` olarak bağlıdır.
-- Kalıcı veri kökü: `HUMANOID_DATA_ROOT=/home/aksoy-msi/code/humanoid-lab/data`
+- Kalıcı veri kökü: `HUMANOID_DATA_ROOT=/home/aksoy-msi/code/humanoid-lab-main/data`
   → container'da `/data`, `/cache`, `/outputs`. Modeller, venv'ler
   (`/opt/venvs`), Isaac cache'i, uv/HF cache'i ve koşu çıktıları buradadır.
 - GPU: RTX 5090 Laptop 24 GB, sürücü 580.173.02. Kapı 1'de fizik CPU'da koşar,

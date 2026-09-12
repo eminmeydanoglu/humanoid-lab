@@ -1,176 +1,177 @@
 # humanoid-lab
 
-Isaac Sim 5.1.0 + Isaac Lab 2.3.2 + SONIC + GR00T N1.7 icin tek-container dev environment (tek NVIDIA GPU host).
 
-## 1. Kurulum (bir kez)
 
-```bash
-git clone git@github.com:eminmeydanoglu/humanoid-lab.git && cd humanoid-lab
-./setup.sh                    # host preflight + lock render + image build + start + smoke
-```
+## Requirements
 
-Docker/NVIDIA toolkit kurulu degilse `setup.sh` lock'taki birebir versiyonlarla
-kurulum komutlarini yazdirir; `--verify-digests` Isaac Sim digest'ini NGC'den cekip lock'a yazar:
+| Item | Value |
+| --- | --- |
+| OS / arch | Ubuntu 24.04, x86_64 |
+| GPU | NVIDIA GPU, driver >= 580.65.06 (newer is kept, older fails the preflight) |
+| Docker | Docker Engine with the Compose v2 plugin, plus the NVIDIA Container Toolkit |
+| Disk | more than 100 GiB free where the repo lives |
+| Host tools | `git`, `curl`, `python3` with PyYAML |
+| NGC | account with the Isaac Sim EULA accepted, and `docker login nvcr.io` performed |
+| GUI (optional) | a working X11 display; headless runs need none |
+| Hugging Face (optional) | token, only for the gated GR00T backbone |
 
-```bash
-./setup.sh --verify-digests
-```
+Docker group membership needs a fresh login session: `sudo usermod -aG docker $USER`, then log out
+and back in.
 
-## 2. Gunluk kullanim
-
-```bash
-./dev.sh            # ana container shell (yoksa olusturur/baslatir)
-./dev.sh isaac      # isaac-sonic env  : Python 3.11, Isaac Lab + SONIC
-./dev.sh sonic-sim  # sonic-sim env    : Python 3.11, MuJoCo + G1
-./dev.sh groot      # groot-n17 env    : Python 3.12, Isaac-GR00T N1.7
-./dev.sh doctor     # host + container validation raporu
-./dev.sh smoke      # container icinde normal smoke testler
-./dev.sh groot-finetune-smoke pipeline  # istege bagli GR00T iki-adim egitim hatti smoke testi
-./dev.sh rebuild    # image'i ayni lock ile yeniden build et
-./dev.sh stop       # container'i durdur (veriler kalir)
-```
-
-## 3. Isaac G1 simulatoru (Kapi 1)
-
-Yalnız Isaac Lab, G1 asset'i ve head camera kullanır; SONIC,
-GR00T, CloudWalk, DDS veya başka bir controller yüklemez. Fizik döngüsünün tek
-sahibi `SimulatorService`tir.
+## Setup from scratch
 
 ```bash
-./dev.sh isaac-g1 dex3                     # akıcı ana GUI, doğrudan Play
-./dev.sh isaac-g1 inspire-ftp
-./dev.sh isaac-g1 no_hands --headless
-./dev.sh isaac-g1 dex3 --head-camera-window # ikinci head-camera viewport'u
-./dev.sh isaac-g1 dex3 --test passive-fall # controller'siz düşüş kabulü
-./dev.sh isaac-g1-test-controller dex3 --headless # deterministik komut/TTL kabulü
+git clone git@github.com:eminmeydanoglu/humanoid-lab.git
+cd humanoid-lab
+
+docker login nvcr.io        # the Isaac Sim base image is EULA-gated on NGC
+./setup.sh --verify-digests # resolves the base image digest from NGC into versions.lock.yaml
+./setup.sh                  # preflight, .env, image build, container start, smoke test
 ```
 
-Genel seçenekler `--headless`, `--head-camera-window`, `--duration SECONDS` ve
-`--device {cpu,cuda}`'dır. Controller seçimi profile aittir; controller'lı bir
-profil yalnız güvenli pasif fallback için `--controller none` ile kapatılabilir.
-Normal çalışma `COMPLETED` ile biter; düşüş/hold kabulü yalnız ilgili
-test komutunda uygulanır.
+`setup.sh --verify-digests` needs NGC access. Without a verified digest in the lock, `setup.sh`
+refuses to build, so this is the one step that cannot be skipped on a fresh machine.
 
-Tek robotlu bu sahnede fizik varsayılan olarak CPU'da, dört worker thread ile çalışır;
-`--device cuda` açık bir geri dönüş seçeneğidir. Fizik zaman adımı 0,005 saniyedir
-(200 Hz simülasyon zamanı); gerçek çalışma hızı terminalde ayrıca raporlanır. Ana RTX
-viewport her sekiz fizik adımında güncellenir. Dış döngü bu render aralığının sahibidir;
-Kit'in iç güncelleme adımı `1`dir. Aynı aralığın iki kat uygulanması render çağrısını
-yaklaşık 40 ms bekletiyor ve RTF'yi yarıya düşürüyordu.
+`setup.sh` itself is idempotent and does the following:
 
-Normal GUI koşusu yalnız ana viewport'u ve `G1 Simulator` kontrol penceresini açar.
-Bu viewer yolu RTX balanced görüntü, DL denoiser ve desteklenen GPU'da DLSS Frame
-Generation kullanır. Terminaldeki FPS gerçek render çağrısıdır; üretilen sunum karelerini
-saymaz. `--head-camera-window` 640×480 sensörü ve GPU-backed ikinci viewport'u açar;
-ek render maliyeti beklenir. `Reset Robot` başlangıç pozunu geri yükler ve timeline'ı
-paused bırakır. Koşuyu `Ctrl-C` veya pencereyi kapatarak durdur.
+1. preflight: OS/arch, free disk, NVIDIA driver against the tested baseline, Docker,
+   Compose v2, NVIDIA Container Toolkit, daemon reachability, host `input` group;
+2. renders `versions.lock.yaml` into `.generated/versions.env`;
+3. creates `.env` from `.env.example` on the first run and creates the data root directories.
+   An existing `.env` is never overwritten;
+4. builds the `dev` image and starts the `humanoid-lab-dev` container;
+5. runs the short smoke test. A failing smoke test does not abort setup — it is reported, and
+   `./dev.sh smoke` can be re-run afterwards.
 
-Simülatör özel MP4, trajectory, JSONL veya provenance kaydı üretmez. Passive-fall
-kabulü kamera boyutunu ve değişen frame sayısını bounded sayaç/hash ile ölçer;
-görüntü dizisini RAM'de veya diskte biriktirmez. Performans değerleri çalışırken
-terminale saniyede bir yazılır.
+The run is logged to `setup.log` and `hersey.log`.
 
-GUI komutları çağıran terminalin canlı `DISPLAY` değerini kullanır. `.env` içindeki
-display artık mevcut değilse ve hostta tek bir aktif X11 socket'i varsa bu display
-otomatik seçilir; böylece masaüstünün yeniden girişten sonra `:0` ile `:1` arasında
-değişmesi Isaac penceresini sessizce bozmaz.
-
-Raider'da Isaac Sim 5.1 bazen `simulation_app.close()` çağrısından dönmez. CLI GUI'de
-en fazla 2 saniye (headless koşuda 20 saniye) bekler; süre aşılırsa
-`forced_exit=true` yazarak yalnız kendi sürecini sonlandırır. `dev.sh` ayrıca tekil
-çalışma kilidi ve PID/process-group temizliği uygular; kesilen SSH/terminal istemcisi
-arka planda Isaac süreci bırakamaz. Bu, graceful Kit shutdown kanıtı değildir.
-
-### Isaac Lab demolari
-
-G1 disindaki hazir demolar icin `isaac-demo` kullan; ham container kabugunda
-`python` calistirmak gerekli Kit ortamini kurmaz:
+Models are a separate, revision-pinned step:
 
 ```bash
-./dev.sh isaac-demo quadrupeds.py
-./dev.sh isaac-demo bipeds.py
+./dev.sh hf-login      # once, if you need gated Hugging Face repositories; the token stays in the host HF cache
+./dev.sh fetch-models  # pinned revisions into $HUMANOID_DATA_ROOT/models, plus MODEL_PROVENANCE.json with sha256 per file
 ```
 
-Bu komut container'da varsayilan olarak `--headless` ekler. Uzak goruntu icin
-once `./scripts/install-isaac-webrtc-client.sh` ile istemciyi kur, demoyu
-`--livestream 2` ile baslat ve `./dev.sh webrtc-client` ile baglan. Dogrudan X11
-penceresi (`--gui`) deneyseldir.
+`nvidia/Cosmos-Reason2-2B`, the GR00T N1.7 backbone, is gated: accept its license on Hugging Face
+before `fetch-models`, otherwise the GR00T checks stay `BLOCKED`.
 
-> **Raider notu (2026-09-04):** Isaac Sim 5.1'in resmi `runheadless.sh` streaming
-> uygulamasi bu RTX 5090 Laptop sisteminde `librtx.scenedb.plugin.so` icinde
-> cokuyor. Bu nedenle `isaac-stream` komutu, surucu/Isaac Sim uyumlulugu
-> duzeltilene kadar korumali olarak basarisiz olur ve crash dongusu baslatmaz.
+## Everyday commands
 
-## 3b. SONIC ile Isaac G1
+All commands run from the repo root. They start the container if it is not running.
 
-Isaac'teki G1'i resmî SONIC kontrolcüsüne bağlar. Upstream decoder, model ve
-planner semantiği korunur; pinli deployment binary'sinin tek kaynak farkı,
-simülasyon DDS'ini gerçek robot domain'inden ayıran domain `42` değişikliğidir.
-Isaac yalnız robotun Unitree DDS topiklerini konuşur. Kontrolcü ayrı bir
-terminalde, resmî inference'taki gibi planner ve klavye ile açılır.
+| Command | What it does |
+| --- | --- |
+| `./dev.sh` | interactive shell in the container, no environment pre-selected |
+| `./dev.sh isaac` | shell with the `isaac-sonic` environment active |
+| `./dev.sh sonic-sim` | shell with the `sonic-sim` environment (MuJoCo + G1) |
+| `./dev.sh groot` | shell with the `groot-n17` environment |
+| `./dev.sh isaac-g1 dex3\inspire-ftp\no_hands` | G1 on Isaac Sim, see below |
+| `./dev.sh isaac-g1-sonic dex3\inspire-ftp\no_hands` | G1 on Isaac Sim, publishing robot state to SONIC over DDS |
+| `./dev.sh sonic-controller` | the official SONIC controller, run in a second terminal |
+| `./dev.sh isaac-g1-test-controller dex3` | G1 driven by the deterministic scripted test controller |
+| `./dev.sh isaac-demo <demo.py>` | an Isaac Lab demo from `/opt/src/isaaclab/scripts/demos` |
+| `./dev.sh doctor` | full host + container report, written to `$HUMANOID_DATA_ROOT/diagnostics/` |
+| `./dev.sh smoke` | in-container environment, asset and model checks |
+| `./dev.sh sync` | re-provisions the environment whose lock or pinned source changed |
+| `./dev.sh fetch-models` | downloads the pinned model revisions | |
+| `./dev.sh groot-finetune-smoke [pipeline\|pretrained\|eval]` | optional GR00T N1.7 fine-tuning smoke (two optimizer steps, then open-loop eval) |
+| `./dev.sh hf-login` | Hugging Face login for gated repositories |
+| `./dev.sh stop` | stops the container, keeps the data root |
+| `./dev.sh rebuild` | rebuilds the image with the same lock, recreates the container |
+
+Inside a container shell, `use-isaac-sonic`, `use-sonic-sim`, `use-groot` and `use-none` switch
+environments, and `show-env` prints the active one and its Python.
+
+
+## Repository layout
+
+| Path | Contents |
+| --- | --- |
+| `setup.sh`, `dev.sh`, `doctor.sh` | host entry points: provisioning, container lifecycle and runs, diagnostics |
+| `compose.yaml`, `Dockerfile`, `containers/` | image and container definition, entrypoint, environment selectors, venv provisioning |
+| `configs/profiles/` | G1 run profiles: robot asset, hands, camera, controller, support band |
+| `src/humanoid_lab/` | simulator service, profile and command contracts, controller bridge |
+| `scripts/` | Isaac G1 runner, model fetching, lock rendering, checks |
+| `locks/` | frozen `uv` locks for the three Python environments |
+| `tests/` | `unittest` modules and shell checks |
+| `docs/` | SONIC-Isaac link notes with the measured acceptance results |
+| `versions.lock.yaml` | single source of every version pin |
+
+## G1 on Isaac Sim
 
 ```bash
-./dev.sh isaac-g1-sonic dex3     # 1. terminal: Isaac + robot (ayrica inspire-ftp)
-./dev.sh sonic-controller        # 2. terminal: resmî SONIC (planner + klavye)
+./dev.sh isaac-g1 dex3          # Dex3 hands
+./dev.sh isaac-g1 inspire-ftp   # Inspire FTP hands
+./dev.sh isaac-g1 no_hands      # 29-DoF body only
 ```
 
-SONIC terminalinde `]` kontrolü başlatır, `T` referans hareketi çalar,
-`N`/`P` hareket değiştirir, `O` acil durdurur. Ayrıntı, kabul ölçütleri ve
-ölçülen davranış: `docs/sonic-isaac.md`.
+The profile selects the robot asset, the hands and the head camera. The Dex3 variant uses the pinned
+SONIC G1 USD (14 hand DoF), the Inspire variant the Isaac Lab asset (24 hand DoF), and `no_hands` is
+the 29-DoF body alone. Hand joints are passive unless a controller drives them: on the SONIC path the
+Dex3 profile applies the hand commands it receives over DDS, while the Inspire variant deliberately
+leaves the hands passive.
 
-## 4. Modeller (bir kez)
+- `dex3` needs the Dex3 USD materialized into the data root. `./dev.sh sync` does that and verifies
+  it by content hash; without it the run fails and the smoke test reports it.
+- The GUI opens the main RTX viewport and a `G1 Simulator` panel. `Reset Robot` restores the initial
+  pose and leaves the timeline paused. Stop the run with `Ctrl-C` or by closing the window.
+- Normal runs have no time limit; without an explicit duration they stay alive until stopped.
+
+Flags, passed after the profile:
+
+| Flag | Effect |
+| --- | --- |
+| `--headless` | no GUI and no X11 requirement |
+| `--head-camera-window` | opens the 640x480 head camera in a second GPU viewport; costs render throughput |
+| `--duration SECONDS` | bounded run |
+| `--device {cpu,cuda}` | overrides the profile device; profiles default to CPU |
+| `--controller none` | disables the controller a profile declares, falling back to passive |
+| `--test {passive-fall\|controlled-hold\|controller-hold}` | one of the acceptance modes below |
+
+Physics runs at 200 Hz (`physics_dt` 0.005 s) on four PhysX threads, with the main viewport rendered
+every eighth physics step. Only one Isaac G1 run can be active at a time; a second one exits with an
+error instead of competing for the GPU.
+
+## Isaac and SONIC in two terminals
+
 ```bash
-./dev.sh hf-login       # HF token host cache'ine yazilir (image'e/.env'e girmaz)
-./dev.sh fetch-models            # pinli model revision'lari + MODEL_PROVENANCE.json (sha256)
+# terminal 1 — Isaac Sim: scene, physics loop, robot state on DDS, incoming joint commands applied
+./dev.sh isaac-g1-sonic dex3
+
+# terminal 2 — the official SONIC deployment: planner and keyboard on this terminal
+./dev.sh sonic-controller
 ```
 
-Not: GR00T N1.7 backbone'u `nvidia/Cosmos-Reason2-2B` gated — once HF'de lisansi kabul et.
+Keys in the SONIC terminal: `]` starts control, `T` plays the reference motion, `N` and `P` change
+motion, `R` resets, `O` is the emergency stop.
 
-GR00T veri formati, embodiment config'i, iki-adim `pipeline` / `pretrained` /
-`eval` smoke komutlari ve 40 GiB VRAM siniri `scripts/groot-finetune-smoke.sh`
-icinde ve git gecmisindeki fine-tuning rehberinde belgelidir. Bu GPU/data
-maliyetli akis `setup.sh` ve normal `./dev.sh smoke` icinde otomatik calismaz.
-Bu hattin SONIC/SONIC-Isaac entegrasyonu Kapi 3 kapsamindadir; Kapi 1 yalniz
-simulatoru kapsar.
+The order does not matter: if SONIC starts first it waits with `LowState is not available` until
+Isaac comes up. DDS is loopback-only on domain `42`, so nothing reaches a real robot network. The
+robot hangs from a pelvis band until the first valid controller command, at most `20 s`, and the
+release is logged as `isaac_g1_support_released`. If commands stop for longer than the 0.25 s
+command TTL, the robot goes passive and falls. Running `./dev.sh sonic-controller` again replaces
+the previous Isaac-targeted controller instead of leaving two of them running.
 
-## 5. Dogrulama / tanalama
+`Isaac` publishes `LowState` and applies `BodyJointCommand`; it contains no policy. `docs/sonic-isaac.md`
+documents the link in detail, including the measured acceptance results and the known limits.
 
-```bash
-./doctor.sh                 # host'tan tam rapor (${HUMANOID_DATA_ROOT}/diagnostics/)
-./scripts/verify-pins.sh    # lock pin'lerini upstream'e karsi dogrula
-./scripts/ci-lint.sh        # bash/python/yaml statik kontroller
-```
+## 
+## Data root, mounts and environments
 
-## 6. Container icinde environment secicileri
+`HUMANOID_DATA_ROOT` in `.env` defaults to `./data` and holds everything persistent:
+`datasets`, `checkpoints`, `models`, `hf-cache`, `uv-cache`, `venvs`, `isaac-cache`, `outputs`,
+`diagnostics`, `rosbags`, `runtime`. It is bind-mounted into the container as `/data`, `/cache`,
+`/outputs` and `/opt/venvs`. The repository itself is mounted at `/workspace/humanoid-lab`.
 
-```bash
-use-isaac-sonic | use-sonic-sim | use-groot | use-none
-show-env            # aktif env + python
-```
+The Python environments (`isaac-sonic`, `sonic-sim`, `groot-n17`) live in the data root, not in the
+image. Each is fingerprinted by its lock file plus the pinned upstream commits, and re-provisioned
+only when that fingerprint changes, so day-to-day code edits never rebuild an environment. A new
+dependency must be added to the lock and applied with `./dev.sh sync`.
 
-## Surum kilidi
+> `/opt/venvs` and the Isaac cache directories are writable host bind mounts. Installing packages
+> manually inside the container persists on the host and breaks the lock/fingerprint expectation;
+> such an environment is not repaired automatically. Use `./dev.sh sync` after a lock or source
+> change and `./dev.sh rebuild` after an image change, then re-check with `./dev.sh doctor` and
+> `./dev.sh smoke`.
 
-Tum surumlerin tek kaynagi `versions.lock.yaml`'dir; `scripts/render-lock-env.py`
-bunu `.generated/versions.env`'e render eder, Compose/Dockerfile/scriptler yalnizca
-oradan okur. Dogrulanmamis pinler (`required: false`) setup'i bloklar. Kalici veri
-koku `HUMANOID_DATA_ROOT`'tur; varsayilan `.env` degeri repo icindeki `data/`
-dizinidir. Bu dizin Compose ile container'daki model, cache, tanilama ve cikti
-dizinlerine bind-mount edilir.
 
-Venv'ler de `${HUMANOID_DATA_ROOT}/venvs/` altinda kalicidir. Container baslarken
-kilit ve pinli kaynak commit'i kontrol edilir; yalnizca farkli olan environment
-`uv sync --frozen` ile guncellenir. Bu nedenle gunluk kod veya shell betigi
-degisiklikleri venv'leri yeniden kurmaz; yeni bir Python bagimliligi ise lock'a
-eklenmeden kalici hale gelemez.
-
-Bir ortamin lock dosyasini degistirdikten sonra `./dev.sh sync` calistir. Bu,
-imaji yeniden kurmadan yalniz degisen environment'i gunceller; indirilen
-paketler `${HUMANOID_DATA_ROOT}/uv-cache/` icinde yeniden kullanilmak uzere kalir.
-
-> **Kalici mount uyarisi:** `/opt/venvs` ile Isaac cache dizinleri yazilabilir
-> host bind-mount'laridir. Container icinde bunlari elle degistirmek veya `pip`
-> ile paket eklemek bu degisiklikleri kalicilastirir ve lock/fingerprint
-> beklentisini bozabilir. Lock veya kaynak degisikliginde `./dev.sh sync`, imaj
-> degisikliginde `./dev.sh rebuild` kullan; ardindan `./dev.sh doctor` ve
-> `./dev.sh smoke` ile dogrula. Ayni fingerprint altindaki elle bozulmus bir
-> ortam otomatik olarak onarilmaz.
