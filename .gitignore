@@ -35,4 +35,6 @@ docs/*
 !docs/sonic-isaac.md
 # buyuk model dosyalari
 .pretrained_checkpoints/
+# vendored ucuncu parti kaynak (kendi .git'ini tasir)
+third_party/
 AGENTS.md
