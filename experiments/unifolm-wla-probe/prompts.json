@@ -1,0 +1,20 @@
+[
+  {"id": "match_instruction", "family": "in_distribution", "prompt": "Pick up the {fruit} and place it on the plate."},
+  {"id": "mismatch_instruction", "family": "in_distribution", "prompt": "Pick up the {other_fruit} and place it on the plate."},
+  {"id": "push_left", "family": "ood_language", "prompt": "Push the {fruit} to the left."},
+  {"id": "do_not_touch", "family": "ood_language", "prompt": "Do not touch the {fruit}."},
+  {"id": "absent_object", "family": "ood_language", "prompt": "Pick up the cup and place it on the plate."},
+  {"id": "bbox", "family": "grounding", "prompt": "Locate the {fruit} in the image and output its bounding box."},
+  {"id": "point", "family": "grounding", "prompt": "Point to the {fruit}."},
+  {"id": "grasp_point", "family": "grounding", "prompt": "Where should the robot grasp the {fruit}? Give the grasp point."},
+  {"id": "place_point", "family": "grounding", "prompt": "Where should the {fruit} be placed?"},
+  {"id": "trajectory", "family": "action", "prompt": "Plan the end-effector trajectory to pick up the {fruit} and place it on the plate."},
+  {"id": "action_tokens", "family": "action", "prompt": "Output the discrete action tokens (end-effector, hand, lower body) for picking up the {fruit}."},
+  {"id": "eef_elicit", "family": "action_elicit", "prompt": "Pick up the {fruit}. End-effector action tokens: <|EEF_START|>"},
+  {"id": "low_elicit", "family": "action_elicit", "prompt": "Pick up the {fruit}. Lower-body action tokens: <|LOW_START|>"},
+  {"id": "hand_elicit", "family": "action_elicit", "prompt": "Pick up the {fruit}. Hand action tokens: <|HAND_START|>"},
+  {"id": "future_region", "family": "dynamic_region", "prompt": "Which parts of the image will change when the robot picks up the {fruit}?"},
+  {"id": "future_region_seg", "family": "dynamic_region_elicit", "prompt": "Pick up the {fruit}. Future dynamic region: <seg_begin>"},
+  {"id": "next_action", "family": "reasoning", "prompt": "What is the next action the robot should take? Describe it briefly."},
+  {"id": "free_description", "family": "reasoning", "prompt": "Describe the scene and the manipulation task that is possible here."}
+]
