@@ -54,7 +54,7 @@ function init(config) {
     const label = document.createElement("span");
     label.textContent =
       frame.fruit && frame.episode !== null && frame.episode !== undefined
-        ? `${frame.fruit} · ep${frame.episode}`
+        ? `${frame.fruit} #${frame.episode}`
         : frame.fruit || frame.id;
     btn.title = frame.id;
     btn.append(img, label);

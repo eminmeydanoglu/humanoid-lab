@@ -228,6 +228,20 @@ Four findings that shape how this can be used:
   under restriction (`169, 239, 195, …`) than under priming (`159, 6, 164, …`), so
   bin values depend on the conditioning path and any calibration must fix that path.
 
+## Web UI
+
+`webapp/` holds a small local page over the same models: pick one of the extracted
+frames, type a prompt, read the answer, and in point mode see the coordinates the
+model printed drawn back onto the photo. See `webapp/README.md` for how to run it and
+the Tailscale URLs. Setting it up produced one real finding worth keeping:
+
+**ER-1 answers grounding prompts in a 0-1000 normalised grid, not in frame pixels.**
+Checked on four frames against an independent visual estimate, the mapped answers
+land within 2-13 px of the object centre; the same numbers read as pixels fall outside
+the 640x480 frame in three of the four cases. Details, the phrasing comparison
+(`Point to the apple.` returns no numbers at all) and the grasp-point drift are in
+`results/point_calibration.md`.
+
 ## Open questions
 
 1. **Bin to coordinate mapping is undocumented.** `POS`/`ROT`/`HAND`/`LOW`/`seg`
