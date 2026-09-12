@@ -1,0 +1,3 @@
+[submodule "third_party/GRAIL"]
+	path = third_party/GRAIL
+	url = https://github.com/NVlabs/GRAIL.git
