@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UnifoLM ER oynatıcı</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>UnifoLM ER oynatıcı</h1>
+  <div class="status" id="status">durum yükleniyor…</div>
+</header>
+
+<main>
+  <section class="panel">
+    <h2><span class="step">1</span> Fotoğraf</h2>
+    <p class="hint">G1 kafa kamerasından alınmış hazır kareler.</p>
+    <div class="grid" id="frameGrid"></div>
+  </section>
+
+  <div class="col">
+  <section class="panel">
+    <h2><span class="step">2</span> Model ve prompt</h2>
+
+    <div class="row">
+      <label>Model
+        <select id="model"></select>
+      </label>
+      <label class="tokens">En fazla token
+        <input id="maxTokens" type="number" min="8" max="1024" step="8" value="96">
+      </label>
+    </div>
+
+    <div class="seg" id="modeSeg" role="tablist">
+      <button type="button" data-mode="free" class="active">Serbest cevap</button>
+      <button type="button" data-mode="point">Point modu</button>
+    </div>
+
+    <div id="freeBlock">
+      <label>Prompt (İngilizce)
+        <textarea id="prompt" rows="3" placeholder="Pick up the apple and place it on the plate."></textarea>
+      </label>
+    </div>
+
+    <div id="pointBlock" hidden>
+      <div class="row">
+        <label>Hedef nesne
+          <input id="target" type="text" placeholder="apple">
+        </label>
+        <label>Şablon
+          <select id="template"></select>
+        </label>
+      </div>
+      <label>Ölçek kipi
+        <select id="scale">
+          <option value="norm1000">0-1000 normalize (ER-1'in kullandığı ızgara)</option>
+          <option value="raw">raw (sayı = piksel)</option>
+          <option value="auto">auto (kareye sığmıyorsa normalize et)</option>
+          <option value="half">sayı / 2</option>
+        </select>
+      </label>
+      <p class="hint">Kalibrasyon: 4 karede modelin verdiği sayı 0-1000 kabul edilince, bağımsız görsel tahminle 2-13 piksel örtüşüyor. Ham sayılar her zaman ayrıca listelenir.</p>
+      <p class="hint">Modele giden prompt: <code id="promptPreview"></code></p>
+    </div>
+
+    <details>
+      <summary>Gelişmiş</summary>
+      <label>Assistant öneki (boş bırak = normal mod)
+        <input id="prefix" type="text" placeholder="<|EEF_START|>">
+      </label>
+      <p class="hint">Boşken model serbest İngilizce cevap verir. Bir action token'ı yazarsan model yapısal token dizisi üretmeye zorlanır (deney amaçlı).</p>
+    </details>
+
+    <button id="run" type="button">Çalıştır</button>
+    <p class="hint" id="runHint"></p>
+  </section>
+
+  <section class="panel">
+    <h2><span class="step">3</span> Sonuç</h2>
+    <p class="hint" id="resultEmpty">Henüz çalıştırılmadı.</p>
+    <div id="resultBody" hidden>
+      <div class="meta" id="meta"></div>
+      <div class="canvasWrap" id="canvasWrap" hidden>
+        <img id="resultImage" alt="seçilen kare">
+        <svg id="overlay" preserveAspectRatio="none"></svg>
+      </div>
+      <pre id="answer"></pre>
+      <div id="markerList"></div>
+      <div id="warnings"></div>
+      <div class="sentPrompt"><span>Modele giden prompt</span><code id="sentPrompt"></code></div>
+    </div>
+  </section>
+  </div>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
