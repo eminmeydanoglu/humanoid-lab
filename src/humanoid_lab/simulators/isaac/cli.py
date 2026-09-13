@@ -29,6 +29,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="open a second GPU viewport for the head camera (costs render throughput)",
     )
+    parser.add_argument(
+        "--replay",
+        metavar="SEQUENCE_KEY",
+        help="kinematically replay one GRAIL pickup_table motion instead of simulating",
+    )
+    parser.add_argument("--replay-data-root", type=Path, help="GRAIL pickup_table directory")
+    parser.add_argument("--replay-output-dir", type=Path, help="replay output directory")
     from isaaclab.app import AppLauncher
 
     AppLauncher.add_app_launcher_args(parser)
@@ -42,6 +49,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     # Acceptance tests remain bounded when their caller omits --duration.
     if args.duration is None and args.test:
         args.duration = 12.0
+    if args.replay and (args.test or args.duration is not None):
+        parser.error("--replay cannot be combined with --test or --duration")
     return args
 
 
@@ -55,19 +64,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     simulation_app = launcher.app
     exit_code = 2
     try:
-        from .service import SimulatorService
-
         # The profile owns the physics device; --device only wins when passed explicitly.
         profile = RunProfile.load(args.profile).with_device(device_override)
-        service = SimulatorService(
-            profile,
-            simulation_app,
-            duration=args.duration,
-            show_ui=not args.headless,
-            show_head_camera=args.head_camera_window,
-            test_mode=args.test,
-            controller_provider=args.controller,
-        )
+        if args.replay:
+            from .replay import DEFAULT_DATA_ROOT, DEFAULT_OUTPUT_ROOT, ReplayService, load_sequence
+
+            sequence = load_sequence(args.replay, args.replay_data_root or DEFAULT_DATA_ROOT)
+            service = ReplayService(
+                profile,
+                simulation_app,
+                sequence,
+                output_dir=args.replay_output_dir or DEFAULT_OUTPUT_ROOT / args.replay,
+                show_ui=not args.headless,
+            )
+        else:
+            from .service import SimulatorService
+
+            service = SimulatorService(
+                profile,
+                simulation_app,
+                duration=args.duration,
+                show_ui=not args.headless,
+                show_head_camera=args.head_camera_window,
+                test_mode=args.test,
+                controller_provider=args.controller,
+            )
         summary = service.run()
         print(json.dumps(summary, indent=2, sort_keys=True), flush=True)
         exit_code = 0 if summary["result"] in {"PASS", "COMPLETED"} else 1

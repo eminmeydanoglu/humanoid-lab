@@ -299,19 +299,35 @@ case "${1:-}" in
   groot)      shell_env use-groot ;;
   isaac-g1)
     profile="${2:-}"
+    replay_args=()
     case "$profile" in
-      no_hands) profile_file=configs/profiles/isaac-g1-no_hands.json ;;
-      inspire-ftp) profile_file=configs/profiles/isaac-g1-inspire-ftp.json ;;
-      dex3) profile_file=configs/profiles/isaac-g1-dex3.json ;;
-      *) echo "usage: $0 isaac-g1 {no_hands|inspire-ftp|dex3} [--test passive-fall] [--headless] [--head-camera-window] [--duration SECONDS]" >&2; exit 2 ;;
+      grail-replay)
+        [ "$#" -ge 3 ] || { echo "usage: $0 isaac-g1 grail-replay <sequence-key> [--headless] [--replay-data-root PATH] [--replay-output-dir PATH]" >&2; exit 2; }
+        profile_file=configs/profiles/isaac-g1-dex3.json
+        replay_args=(--replay "$3")
+        extra=("${@:4}")
+        ;;
+      no_hands|inspire-ftp|dex3)
+        case "$profile" in
+          no_hands) profile_file=configs/profiles/isaac-g1-no_hands.json ;;
+          inspire-ftp) profile_file=configs/profiles/isaac-g1-inspire-ftp.json ;;
+          dex3) profile_file=configs/profiles/isaac-g1-dex3.json ;;
+        esac
+        extra=("${@:3}")
+        ;;
+      *)
+        echo "usage: $0 isaac-g1 {no_hands|inspire-ftp|dex3} [--test passive-fall] [--headless] [--head-camera-window] [--duration SECONDS]" >&2
+        echo "       $0 isaac-g1 grail-replay <sequence-key> [--headless] [--replay-data-root PATH] [--replay-output-dir PATH]" >&2
+        exit 2
+        ;;
     esac
     headless=0
-    for arg in "${@:3}"; do
+    for arg in "${extra[@]}"; do
       [ "$arg" != "--headless" ] || headless=1
     done
     [ "$headless" -eq 1 ] || require_x11_display
     up_once
-    run_isaac_g1 "$profile_file" "${@:3}"
+    run_isaac_g1 "$profile_file" "${replay_args[@]}" "${extra[@]}"
     ;;
   isaac-g1-test-controller)
     [ "${2:-}" = "dex3" ] || { echo "usage: $0 isaac-g1-test-controller dex3 [--headless] [--head-camera-window] [--duration SECONDS]" >&2; exit 2; }

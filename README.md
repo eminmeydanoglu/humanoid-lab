@@ -99,6 +99,26 @@ motion, `R` resets, `O` is the emergency stop. `Enter` to switch to planner to t
 
 
 
+## GRAIL kinematic replay
+
+Open any valid motion of the local GRAIL `pickup_table` release in Isaac and play the recorded
+robot and object trajectory. No controller, DDS or SONIC is involved: gravity is off, nothing
+drives the robot, and only the recorded state is written. Each 25 Hz source interval gets one
+interpolated midpoint, so the original keyframes are preserved while hands render at 50 Hz.
+
+```bash
+./dev.sh isaac-g1 grail-replay pickup_table__apple_0__000            # GUI: external + head camera viewports
+./dev.sh isaac-g1 grail-replay pickup_table__apple_0__000 --headless # writes external.mp4, head.mp4, manifest.json
+```
+
+The sequence key alone selects the motion, its object USD and textures, and the metadata table.
+Headless output goes to `/outputs/grail-replay/<sequence-key>/`; `--replay-data-root` and
+`--replay-output-dir` override the defaults. Missing or malformed dataset files fail the run.
+
+Acceptance: `tests/test_grail_replay_clip.sh [sequence-key]`. Unit tests:
+`PYTHONPATH=src python3 -m unittest tests.simulator.test_grail_replay`.
+
+
 ## GRAIL pickup_table prompt layer
 
 Every GRAIL source trajectory gets exactly one English instruction, derived from its file stem
