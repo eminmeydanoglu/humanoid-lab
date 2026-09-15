@@ -33,6 +33,7 @@ docs/
 !docs/
 docs/*
 !docs/sonic-isaac.md
+!docs/sonic-pilots.md
 # buyuk model dosyalari
 .pretrained_checkpoints/
 AGENTS.md

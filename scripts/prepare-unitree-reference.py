@@ -1,90 +1,83 @@
 #!/usr/bin/env python3
-"""Prepare one Unitree Dex3 episode for SONIC direct-reference validation."""
+"""Prepare one Unitree Dex3 episode for SONIC direct-reference validation.
+
+Thin wrapper over the shared pilot library: it writes the canonical 50 Hz
+reference (official IsaacLab joint order), the encoder observation and the QC
+report into ``--output``.  The lower body comes from the static standing
+completion policy, not from a captured IDLE time series — see
+docs/sonic-pilots.md; use ``./dev.sh sonic-pilot --pilot unitree`` for the
+timestamped pilot layout.
+"""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import subprocess
+import sys
 from pathlib import Path
 
-import numpy as np
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
 
-from humanoid_lab.controllers.sonic import SONIC_REFERENCE_JOINT_ORDER
-from humanoid_lab.datasets.sonic.adapters.unitree_dex3 import load_episode
+from humanoid_lab.datasets.sonic.pilot import (  # noqa: E402
+    PilotSpec,
+    evaluate_episode_qc,
+    extract_source_video,
+    map_source_episode,
+    write_canonical_reference,
+)
+from humanoid_lab.datasets.sonic.production import write_encoder_input  # noqa: E402
+from humanoid_lab.datasets.sonic.provenance import sha256_file  # noqa: E402
+from humanoid_lab.datasets.sonic.reference import deployment_standing_pose, load_standing_pose  # noqa: E402
+
+DEFAULT_LIMITS = ROOT / "configs/datasets/sonic/g1_joint_limits.json"
 
 
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser()
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("dataset", type=Path)
     parser.add_argument("--episode", type=int, default=0)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--idle-reference", type=Path, required=True)
+    parser.add_argument("--standing-reference", type=Path,
+                        help="captured single standing frame; defaults to the deployment's standing pose")
+    parser.add_argument("--limits", type=Path, default=DEFAULT_LIMITS)
+    parser.add_argument("--no-video", action="store_true")
     args = parser.parse_args()
-    args.output.mkdir(parents=True, exist_ok=False)
-    episode = load_episode(args.dataset, args.episode, args.idle_reference)
+    if args.output.exists():
+        print(f"error: {args.output} already exists", file=sys.stderr)
+        return 2
 
-    reference_dir = args.output / "reference"
-    reference_dir.mkdir()
-    np.savetxt(reference_dir / "timestamps.csv", episode.timestamps, delimiter=",")
-    np.savetxt(reference_dir / "joint_pos.csv", episode.joint_pos, delimiter=",")
-    np.savetxt(reference_dir / "joint_vel.csv", episode.joint_vel, delimiter=",")
-    np.savetxt(reference_dir / "body_pos.csv", episode.body_pos, delimiter=",")
-    np.savetxt(reference_dir / "body_quat.csv", episode.body_quat_wxyz, delimiter=",")
-    (reference_dir / "metadata.txt").write_text("SONIC v1.1 IDLE trajectory + Unitree absolute arm trajectory\n", encoding="utf-8")
-    idle_provenance = json.loads((args.idle_reference / "provenance.json").read_text())
-    provenance = {
-        "composition": "SONIC IDLE time series with absolute Unitree arm replacement",
-        "body_joint_order": list(SONIC_REFERENCE_JOINT_ORDER),
-        "body_joint_order_contract": "official SONIC reference / IsaacLab",
-        "preserved_idle_leg_waist_names": [
-            name for name in SONIC_REFERENCE_JOINT_ORDER
-            if "hip" in name or "knee" in name or "ankle" in name or "waist" in name
-        ],
-        "idle_reference_provenance": idle_provenance,
+    standing = load_standing_pose(args.standing_reference) if args.standing_reference else deployment_standing_pose()
+    spec = PilotSpec("unitree", args.dataset, args.episode, f"unitree_{args.dataset.name}_ep{args.episode:03d}")
+    build = map_source_episode(spec, standing)
+    episode = build.episode
+    args.output.mkdir(parents=True)
+    write_canonical_reference(args.output, build)
+    encoder_input = write_encoder_input(args.output, episode)
+    observation = encoder_input.observation
+    clamp = encoder_input.future_clamp_fraction
+    video = extract_source_video(spec, args.output / "source.mp4") if not args.no_video else None
+    qc = evaluate_episode_qc(build, spec, standing, observation=observation, clamp_fraction=clamp,
+                     limits_path=args.limits, layout_path=None)
+    manifest = {
+        "dataset": args.dataset.name,
+        "episode_index": args.episode,
+        "frames": int(len(episode.timestamps)),
+        "duration_s": float(episode.timestamps[-1] - episode.timestamps[0]),
+        "lookahead_frames": 46,
+        "source_semantics": "same-row desired action",
+        "source_video": video,
+        "source_video_sha256": None if video is None else sha256_file(args.output / "source.mp4"),
+        "qc_result": qc["episode_result"],
+        "qc": qc,
+        "provenance": build.provenance,
+        "human_review": "pending_human_review",
     }
-    (reference_dir / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
-
-    np.savez_compressed(args.output / "reference.npz", timestamps=episode.timestamps,
-        joint_pos=episode.joint_pos, joint_vel=episode.joint_vel,
-        body_quat_wxyz=episode.body_quat_wxyz, body_pos=episode.body_pos,
-        left_hand_joints=episode.left_hand_joints, right_hand_joints=episode.right_hand_joints)
-
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-    table = pa.table({"timestamp": episode.timestamps, "frame_index": np.arange(len(episode.timestamps)),
-        "joint_pos": episode.joint_pos.tolist(), "joint_vel": episode.joint_vel.tolist(),
-        "body_quat_wxyz": episode.body_quat_wxyz.tolist(), "left_hand_joints": episode.left_hand_joints.tolist(),
-        "right_hand_joints": episode.right_hand_joints.tolist()})
-    pq.write_table(table, args.output / "reference.parquet")
-
-    meta_files = sorted((args.dataset / "meta/episodes").glob("chunk-*/*.parquet"))
-    rows = []
-    for path in meta_files:
-        rows.extend(row for row in pq.read_table(path).to_pylist() if int(row["episode_index"]) == args.episode)
-    row = rows[0]
-    video = args.dataset / f"videos/observation.images.cam_left_high/chunk-{int(row['videos/observation.images.cam_left_high/chunk_index']):03d}/file-{int(row['videos/observation.images.cam_left_high/file_index']):03d}.mp4"
-    subprocess.run(["ffmpeg", "-y", "-ss", str(row["videos/observation.images.cam_left_high/from_timestamp"]),
-        "-to", str(row["videos/observation.images.cam_left_high/to_timestamp"]), "-i", str(video),
-        "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(args.output / "source.mp4")], check=True,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    manifest = {"dataset": args.dataset.name, "episode_index": args.episode, "source_semantics": "same-row desired action",
-        "source_fps": 30.0, "processed_fps": 50.0, "frames": len(episode.timestamps),
-        "duration_s": float(episode.timestamps[-1] - episode.timestamps[0]), "lookahead_frames": 46,
-        "source_video_sha256": sha256(args.output / "source.mp4"), "human_review": "pending_human_review"}
-    (args.output / "run_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    (args.output / "human_review.json").write_text(json.dumps({"status": "pending_human_review"}, indent=2) + "\n")
-    print(json.dumps(manifest, indent=2))
+    (args.output / "run_manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (args.output / "human_review.json").write_text(json.dumps({"status": "pending_human_review"}, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(manifest, indent=2, sort_keys=True))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

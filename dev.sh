@@ -345,6 +345,18 @@ case "${1:-}" in
     up_once
     run_isaac_g1 configs/profiles/isaac-g1-sonic-fixed-base-dex3.json "${@:3}"
     ;;
+  isaac-g1-kinematic)
+    # Frame-exact replay: no controller, no PD, no support band; every frame is
+    # written straight into the simulation with write_joint_state_to_sim.
+    [ "${2:-}" = "dex3" ] || { echo "usage: $0 isaac-g1-kinematic dex3 --kinematic-reference PATH [--kinematic-label LABEL] [--headless] [--record-video PATH] [--tracking-output PATH] [--metrics-output PATH]" >&2; exit 2; }
+    headless=0
+    for arg in "${@:3}"; do
+      [ "$arg" != "--headless" ] || headless=1
+    done
+    [ "$headless" -eq 1 ] || require_x11_display
+    up_once
+    run_isaac_g1 configs/profiles/isaac-g1-kinematic-dex3.json "${@:3}"
+    ;;
   isaac-g1-sonic)
     profile="${2:-}"
     case "$profile" in
@@ -447,6 +459,45 @@ case "${1:-}" in
     up_once
     DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && cd /workspace/humanoid-lab && PYTHONPATH=src exec python3 scripts/validate-sonic-dataset.py "$@"' sonic-dataset-validate "${@:2}"
     ;;
+  sonic-pilot)
+    # One user-facing build command: source mapping/QC runs in isaac-sonic and
+    # launches the sole production encoder path in the pinned sonic-sim venv.
+    up_once
+    DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && cd /workspace/humanoid-lab && PYTHONPATH=src exec python3 scripts/prepare-sonic-pilot.py "$@"' sonic-pilot "${@:2}"
+    ;;
+  sonic-encode)
+    up_once
+    DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-sonic-sim && cd /workspace/humanoid-lab && PYTHONPATH=src exec python3 scripts/encode-sonic-episode.py "$@"' sonic-encode "${@:2}"
+    ;;
+  sonic-review)
+    up_once
+    DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && cd /workspace/humanoid-lab && PYTHONPATH=src exec python3 scripts/build-sonic-pilot-review.py "$@"' sonic-review "${@:2}"
+    ;;
+  sonic-review-serve)
+    # Stays on the host: the reviewing browser runs here, so a port published
+    # from inside the container would not be reachable.  HUMANOID_DATA_ROOT is
+    # the host path of the container's /data.  Unlike `python3 -m http.server`
+    # this answers byte ranges, which is what makes the review videos seekable.
+    exec python3 scripts/serve-sonic-review.py \
+      --directory "$HUMANOID_DATA_ROOT/datasets/first_tur_processed" "${@:2}"
+    ;;
+  sonic-convert)
+    up_once
+    DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && cd /workspace/humanoid-lab && PYTHONPATH=src exec python3 scripts/convert-sonic-dataset.py "$@"' sonic-convert "${@:2}"
+    ;;
+  sonic-tests)
+    # Unit tests run in the conversion environment; the ONNX encoder tests need
+    # onnxruntime, which only the simulation environment pins.
+    up_once
+    DC exec -T dev bash -lc '
+      source /opt/humanoid-lab/entrypoint.sh
+      cd /workspace/humanoid-lab
+      set -e
+      use-isaac-sonic
+      PYTHONPATH=src python3 -m pytest tests -q
+      use-sonic-sim
+      PYTHONPATH=src python3 -m unittest discover -s tests -p "test_sonic_encoder_runner.py" -v' sonic-tests "${@:2}"
+    ;;
   fetch-psi0-ckpt)
     up_once
     # Same HF CLI and lock-reading python as fetch-models; the psi0 environment
@@ -485,7 +536,7 @@ case "${1:-}" in
     exit 2
     ;;
   *)
-    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-direct-reference dex3|isaac-g1-sonic-fixed-base dex3|isaac-g1-sonic {dex3|inspire-ftp}|sonic-controller|sonic-dataset-validate|doctor|smoke|groot-finetune-smoke|psi0-smoke|sync|fetch-models|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
+    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-direct-reference dex3|isaac-g1-sonic-fixed-base dex3|isaac-g1-sonic {dex3|inspire-ftp}|sonic-controller|sonic-dataset-validate|sonic-pilot|sonic-encode|sonic-review|sonic-review-serve|sonic-convert|sonic-tests|doctor|smoke|groot-finetune-smoke|psi0-smoke|sync|fetch-models|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
     exit 2
     ;;
 esac
