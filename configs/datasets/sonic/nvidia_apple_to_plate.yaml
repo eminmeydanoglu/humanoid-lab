@@ -1,0 +1,6 @@
+schema_version: 1
+source_fps: 30
+body_action_semantics: desired_joint_positions
+hand_schema: unresolved
+full_action_valid: false
+camera_primary: ego_view

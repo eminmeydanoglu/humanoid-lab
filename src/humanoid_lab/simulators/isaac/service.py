@@ -9,14 +9,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import time
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from ...contracts.commands import CommandError, JointCommand, JointLayout, resolve_layouts
+from ...contracts.commands import CommandError, CompleteRobotCommand, JointCommand, JointLayout, resolve_layouts
 from ...controllers.base import ControllerSource, RobotStateSample
 from ...controllers.factory import build_controller
-from .contracts import RunProfile, TimelineState, quaternion_up_z
+from .contracts import ContractError, RunProfile, TimelineState, quaternion_up_z
 from .maths import quat_to_rotation_vector
 
 PASSIVE = "passive"
@@ -72,6 +73,8 @@ class SimulatorService:
         show_head_camera: bool,
         test_mode: str | None,
         controller_provider: str | None = None,
+        record_video: Any | None = None,
+        trajectory_reference: Any | None = None,
     ) -> None:
         self.profile = profile
         self.app = simulation_app
@@ -80,6 +83,8 @@ class SimulatorService:
         self.show_head_camera = show_head_camera
         self.test_mode = test_mode
         self.controller_provider = controller_provider
+        self.record_video = record_video
+        self.trajectory_reference = trajectory_reference
         self.state = TimelineState.STARTING
         self.tick = 0
         self.episode_id = 0
@@ -109,6 +114,9 @@ class SimulatorService:
         self._camera_shape: list[int] | None = None
         self._camera_changed_frames = 0
         self._previous_camera_digest: bytes | None = None
+        self._video_process: subprocess.Popen[bytes] | None = None
+        self._video_frames = 0
+        self._video_error: str | None = None
         self._controller: ControllerSource | None = None
         self._controller_config: Mapping[str, Any] = profile.controller or {}
         self._body_layout: JointLayout | None = None
@@ -143,6 +151,8 @@ class SimulatorService:
         self._body_tracking_error_sum = 0.0
         self._body_tracking_samples = 0
         self._command_trace: list[dict[str, Any]] = []
+        self._tracking_rows: list[dict[str, Any]] = []
+        self._last_body_command_q: list[float] | None = None
         self._pacing_overruns = 0
         self._hold_initial_q: Any = None
         self._hold_target_q: Any = None
@@ -383,8 +393,8 @@ class SimulatorService:
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(disable_gravity=False),
                 articulation_props=sim_utils.ArticulationRootPropertiesCfg(fix_root_link=False),
             )
-        robot_cfg.spawn.articulation_props.fix_root_link = False
-        robot_cfg.spawn.rigid_props.disable_gravity = False
+        robot_cfg.spawn.articulation_props.fix_root_link = robot_spec.fixed_base
+        robot_cfg.spawn.rigid_props.disable_gravity = robot_spec.fixed_base
         robot_cfg = robot_cfg.replace(
             prim_path="{ENV_REGEX_NS}/Robot",
             init_state=robot_cfg.init_state.replace(pos=robot_spec.initial_position_m),
@@ -422,15 +432,34 @@ class SimulatorService:
                     pos=camera.position_m, rot=camera.rotation_wxyz, convention="world"
                 ),
             )
+            validation_camera = CameraCfg(
+                prim_path="/World/ValidationCamera",
+                update_period=self.profile.camera_update_period,
+                width=960,
+                height=720,
+                data_types=["rgb"],
+                spawn=sim_utils.PinholeCameraCfg(
+                    focal_length=24.0,
+                    horizontal_aperture=20.955,
+                    clipping_range=(0.05, 20.0),
+                ),
+                offset=CameraCfg.OffsetCfg(
+                    pos=(2.6, 2.4, 1.6),
+                    rot=(-0.3610133, -0.1217959, -0.0476202, 0.9233458),
+                    convention="world",
+                ),
+            )
 
         scene_cfg = (
             IsaacG1CameraSceneCfg
-            if self.test_mode is not None or self.show_head_camera
+            if self.test_mode is not None or self.show_head_camera or self.record_video is not None
             else IsaacG1BaseSceneCfg
         )
         return scene_cfg(num_envs=1, env_spacing=2.5, replicate_physics=False)
 
     def _configure_free_base_if_needed(self) -> None:
+        if self.profile.robot.fixed_base:
+            return
         import omni.usd
         from pxr import PhysxSchema, UsdPhysics
 
@@ -622,6 +651,8 @@ class SimulatorService:
         import torch
 
         config = dict(self._controller_config)
+        if self.trajectory_reference is not None:
+            config["reference_path"] = str(self.trajectory_reference)
         provider = str(config.get("provider", "none"))
         if self.controller_provider is not None:
             provider = self.controller_provider
@@ -953,6 +984,8 @@ class SimulatorService:
                 self._apply_body_command(command.body)
                 self._apply_hand_command(command.left_hand, "left")
                 self._apply_hand_command(command.right_hand, "right")
+                if self.tick % 4 == 0:
+                    self._append_tracking_row(command)
         except CommandError as error:
             self._rejected_commands += 1
             self._last_rejection = f"{type(error).__name__}: {error}"
@@ -973,6 +1006,33 @@ class SimulatorService:
         self._applied_ticks += 1
         self._last_applied_sequence = command.sequence
         self._last_controlled_tick = self.tick
+
+    def _append_tracking_row(self, command: CompleteRobotCommand) -> None:
+        row: dict[str, Any] = {
+            "tick": self.tick,
+            "sim_s": self.tick * self.profile.physics_dt,
+            "support_active": self._support_active and self._support_release_tick is None,
+            "body_target": list(command.body.q),
+            "body_measured": [
+                float(value)
+                for value in self._robot.data.joint_pos[0].index_select(0, self._body_index).tolist()
+            ],
+            "root_position": [float(value) for value in self._robot.data.root_pos_w[0].tolist()],
+            "root_quaternion_wxyz": [
+                float(value) for value in self._robot.data.root_quat_w[0].tolist()
+            ],
+            "torso_quaternion_wxyz": [
+                float(value)
+                for value in self._robot.data.body_quat_w[0, self._torso_body_id].tolist()
+            ],
+        }
+        for side, hand_command in (("left", command.left_hand), ("right", command.right_hand)):
+            row[f"{side}_hand_target"] = list(hand_command.q) if hand_command is not None else None
+            row[f"{side}_hand_measured"] = list(self._hand_positions(side))
+        self._tracking_rows.append(row)
+
+    def tracking_rows(self) -> list[dict[str, Any]]:
+        return self._tracking_rows
     def _apply_body_command(self, command: JointCommand) -> None:
         import torch
 
@@ -982,6 +1042,7 @@ class SimulatorService:
         measured_q = self._robot.data.joint_pos[0].index_select(0, self._body_index)
         measured_dq = self._robot.data.joint_vel[0].index_select(0, self._body_index)
         q_command = torch.tensor(command.q, device=self._robot.device, dtype=torch.float32)
+        self._last_body_command_q = [float(value) for value in command.q]
         dq_command = torch.tensor(command.dq, device=self._robot.device, dtype=torch.float32)
         kp = torch.tensor(command.kp, device=self._robot.device, dtype=torch.float32)
         kd = torch.tensor(command.kd, device=self._robot.device, dtype=torch.float32)
@@ -1126,6 +1187,53 @@ class SimulatorService:
         self._camera_frames += 1
         self._camera_shape = [int(value) for value in image.shape]
 
+    def _start_video_recording(self) -> None:
+        if self.record_video is None:
+            return
+        self.record_video.parent.mkdir(parents=True, exist_ok=True)
+        fps = 1.0 / self.profile.camera_update_period
+        self._video_process = subprocess.Popen(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "rawvideo", "-pixel_format", "rgb24",
+                "-video_size", "960x720", "-framerate", f"{fps:g}", "-i", "-",
+                "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-pix_fmt", "yuv420p", str(self.record_video),
+            ],
+            stdin=subprocess.PIPE,
+        )
+
+    def _record_video_frame(self) -> None:
+        if self._video_process is None or self._video_process.stdin is None:
+            return
+        camera = self._scene["validation_camera"].data.output.get("rgb")
+        if camera is None:
+            return
+        try:
+            import numpy as np
+
+            image = camera.detach().cpu().numpy() if hasattr(camera, "detach") else np.asarray(camera)
+            while image.ndim > 3 and image.shape[0] == 1:
+                image = image[0]
+            image = np.ascontiguousarray(image[..., :3].astype(np.uint8, copy=False))
+            if image.shape != (720, 960, 3):
+                raise ValueError(f"validation camera shape is {image.shape}, expected (720, 960, 3)")
+            self._video_process.stdin.write(image.tobytes())
+            self._video_frames += 1
+        except (BrokenPipeError, TypeError, ValueError) as exc:
+            self._video_error = f"{type(exc).__name__}: {exc}"
+
+    def _finish_video_recording(self) -> None:
+        process = self._video_process
+        if process is None:
+            return
+        if process.stdin is not None:
+            process.stdin.close()
+        return_code = process.wait(timeout=30)
+        if return_code != 0 and self._video_error is None:
+            self._video_error = f"ffmpeg exited with {return_code}"
+        self._video_process = None
+
     def _step_physics(self) -> None:
         """Advance physics once, refreshing render and sensors on their own cadence."""
         step_started = time.perf_counter()
@@ -1148,6 +1256,8 @@ class SimulatorService:
         self._perf_step_seconds += time.perf_counter() - step_started
         if rendered and self.test_mode is not None:
             self._consume_head_camera_frame()
+        if rendered and self.record_video is not None:
+            self._record_video_frame()
         if self.test_mode is not None:
             root_z = float(self._robot.data.root_pos_w[0, 2])
             self._root_z.append(root_z)
@@ -1208,6 +1318,7 @@ class SimulatorService:
 
     def run(self) -> dict[str, Any]:
         self.start()
+        self._start_video_recording()
         self.play()
         self._run_started = time.monotonic()
         self._last_perf_report = self._run_started
@@ -1246,6 +1357,7 @@ class SimulatorService:
             self.stop()
             if self._controller is not None:
                 self._controller.close()
+            self._finish_video_recording()
         self._transition(TimelineState.STOPPED)
         summary = (
             self._passive_fall_acceptance()
@@ -1277,6 +1389,11 @@ class SimulatorService:
             "profile_id": self.profile.profile_id,
             **self._accounting(),
             "controller": self._controller_status(),
+            "video": {
+                "path": str(self.record_video) if self.record_video is not None else None,
+                "frames": self._video_frames,
+                "error": self._video_error,
+            },
         }
 
     def _controller_status(self) -> dict[str, Any] | None:
@@ -1301,6 +1418,7 @@ class SimulatorService:
                 "samples": self._body_tracking_samples,
             },
             "command_trace": self._command_trace[:40],
+            "last_body_command_q": self._last_body_command_q,
             "hand_binding": {
                 side: ("bound" if self._hand_layouts[side] else "passive") for side in ("left", "right")
             },

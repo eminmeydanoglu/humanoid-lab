@@ -1,0 +1,6 @@
+schema_version: 1
+source_fps: 20
+action_semantics: same_row_desired_target
+row_shift: 0
+mapping: modality_json_named_blocks
+camera_primary: ego_view

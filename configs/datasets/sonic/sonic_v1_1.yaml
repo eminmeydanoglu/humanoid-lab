@@ -1,0 +1,10 @@
+schema_version: 1
+source_commit: a0732b642c0333077e127a2f56ab0014c196bca4
+artifact_revision: 9c0ff22b4ffec27c5392e8e284eb2f2df7a5b4e2
+variant: sonic_v1_1
+processed_fps: 50
+encoder_input_dim: 1751
+token_dim: 64
+future_offsets_frames: [0, 5, 10, 15, 20, 25, 30, 35, 40, 45]
+body_order: isaaclab_29d
+root_source: synthetic_upright_fixed

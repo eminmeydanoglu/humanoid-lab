@@ -18,6 +18,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", type=Path, required=True)
     parser.add_argument("--duration", type=float)
+    parser.add_argument("--record-video", type=Path, help="record a fixed external validation camera to MP4")
+    parser.add_argument("--metrics-output", type=Path, help="write the final run summary as JSON")
+    parser.add_argument("--tracking-output", type=Path, help="write 50 Hz body/hand command tracking as Parquet")
+    parser.add_argument("--trajectory-reference", type=Path,
+                        help="canonical NPZ used by the fixed-base direct trajectory provider")
     parser.add_argument("--test", choices=("passive-fall", "controlled-hold", "controller-hold"))
     parser.add_argument(
         "--controller",
@@ -67,8 +72,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             show_head_camera=args.head_camera_window,
             test_mode=args.test,
             controller_provider=args.controller,
+            record_video=args.record_video,
+            trajectory_reference=args.trajectory_reference,
         )
         summary = service.run()
+        if args.tracking_output:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+
+            args.tracking_output.parent.mkdir(parents=True, exist_ok=True)
+            pq.write_table(pa.Table.from_pylist(service.tracking_rows()), args.tracking_output)
+        if args.metrics_output:
+            args.metrics_output.parent.mkdir(parents=True, exist_ok=True)
+            args.metrics_output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(json.dumps(summary, indent=2, sort_keys=True), flush=True)
         exit_code = 0 if summary["result"] in {"PASS", "COMPLETED"} else 1
     except Exception as exc:  # noqa: BLE001

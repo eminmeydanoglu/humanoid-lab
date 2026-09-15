@@ -1,0 +1,8 @@
+schema_version: 1
+source_fps: 30
+action_semantics: same_row_desired_target
+row_shift: 0
+camera_primary: cam_left_high
+camera_auxiliary: cam_right_high
+hand_schema: unitree_dex3_per_side_v1
+lower_body_reference: unitree_idle_trajectory_v2
