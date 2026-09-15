@@ -131,7 +131,7 @@ if [ -n "$CID" ] && command -v docker >/dev/null 2>&1; then
   echo; echo "== ENV VERSIONS (container) =="
   docker compose --env-file .env exec -T dev bash -lc '
     source /opt/humanoid-lab/entrypoint.sh 2>/dev/null || true
-    for env in isaac-sonic sonic-sim groot-n17; do
+    for env in isaac-sonic sonic-sim groot-n17 psi0; do
       v="/opt/venvs/$env"
       if [ -x "$v/bin/python" ]; then
         echo "-- $env --"

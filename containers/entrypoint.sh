@@ -42,6 +42,15 @@ use-groot() {
   unset HL_NO_ENV
 }
 
+use-psi0() {
+  _hl_require_env "$HL_VENVS_ROOT/psi0" || return 1
+  export HL_ACTIVE_ENV="psi0"
+  export PATH="$HL_VENVS_ROOT/psi0/bin:$PATH"
+  export VIRTUAL_ENV="$HL_VENVS_ROOT/psi0"
+  unset ISAAC_PATH CARB_APP_PATH EXP_PATH PYTHONPATH
+  unset HL_NO_ENV
+}
+
 use-none() {
   export HL_ACTIVE_ENV="none"
   export HL_NO_ENV=1

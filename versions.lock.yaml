@@ -59,6 +59,15 @@ repositories:
     url: https://github.com/NVlabs/GR00T-WholeBodyControl.git
     commit: a0732b642c0333077e127a2f56ab0014c196bca4   # HEAD == commit (verified)
     submodules: []           # none in root tree
+  psi0:
+    # Upstream source for the second training environment. Unlike the three
+    # repositories above it is not baked into the image: it is a git submodule of
+    # this checkout, so it is pinned here and materialized by
+    # `git submodule update --init third_party/Psi0`.
+    url: https://github.com/physical-superintelligence-lab/Psi0.git
+    commit: 4f3720d45e102b36d7c3e9465ab8062274170518
+    placement: third_party/Psi0
+    submodules: []           # third_party/{SIMPLE,GR00T-WholeBodyControl} are SSH-only and unused by the psi0 fine-tuning path
   isaac_groot:
     url: https://github.com/NVIDIA/Isaac-GR00T.git
     commit: 1a1837f20538b7d7e21f977a11a5aee14f99803c
@@ -92,6 +101,21 @@ python_environments:
     cuda: "12.8"
     flash_attn: "2.8.3"
     note: Upstream pyproject + uv.lock frozen at 1a1837f2; PyTorch not installed separately.
+  psi0:
+    python: "3.11"
+    torch: "2.7.0"
+    torchvision: "0.22.0"
+    cuda: "12.8"
+    note: >
+      The checkout at third_party/Psi0 ships an unusable uv.lock (duplicate TOML
+      key), so the environment is provisioned from locks/psi0 instead: the same
+      direct dependencies and dependency groups, constrained to the versions the
+      upstream lock resolved to. Two deliberate deltas: torch/torchvision come
+      from the cu128 index because this GPU is sm_120, and deepspeed is not
+      installed because this runtime has no CUDA toolkit and its package init
+      aborts before accelerate can fall back to DDP. flash_attn stays out:
+      upstream comments it out in pyproject and the model falls back to sdpa.
+      psi itself is installed editable from the pinned checkout with --no-deps.
 
 models:
   sonic_deploy:
@@ -134,6 +158,20 @@ models:
       - sonic_v1_1/config.yaml            # required: false (training)
       - sonic_v1_1/model_config.yaml      # required: false (training)
       - sonic_v1_1/last.pt                # required: false (training)
+  psi0_sonic_warmstart:
+    # Released Psi-0 SONIC post-train (VLM + action header) that the upstream
+    # scripts/train/psi0/finetune-real-sonic-psi0.sh initializes from through
+    # --model.model_name_or_path / --model.pretrained-action-header-path.
+    # Fetched by scripts/fetch-psi0-checkpoint.sh (not by fetch-models.sh),
+    # because Psi0 resolves checkpoints under PSI_HOME by convention.
+    repo: USC-PSI-Lab/psi-model
+    revision: 4c6f9776fc5b18d87945254175e38bb74b9d7748
+    variant: psi0/postpre.sonic1.0.unifolm.2609092156.40k
+    gated: false
+    # Data-root relative. PSI_HOME (/hfm) reaches the same tree through the
+    # /hfm/cache/checkpoints symlink described in the Dockerfile.
+    local_dir: checkpoints
+    required_files: [config.json, model.safetensors, action_header.safetensors]
   groot_n17_base:
     repo: nvidia/GR00T-N1.7-3B
     revision: 2fc962b973bccdd5d8ce4f67cc63b264d6886495

@@ -8,6 +8,7 @@ have_cmd() { command -v "$1" >/dev/null 2>&1; }
 PY_ISAAC=/opt/venvs/isaac-sonic/bin/python
 PY_SIM=/opt/venvs/sonic-sim/bin/python
 PY_GROOT=/opt/venvs/groot-n17/bin/python
+PY_PSI0=/opt/venvs/psi0/bin/python
 
 MODEL_ROOT="${HUMANOID_DATA_ROOT:-/data}/models"
 GROOT_MODEL_DIR="${GROOT_MODEL_DIR:-$MODEL_ROOT/groot_n17_base}"
@@ -20,7 +21,7 @@ else
   FAIL=$((FAIL+1))
 fi
 
-for env_name in isaac-sonic sonic-sim groot-n17; do
+for env_name in isaac-sonic sonic-sim groot-n17 psi0; do
   venv="/opt/venvs/$env_name"
   if [ -x "$venv/bin/python" ]; then
     note PASS "$env_name: python $($venv/bin/python --version 2>&1)"
@@ -33,6 +34,7 @@ done
 HAVE_ISAAC=$([ -x "$PY_ISAAC" ] && echo 1 || echo 0)
 HAVE_SIM=$([ -x "$PY_SIM" ] && echo 1 || echo 0)
 HAVE_GROOT=$([ -x "$PY_GROOT" ] && echo 1 || echo 0)
+HAVE_PSI0=$([ -x "$PY_PSI0" ] && echo 1 || echo 0)
 
 if [ "$HAVE_ISAAC" = 1 ]; then
   if "$PY_ISAAC" - <<'PY' >/dev/null 2>&1; then
@@ -167,6 +169,30 @@ PY
   fi
 else
   note FAIL "groot-n17: env missing — cannot test"
+  FAIL=$((FAIL+1))
+fi
+
+if [ "$HAVE_PSI0" = 1 ]; then
+  if "$PY_PSI0" - <<'PY' >/dev/null 2>&1; then
+import importlib.util
+
+import torch
+assert torch.__version__.startswith("2.7.0"), torch.__version__
+assert torch.cuda.is_available(), "CUDA unavailable"
+import accelerate  # imports deepspeed when it is installed
+import psi
+assert importlib.util.find_spec("deepspeed") is None, "deepspeed is unimportable in this runtime"
+print(f"torch={torch.__version__} psi={psi.__version__}")
+PY
+    note PASS "psi0: torch 2.7.0 + psi/accelerate imports (no deepspeed)"
+    PASS=$((PASS+1))
+  else
+    note FAIL "psi0: torch/psi/accelerate import failed:"
+    "$PY_PSI0" -c 'import torch, accelerate, psi' 2>&1 | tail -5 | sed 's/^/           /'
+    FAIL=$((FAIL+1))
+  fi
+else
+  note FAIL "psi0: env missing — cannot test"
   FAIL=$((FAIL+1))
 fi
 

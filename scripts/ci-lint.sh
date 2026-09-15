@@ -8,6 +8,7 @@ mapfile -d '' -t SCRIPTS < <(
     -path ./.git -prune -o \
     -path ./.generated -prune -o \
     -path ./data -prune -o \
+    -path ./third_party -prune -o \
     -type f -name '*.sh' -print0
 )
 

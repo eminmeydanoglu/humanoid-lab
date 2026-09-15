@@ -6,6 +6,7 @@
 ```bash
 git clone git@github.com:eminmeydanoglu/humanoid-lab.git
 cd humanoid-lab
+git submodule update --init third_party/Psi0   # pinned Psi0 checkout, no nesting needed
 
 docker login nvcr.io        # the Isaac Sim base image is EULA-gated on NGC
 ./setup.sh --verify-digests # resolves the base image digest from NGC into versions.lock.yaml
@@ -24,6 +25,32 @@ Models are a separate, revision-pinned step:
 
 `nvidia/Cosmos-Reason2-2B`, the GR00T N1.7 backbone, is gated: accept its license on Hugging Face
 before `fetch-models`, otherwise the GR00T checks stay `BLOCKED`.
+
+`./dev.sh fetch-psi0-ckpt` is the separate step for the Psi0 warm start:
+
+```bash
+./dev.sh fetch-psi0-ckpt   # 11 GiB, pinned revision, MODEL_PROVENANCE.json next to the weights
+```
+
+
+## Training environments
+
+Two fine-tuning environments live inside the same container, isolated from each other and from the
+simulation environments:
+
+| Environment | Source | Python | What it is |
+| --- | --- | --- | --- |
+| `groot-n17` | `/opt/src/isaac-groot` (image layer) | 3.12 | Isaac-GR00T N1.7 fine-tuning; torch 2.9.0+cu128, flash_attn 2.8.3 |
+| `psi0` | `third_party/Psi0` (git submodule) | 3.11 | Psi0 fine-tuning, `serve`/`viz`/`psi` groups; torch 2.7.0+cu128 |
+
+`./dev.sh sync` provisions whichever environment's lock or pinned source changed. `./dev.sh psi0`
+opens a shell with the Psi0 environment active, and `./dev.sh psi0-smoke` checks the interpreter,
+the PyTorch build, the upstream import stack, the resolved configuration schema and the warm-start
+checkpoint without running a dataset or an optimizer step.
+
+PSI_HOME is `/hfm`, as the upstream recipes assume; the image builds it from symlinks into the
+persistent data root (`/hfm/cache/checkpoints` → `/data/checkpoints`, `/hfm/data` → `/data/datasets`),
+so no upstream script is edited and nothing is duplicated.
 
 
 ## G1 on Isaac Sim
@@ -72,13 +99,16 @@ motion, `R` resets, `O` is the emergency stop. `Enter` to switch to planner to t
 | `./dev.sh smoke` | in-container environment, asset and model checks |
 | `./dev.sh sync` | re-provisions the environment whose lock or pinned source changed |
 | `./dev.sh fetch-models` | downloads the pinned model revisions | |
+| `./dev.sh fetch-psi0-ckpt` | downloads the pinned Psi0 SONIC warm start into PSI_HOME | |
 | `./dev.sh groot-finetune-smoke [pipeline\|pretrained\|eval]` | optional GR00T N1.7 fine-tuning smoke (two optimizer steps, then open-loop eval) |
+| `./dev.sh psi0-smoke` | Psi0 environment smoke: interpreter, torch build, upstream imports, config schema, warm-start checkpoint |
 | `./dev.sh hf-login` | Hugging Face login for gated repositories |
 | `./dev.sh stop` | stops the container, keeps the data root |
 | `./dev.sh rebuild` | rebuilds the image with the same lock, recreates the container |
 | `./dev.sh isaac` | shell with the `isaac-sonic` environment active |
 | `./dev.sh sonic-sim` | shell with the `sonic-sim` environment (MuJoCo + G1) |
 | `./dev.sh groot` | shell with the `groot-n17` environment |
+| `./dev.sh psi0` | shell with the `psi0` environment |
 
 
 
@@ -92,7 +122,8 @@ motion, `R` resets, `O` is the emergency stop. `Enter` to switch to planner to t
 | `configs/profiles/` | G1 run profiles: robot asset, hands, camera, controller, support band |
 | `src/humanoid_lab/` | simulator service, profile and command contracts, controller bridge |
 | `scripts/` | Isaac G1 runner, model fetching, lock rendering, checks |
-| `locks/` | frozen `uv` locks for the three Python environments |
+| `locks/` | frozen `uv` locks for the four Python environments |
+| `third_party/Psi0/` | pinned Psi0 checkout (git submodule); the `psi0` environment is built from it |
 | `tests/` | `unittest` modules and shell checks |
 | `docs/` | SONIC-Isaac link notes with the measured acceptance results |
 | `versions.lock.yaml` | single source of every version pin |

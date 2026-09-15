@@ -100,7 +100,7 @@ FROM sources AS dev
 # change to a shell helper therefore makes only this small final layer dirty.
 COPY locks/ /opt/locks/
 COPY containers/bootstrap-venvs.sh containers/entrypoint.sh containers/shell.sh containers/isaac-sim-env.sh containers/cyclonedds-sim.xml containers/patch-unitree-cyclonedds-config.py /opt/humanoid-lab/
-COPY scripts/smoke-test.sh scripts/fetch-groot-demo-data.sh scripts/groot-finetune-smoke.sh /opt/humanoid-lab/
+COPY scripts/smoke-test.sh scripts/fetch-groot-demo-data.sh scripts/groot-finetune-smoke.sh scripts/psi0-env-smoke.sh /opt/humanoid-lab/
 
 RUN set -eux; \
     # Pinned upstream sources stay byte-identical: nothing here patches /opt/src.
@@ -125,6 +125,16 @@ RUN set -eux; \
     test -n "${DEV_USER}"; \
     if getent group isaac-sim >/dev/null; then usermod -aG isaac-sim "${DEV_USER}"; fi; \
     id "${DEV_USER}"
+
+# Upstream Psi0 recipes hard-code PSI_HOME=/hfm in their training scripts.  The
+# two trees those recipes touch under PSI_HOME are the ones this repo already
+# keeps in the persistent data root, so /hfm is built from symlinks into that
+# mount instead of a second bind mount: the workspace survives container
+# recreation, nothing is duplicated, and no upstream script needs editing.
+RUN set -eux; \
+    mkdir -p /hfm/cache; \
+    ln -sfn /data/checkpoints /hfm/cache/checkpoints; \
+    ln -sfn /data/datasets /hfm/data
 
 USER ${DEVELOPER_UID}:${DEVELOPER_GID}
 WORKDIR /workspace/humanoid-lab

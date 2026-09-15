@@ -158,9 +158,50 @@ sync_groot() {
   record_current "$name" "$current"
 }
 
+remove_unusable_psi0_deepspeed() {
+  local python="$VENV_ROOT/psi0/bin/python"
+  if "$python" -c 'import importlib.metadata; importlib.metadata.version("deepspeed")' >/dev/null 2>&1; then
+    # Same limitation as GR00T above: deepspeed's package init calls
+    # installed_cuda_version() and this runtime has no CUDA toolkit, so
+    # `import deepspeed` raises before accelerate can fall back to DDP.
+    uv pip uninstall --python "$python" deepspeed
+  fi
+}
+
+sync_psi0() {
+  local name=psi0
+  # Upstream Psi0 is a git submodule of this checkout, not an image layer; the
+  # workspace mount makes it visible here without rebuilding the image.
+  local source=/workspace/humanoid-lab/third_party/Psi0
+  local lockfile="$LOCKS_ROOT/psi0/uv.lock"
+  local current
+  [ -f "$source/uv.lock" ] || { echo "[venv] $name: checkout missing: $source" >&2; return 1; }
+  current="$(fingerprint "$lockfile" "$source")"
+  if is_current "$name" "$current"; then
+    echo "[venv] $name: lock and sources unchanged"
+    remove_unusable_psi0_deepspeed
+    return
+  fi
+
+  echo "[venv] $name: provisioning lock-pinned environment"
+  uv venv --allow-existing --python 3.11 "$VENV_ROOT/$name"
+  # The dependency graph comes from locks/psi0, not from the checkout's own
+  # uv.lock: that file has a duplicate TOML key (upstream bug) and this repo
+  # already keeps frozen locks for every environment. See locks/psi0/pyproject.toml
+  # for the two deliberate deltas (cu128 torch, no deepspeed).
+  UV_PROJECT_ENVIRONMENT="$VENV_ROOT/$name" uv sync --frozen --no-dev --project "$LOCKS_ROOT/psi0"
+  # psi itself is installed from the pinned checkout, editable and without
+  # dependency resolution, so the sources under third_party/Psi0 stay authoritative.
+  uv pip install --python "$VENV_ROOT/$name/bin/python" --no-deps -e "$source"
+  remove_unusable_psi0_deepspeed
+  "$VENV_ROOT/$name/bin/python" -c 'import psi, torch; assert torch.__version__.startswith("2.7.0"); assert torch.cuda.is_available()'
+  record_current "$name" "$current"
+}
+
 sync_isaac_sonic
 sync_sonic_sim
 sync_groot
+sync_psi0
 
 # The container already exports HUMANOID_DATA_ROOT with the in-container path
 # (/data); the repository's .env holds the host path and must not be used here.

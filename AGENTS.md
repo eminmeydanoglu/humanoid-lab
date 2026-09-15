@@ -17,6 +17,14 @@ işleri burada çalıştırılır; başka bir host'a SSH gerekmez.
 - Araç: Ubuntu 24.04, `/bin/bash`. Gömülü upstream kaynaklar `/opt/src/*`
   (isaaclab, sonic, isaac-groot) salt-okunur kabul edilir; değişiklik gerekiyorsa
   `patches/` altında ayrı patch olarak tutulur ve image katmanında uygulanır.
+- İki eğitim ortamı ayrı venv'lerdir: `/opt/venvs/groot-n17` (Isaac-GR00T N1.7,
+  Python 3.12) ve `/opt/venvs/psi0` (Psi0, Python 3.11). İkincisinin kaynağı
+  `third_party/Psi0` submodule'üdür (pin `versions.lock.yaml`), bağımlılıkları
+  `locks/psi0`'dan gelir. Psi0 upstream'inin kendi `uv.lock`'u geçersiz TOML
+  içerdiği için kullanılmaz.
+- Psi0 `PSI_HOME=/hfm` bekler; image bunu veri köküne bağlar
+  (`/hfm/cache/checkpoints` → `/data/checkpoints`, `/hfm/data` → `/data/datasets`).
+  Warm-start checkpoint'i `./dev.sh fetch-psi0-ckpt` indirir.
 
 ## Kurallar
 

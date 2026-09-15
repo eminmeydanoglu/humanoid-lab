@@ -297,6 +297,7 @@ case "${1:-}" in
     ;;
   sonic-sim)  shell_env use-sonic-sim ;;
   groot)      shell_env use-groot ;;
+  psi0)       shell_env use-psi0 ;;
   isaac-g1)
     profile="${2:-}"
     case "$profile" in
@@ -416,6 +417,16 @@ case "${1:-}" in
     up_once
     DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-groot && exec /opt/humanoid-lab/groot-finetune-smoke.sh "$@"' groot-finetune-smoke "${@:2}"
     ;;
+  psi0-smoke)
+    up_once
+    DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-psi0 && exec /opt/humanoid-lab/psi0-env-smoke.sh "$@"' psi0-smoke "${@:2}"
+    ;;
+  fetch-psi0-ckpt)
+    up_once
+    # Same HF CLI and lock-reading python as fetch-models; the psi0 environment
+    # is not needed for the download itself.
+    DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && exec /workspace/humanoid-lab/scripts/fetch-psi0-checkpoint.sh "$@"' fetch-psi0-ckpt "${@:2}"
+    ;;
   sync)
     up_once
     DC exec -T dev /opt/humanoid-lab/bootstrap-venvs.sh
@@ -448,7 +459,7 @@ case "${1:-}" in
     exit 2
     ;;
   *)
-    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-sonic {dex3|inspire-ftp}|sonic-controller|doctor|smoke|groot-finetune-smoke|sync|fetch-models|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
+    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-sonic {dex3|inspire-ftp}|sonic-controller|doctor|smoke|groot-finetune-smoke|psi0-smoke|sync|fetch-models|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
     exit 2
     ;;
 esac
