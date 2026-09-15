@@ -11,6 +11,7 @@ import hashlib
 import json
 import subprocess
 import time
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -75,6 +76,8 @@ class SimulatorService:
         controller_provider: str | None = None,
         record_video: Any | None = None,
         trajectory_reference: Any | None = None,
+        kinematic_reference: Any | None = None,
+        kinematic_label: str | None = None,
     ) -> None:
         self.profile = profile
         self.app = simulation_app
@@ -85,6 +88,8 @@ class SimulatorService:
         self.controller_provider = controller_provider
         self.record_video = record_video
         self.trajectory_reference = trajectory_reference
+        self.kinematic_reference = kinematic_reference
+        self.kinematic_label = kinematic_label or "kinematic"
         self.state = TimelineState.STARTING
         self.tick = 0
         self.episode_id = 0
@@ -160,6 +165,11 @@ class SimulatorService:
         self._passive_since_tick: int | None = None
         self._controlled_trace: list[bool] = []
         self._effort_limit_checks: dict[str, Any] = {}
+        # Kinematic replay: the reference owns every joint, physics owns nothing.
+        self._kinematic: dict[str, Any] | None = None
+        self._kinematic_frame = 0
+        self._kinematic_rows: list[dict[str, Any]] = []
+        self._video_fps: float | None = None
 
     def _transition(self, state: TimelineState, error: str | None = None) -> None:
         self.state = state
@@ -218,7 +228,10 @@ class SimulatorService:
         # The hard reset above wrote the asset's own defaults; the profile's
         # declared start-up pose has to replace them before the first step.
         self._write_initial_state_to_sim()
-        self._start_controller()
+        if self.kinematic_reference is not None:
+            self._prepare_kinematic()
+        else:
+            self._start_controller()
         self._timeline = get_timeline_interface()
         self._timeline.pause()
         self._set_debug_camera()
@@ -279,6 +292,269 @@ class SimulatorService:
             self._initial_joint_pos, self._robot.data.default_joint_vel.clone().zero_()
         )
         return default_root
+
+    # ------------------------------------------------------------- kinematic
+
+    def _prepare_kinematic(self) -> None:
+        """Load a source-rate reference and map it onto this asset's joints.
+
+        Kinematic replay bypasses controllers, PD drives and the support band:
+        every tick writes the reference root pose and the reference joint state
+        straight into the simulation, so the robot shows the recorded or
+        commanded trajectory exactly rather than what a policy would do with it.
+        """
+        import numpy as np
+        import torch
+
+        from ...controllers.sonic import BODY_JOINT_ORDER, SONIC_REFERENCE_JOINT_ORDER, hand_joint_names
+        from ...datasets.sonic.joints import reorder
+
+        path = Path(self.kinematic_reference)
+        with np.load(path) as payload:
+            arrays = {name: payload[name] for name in payload.files}
+        timestamps = np.asarray(arrays["timestamps"], dtype=np.float64).reshape(-1)
+        joint_pos = np.asarray(arrays["joint_pos"], dtype=np.float64)
+        joint_vel = np.asarray(arrays.get("joint_vel", np.zeros_like(joint_pos)), dtype=np.float64)
+        left = np.asarray(arrays["left_hand_joints"], dtype=np.float64)
+        right = np.asarray(arrays["right_hand_joints"], dtype=np.float64)
+        root_positions = arrays.get("body_pos")
+        root_quaternions = arrays.get("body_quat_wxyz")
+        if (root_positions is None) != (root_quaternions is None):
+            raise RuntimeError(
+                f"kinematic reference {path} must provide body_pos and body_quat_wxyz together"
+            )
+        has_reference_root = root_positions is not None
+        if has_reference_root:
+            root_positions = np.asarray(root_positions, dtype=np.float64)
+            root_quaternions = np.asarray(root_quaternions, dtype=np.float64)
+        applied = arrays.get("hands_applied")
+        hands_applied = True if applied is None else bool(np.asarray(applied).reshape(-1)[0])
+        frames = len(timestamps)
+        if frames < 2:
+            raise RuntimeError(f"kinematic reference {path} needs at least two frames")
+        values_to_validate = [
+            ("joint_pos", joint_pos, 29), ("joint_vel", joint_vel, 29),
+            ("left_hand_joints", left, 7), ("right_hand_joints", right, 7),
+        ]
+        if has_reference_root:
+            values_to_validate += [
+                ("body_pos", root_positions, 3),
+                ("body_quat_wxyz", root_quaternions, 4),
+            ]
+        for label, value, width in values_to_validate:
+            if value.shape != (frames, width):
+                raise RuntimeError(f"kinematic reference {label} has shape {value.shape}, expected {(frames, width)}")
+            if not np.isfinite(value).all():
+                raise RuntimeError(f"kinematic reference {label} contains NaN or Inf")
+        if has_reference_root:
+            quaternion_norms = np.linalg.norm(root_quaternions, axis=1)
+            if np.any(np.abs(quaternion_norms - 1.0) > 1e-3):
+                raise RuntimeError("kinematic reference body_quat_wxyz must contain unit quaternions")
+        spacing = np.diff(timestamps)
+        if np.any(spacing <= 0.0):
+            raise RuntimeError("kinematic reference timestamps must be strictly increasing")
+        fps = 1.0 / float(np.median(spacing))
+        ticks_per_frame = max(1, int(round(1.0 / (fps * self.profile.physics_dt))))
+
+        self._torso_body_id = self._resolve_torso_body_id()
+        names = list(self._robot.joint_names)
+        hand_ids = {"left": [], "right": []}
+        positions = torch.zeros((frames, len(names)), device=self._robot.device)
+        velocities = torch.zeros((frames, len(names)), device=self._robot.device)
+        for column, joint in enumerate(SONIC_REFERENCE_JOINT_ORDER):
+            if joint not in names:
+                raise RuntimeError(f"asset is missing body joint {joint!r}")
+            index = names.index(joint)
+            positions[:, index] = torch.tensor(joint_pos[:, column], device=self._robot.device)
+            velocities[:, index] = torch.tensor(joint_vel[:, column], device=self._robot.device)
+        for side, values in (("left", left), ("right", right)):
+            for column, joint in enumerate(hand_joint_names(side)):
+                if joint not in names:
+                    raise RuntimeError(f"asset is missing hand joint {joint!r}")
+                index = names.index(joint)
+                hand_ids[side].append(index)
+                if hands_applied:
+                    positions[:, index] = torch.tensor(values[:, column], device=self._robot.device)
+        body_ids = [names.index(joint) for joint in BODY_JOINT_ORDER]
+        reference_order_ids = [names.index(joint) for joint in SONIC_REFERENCE_JOINT_ORDER]
+        self._kinematic = {
+            "path": str(path),
+            "frames": frames,
+            "fps": fps,
+            "ticks_per_frame": ticks_per_frame,
+            "positions": positions,
+            "velocities": velocities,
+            "hands_applied": hands_applied,
+            "hand_ids": hand_ids,
+            "body_ids": body_ids,
+            "reference_order_ids": reference_order_ids,
+            "body_target_dds": np.asarray(
+                reorder(joint_pos, SONIC_REFERENCE_JOINT_ORDER, BODY_JOINT_ORDER), dtype=np.float64
+            ),
+            "left_hand_target": left,
+            "right_hand_target": right,
+            "timestamps": timestamps,
+            "body_names": list(BODY_JOINT_ORDER),
+            "root_source": "reference" if has_reference_root else "floor_fit_fallback",
+            "root_positions": (
+                torch.tensor(root_positions, device=self._robot.device) if has_reference_root else None
+            ),
+            "root_quaternions": (
+                torch.tensor(root_quaternions, device=self._robot.device) if has_reference_root else None
+            ),
+        }
+        # Source-rate state/action visualizations have no recorded root and use
+        # the floor-fit fallback. Canonical references carry an explicit root
+        # pose, which must be replayed rather than silently replaced.
+        base_z = float(self.profile.robot.initial_position_m[2])
+        self._write_kinematic_frame(0, None if has_reference_root else base_z)
+        self._scene.write_data_to_sim()
+        self._sim.step(render=False)
+        self._scene.update(self.profile.physics_dt)
+        sole_ids = [index for index, name in enumerate(self._robot.body_names) if "ankle_roll" in name]
+        if not sole_ids:
+            sole_ids = [self._torso_body_id or 0]
+        sole_z = float(self._robot.data.body_pos_w[0, sole_ids, 2].min().item())
+        self._kinematic["root_z"] = (
+            float(root_positions[0, 2]) if has_reference_root else base_z - sole_z
+        )
+        self._kinematic["sole_ids"] = sole_ids
+        self._video_fps = 1.0 / (ticks_per_frame * self.profile.physics_dt)
+
+    def _write_kinematic_frame(self, frame: int, fallback_root_z: float | None) -> None:
+        import torch
+
+        kinematic = self._kinematic
+        assert kinematic is not None
+        self._robot.write_joint_state_to_sim(
+            kinematic["positions"][frame].unsqueeze(0), kinematic["velocities"][frame].unsqueeze(0)
+        )
+        if kinematic["root_source"] == "reference":
+            root_pose = torch.cat(
+                (kinematic["root_positions"][frame], kinematic["root_quaternions"][frame])
+            ).unsqueeze(0)
+        else:
+            if fallback_root_z is None:
+                raise RuntimeError("floor-fit kinematic replay needs a fallback root height")
+            root_pose = torch.tensor(
+                [[0.0, 0.0, fallback_root_z, 1.0, 0.0, 0.0, 0.0]], device=self._robot.device
+            )
+        self._robot.write_root_pose_to_sim(root_pose)
+        self._robot.write_root_velocity_to_sim(torch.zeros((1, 6), device=self._robot.device))
+
+    def _apply_kinematic(self) -> None:
+        kinematic = self._kinematic
+        assert kinematic is not None
+        frame = min(self.tick // kinematic["ticks_per_frame"], kinematic["frames"] - 1)
+        self._kinematic_frame = frame
+        fallback_root_z = kinematic["root_z"] if kinematic["root_source"] != "reference" else None
+        self._write_kinematic_frame(frame, fallback_root_z)
+
+    def _kinematic_finished(self) -> bool:
+        kinematic = self._kinematic
+        if kinematic is None:
+            return False
+        last_tick = (kinematic["frames"] - 1) * kinematic["ticks_per_frame"]
+        return self.tick > last_tick + kinematic["ticks_per_frame"]
+
+    def _record_kinematic_row(self) -> None:
+        kinematic = self._kinematic
+        assert kinematic is not None
+        frame = self._kinematic_frame
+        body_measured = [
+            float(value)
+            for value in self._robot.data.joint_pos[0, kinematic["body_ids"]].tolist()
+        ]
+        root_position = [float(value) for value in self._robot.data.root_pos_w[0].tolist()]
+        root_quaternion = [float(value) for value in self._robot.data.root_quat_w[0].tolist()]
+        if kinematic["root_source"] == "reference":
+            root_target_position = [float(value) for value in kinematic["root_positions"][frame].tolist()]
+            root_target_quaternion = [float(value) for value in kinematic["root_quaternions"][frame].tolist()]
+        else:
+            root_target_position = [0.0, 0.0, float(kinematic["root_z"])]
+            root_target_quaternion = [1.0, 0.0, 0.0, 0.0]
+        sole_z = float(self._robot.data.body_pos_w[0, kinematic["sole_ids"], 2].min().item())
+        row: dict[str, Any] = {
+            "tick": self.tick,
+            "sim_s": self.tick * self.profile.physics_dt,
+            "support_active": False,
+            "body_target": list(kinematic["body_target_dds"][frame]),
+            "body_measured": body_measured,
+            "root_position": root_position,
+            "root_quaternion_wxyz": root_quaternion,
+            "root_target_position": root_target_position,
+            "root_target_quaternion_wxyz": root_target_quaternion,
+            "torso_quaternion_wxyz": [
+                float(value) for value in self._robot.data.body_quat_w[0, self._torso_body_id].tolist()
+            ],
+            "left_hand_target": list(kinematic["left_hand_target"][frame]),
+            "left_hand_measured": [
+                float(value) for value in self._robot.data.joint_pos[0, kinematic["hand_ids"]["left"]].tolist()
+            ],
+            "right_hand_target": list(kinematic["right_hand_target"][frame]),
+            "right_hand_measured": [
+                float(value) for value in self._robot.data.joint_pos[0, kinematic["hand_ids"]["right"]].tolist()
+            ],
+            "frame_index": frame,
+            "source_timestamp": float(kinematic["timestamps"][frame]),
+            "min_sole_z_m": sole_z,
+            "hands_applied": bool(kinematic["hands_applied"]),
+        }
+        self._kinematic_rows.append(row)
+
+    def _kinematic_summary(self) -> dict[str, Any] | None:
+        kinematic = self._kinematic
+        if kinematic is None:
+            return None
+        import numpy as np
+
+        rows = self._kinematic_rows
+        if not rows:
+            return {"frames_replayed": 0, "path": kinematic["path"], "hand_percent_applied": kinematic["hands_applied"]}
+        body_error = np.abs(
+            np.asarray([row["body_target"] for row in rows]) - np.asarray([row["body_measured"] for row in rows])
+        )
+        hand_error = np.abs(
+            np.asarray([row["left_hand_target"] for row in rows]) - np.asarray([row["left_hand_measured"] for row in rows])
+        )
+        right_error = np.abs(
+            np.asarray([row["right_hand_target"] for row in rows]) - np.asarray([row["right_hand_measured"] for row in rows])
+        )
+        sole = np.asarray([row["min_sole_z_m"] for row in rows])
+        root_position_error = np.abs(
+            np.asarray([row["root_target_position"] for row in rows])
+            - np.asarray([row["root_position"] for row in rows])
+        )
+        root_quaternion_error = np.abs(
+            np.asarray([row["root_target_quaternion_wxyz"] for row in rows])
+            - np.asarray([row["root_quaternion_wxyz"] for row in rows])
+        )
+        return {
+            "path": kinematic["path"],
+            "label": self.kinematic_label,
+            "frames_replayed": len(rows),
+            "reference_frames": kinematic["frames"],
+            "source_fps": kinematic["fps"],
+            "physics_ticks_per_frame": kinematic["ticks_per_frame"],
+            "hands_applied": bool(kinematic["hands_applied"]),
+            "write_error_rad": {
+                "body_max": float(body_error.max()),
+                "body_mean": float(body_error.mean()),
+                "body_p95": float(np.percentile(body_error, 95)),
+                "left_hand_max": float(hand_error.max()),
+                "left_hand_mean": float(hand_error.mean()),
+                "right_hand_max": float(right_error.max()),
+                "right_hand_mean": float(right_error.mean()),
+            },
+            "min_sole_z_m": {"min": float(sole.min()), "max": float(sole.max())},
+            "root_source": kinematic["root_source"],
+            "root_height_m": float(kinematic["root_z"]),
+            "root_write_error": {
+                "position_max_m": float(root_position_error.max()),
+                "position_mean_m": float(root_position_error.mean()),
+                "quaternion_component_max": float(root_quaternion_error.max()),
+            },
+        }
 
     def _resolve_initial_pose(self) -> None:
         """Apply the profile's declared start-up pose, if it names one.
@@ -394,7 +670,9 @@ class SimulatorService:
                 articulation_props=sim_utils.ArticulationRootPropertiesCfg(fix_root_link=False),
             )
         robot_cfg.spawn.articulation_props.fix_root_link = robot_spec.fixed_base
-        robot_cfg.spawn.rigid_props.disable_gravity = robot_spec.fixed_base
+        robot_cfg.spawn.rigid_props.disable_gravity = (
+            robot_spec.fixed_base if robot_spec.disable_gravity is None else robot_spec.disable_gravity
+        )
         robot_cfg = robot_cfg.replace(
             prim_path="{ENV_REGEX_NS}/Robot",
             init_state=robot_cfg.init_state.replace(pos=robot_spec.initial_position_m),
@@ -874,7 +1152,9 @@ class SimulatorService:
         )
 
     def _resolve_torso_body_id(self) -> int:
-        name = str(self._controller_config["torso_link"])
+        # A kinematic replay attaches no controller, so the profile may not name
+        # a torso link; the asset's own torso link is the default.
+        name = str(self._controller_config.get("torso_link", "torso_link"))
         names = list(self._robot.body_names)
         if name not in names:
             raise CommandError(f"controller.torso_link {name!r} is not a body of this asset")
@@ -1032,6 +1312,8 @@ class SimulatorService:
         self._tracking_rows.append(row)
 
     def tracking_rows(self) -> list[dict[str, Any]]:
+        if self._kinematic is not None:
+            return self._kinematic_rows
         return self._tracking_rows
     def _apply_body_command(self, command: JointCommand) -> None:
         import torch
@@ -1191,7 +1473,7 @@ class SimulatorService:
         if self.record_video is None:
             return
         self.record_video.parent.mkdir(parents=True, exist_ok=True)
-        fps = 1.0 / self.profile.camera_update_period
+        fps = self._video_fps or (1.0 / self.profile.camera_update_period)
         self._video_process = subprocess.Popen(
             [
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
@@ -1236,6 +1518,9 @@ class SimulatorService:
 
     def _step_physics(self) -> None:
         """Advance physics once, refreshing render and sensors on their own cadence."""
+        if self._kinematic is not None:
+            self._step_kinematic()
+            return
         step_started = time.perf_counter()
         self._apply_control()
         self._apply_support()
@@ -1243,7 +1528,10 @@ class SimulatorService:
         self._flush_effort()
         self._sim.step(render=False)
         self.tick += 1
-        rendered = self._is_rendering and self.tick % self.profile.render_interval == 0
+        render_interval = (
+            self._kinematic["ticks_per_frame"] if self._kinematic is not None else self.profile.render_interval
+        )
+        rendered = self._is_rendering and self.tick % render_interval == 0
         if rendered:
             self._perf_step_seconds += time.perf_counter() - step_started
             render_started = time.perf_counter()
@@ -1258,6 +1546,8 @@ class SimulatorService:
             self._consume_head_camera_frame()
         if rendered and self.record_video is not None:
             self._record_video_frame()
+        if self._kinematic is not None and self.tick % self._kinematic["ticks_per_frame"] == 0:
+            self._record_kinematic_row()
         if self.test_mode is not None:
             root_z = float(self._robot.data.root_pos_w[0, 2])
             self._root_z.append(root_z)
@@ -1265,6 +1555,51 @@ class SimulatorService:
             self._root_up.append(quaternion_up_z(root_quat))
             if self.test_mode == "controller-hold":
                 self._controlled_trace.append(self._control_mode == CONTROLLED)
+
+    def _step_kinematic(self) -> None:
+        """One frame of a frame-exact replay: advance physics, then author the state.
+
+        Order matters.  A physics step *after* the write would let drives,
+        gravity and contacts move the joints before the frame is rendered and
+        measured, which is exactly the drift a kinematic replay must not have.
+        So the simulation advances first (timeline, sensors and the recorder keep
+        running), the authoritative state is written afterwards, kinematics and
+        fabric are refreshed without integrating time, and the frame is rendered
+        and measured with no further physics in between.
+        """
+        step_started = time.perf_counter()
+        # 1) advance physics/time so the timeline, sensors and recorder stay alive
+        self._scene.write_data_to_sim()
+        self._sim.step(render=False)
+        self.tick += 1
+        # 2) author the frame: root pose, root velocity and every joint
+        self._apply_kinematic()
+        self._scene.write_data_to_sim()
+        # 3) refresh kinematics/fabric for rendering and the robot buffers, but do
+        #    not integrate: the written state stays authoritative.
+        self._sim.forward()
+        self._robot.update(0.0)
+
+        ticks_per_frame = self._kinematic["ticks_per_frame"]
+        at_frame_boundary = self.tick % ticks_per_frame == 0
+        rendered = self._is_rendering and at_frame_boundary
+        if rendered:
+            render_started = time.perf_counter()
+            self._sim.render()
+            self._perf_render_seconds += time.perf_counter() - render_started
+            self._perf_render_count += 1
+        if at_frame_boundary:
+            # Sensors refresh *after* the render and with a non-zero dt: a camera
+            # only pulls a new RGB frame when it considers itself outdated, so a
+            # zero-dt update leaves the buffer showing the first rendered frame
+            # forever (the frozen-video failure).  No physics runs here.
+            self._scene.update(ticks_per_frame * self.profile.physics_dt)
+        if rendered and self.record_video is not None:
+            self._record_video_frame()
+        if at_frame_boundary:
+            self._record_kinematic_row()
+        self._perf_step_seconds += time.perf_counter() - step_started
+        self._report_performance()
 
     def _render_paused(self) -> None:
         """Refresh UI and viewport at a bounded rate while physics is paused."""
@@ -1326,7 +1661,7 @@ class SimulatorService:
             while self.app.is_running() and (
                 self.duration is None
                 or time.monotonic() - self._run_started < self.duration
-            ):
+            ) and not self._kinematic_finished():
                 if self._pending_ui_reset:
                     self._pending_ui_reset = False
                     # Match the official Isaac Lab reset order: write state
@@ -1343,7 +1678,7 @@ class SimulatorService:
                     iteration_started = time.monotonic()
                     self._step_physics()
                     self._wall_physics_elapsed += time.monotonic() - iteration_started
-                    if self._controller is not None:
+                    if self._controller is not None or self._kinematic is not None:
                         self._pace_physics(iteration_started)
                     self._report_performance()
                 else:
@@ -1384,7 +1719,7 @@ class SimulatorService:
         }
 
     def _runtime_summary(self) -> dict[str, Any]:
-        return {
+        summary = {
             "result": "COMPLETED",
             "profile_id": self.profile.profile_id,
             **self._accounting(),
@@ -1395,6 +1730,10 @@ class SimulatorService:
                 "error": self._video_error,
             },
         }
+        kinematic = self._kinematic_summary()
+        if kinematic is not None:
+            summary["kinematic"] = kinematic
+        return summary
 
     def _controller_status(self) -> dict[str, Any] | None:
         if self._controller is None:

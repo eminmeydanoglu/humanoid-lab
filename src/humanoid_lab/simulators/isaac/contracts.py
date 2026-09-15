@@ -107,6 +107,10 @@ class RobotSpec:
     initial_position_m: tuple[float, float, float]
     hand: HandSpec
     fixed_base: bool = False
+    #: Explicit gravity switch; defaults to the fixed-base behaviour.  A
+    #: kinematic replay writes every joint each tick, so gravity would otherwise
+    #: make the joints sag between the write and the measurement.
+    disable_gravity: bool | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "RobotSpec":
@@ -125,6 +129,9 @@ class RobotSpec:
             initial_position_m=_tuple(data["initial_position_m"], 3, "initial_position_m"),
             hand=HandSpec.from_dict(data["hand"]),
             fixed_base=bool(data.get("fixed_base", False)),
+            disable_gravity=(
+                None if data.get("disable_gravity") is None else bool(data["disable_gravity"])
+            ),
         )
 
 
@@ -268,6 +275,7 @@ class RunProfile:
                     "joint_name_patterns": list(self.robot.hand.joint_name_patterns),
                 },
                 "fixed_base": self.robot.fixed_base,
+                "disable_gravity": self.robot.disable_gravity,
             },
             "camera": {
                 "name": self.camera.name,

@@ -23,6 +23,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--tracking-output", type=Path, help="write 50 Hz body/hand command tracking as Parquet")
     parser.add_argument("--trajectory-reference", type=Path,
                         help="canonical NPZ used by the fixed-base direct trajectory provider")
+    parser.add_argument("--kinematic-reference", type=Path,
+                        help="source-rate NPZ replayed frame-exactly by writing joint state every frame; "
+                             "bypasses controllers, PD drives and the support band")
+    parser.add_argument("--kinematic-label", default=None,
+                        help="label recorded in the run summary for this kinematic replay")
     parser.add_argument("--test", choices=("passive-fall", "controlled-hold", "controller-hold"))
     parser.add_argument(
         "--controller",
@@ -74,6 +79,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             controller_provider=args.controller,
             record_video=args.record_video,
             trajectory_reference=args.trajectory_reference,
+            kinematic_reference=args.kinematic_reference,
+            kinematic_label=args.kinematic_label,
         )
         summary = service.run()
         if args.tracking_output:
