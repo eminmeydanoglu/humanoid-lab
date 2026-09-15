@@ -12,7 +12,7 @@ from typing import Any, Mapping
 from ..contracts.commands import CommandError, JointCommand
 from .base import ControllerInterface, ControllerSource
 
-PROVIDERS = ("none", "scripted", "sonic_dds")
+PROVIDERS = ("none", "scripted", "sonic_dds", "trajectory")
 
 
 def build_controller(
@@ -41,6 +41,13 @@ def build_controller(
         return (
             sonic_dds.SonicDdsController(settings, physics_dt=physics_dt, ttl_s=ttl_s),
             sonic_dds.interface(settings),
+        )
+    if provider == "trajectory":
+        from . import trajectory
+
+        return (
+            trajectory.TrajectoryController(settings, physics_dt=physics_dt, ttl_s=ttl_s),
+            trajectory.interface(settings),
         )
     raise CommandError(f"unknown controller provider {provider!r}; expected one of {PROVIDERS}")
 

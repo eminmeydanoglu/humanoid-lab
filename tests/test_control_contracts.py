@@ -119,7 +119,10 @@ class SonicConstantTests(unittest.TestCase):
         self.assertEqual(len(sonic.BODY_MOTOR_FAMILY), 29)
         self.assertEqual(len(sonic.BODY_GAIN_MULTIPLIER), 29)
         self.assertEqual(len(sonic.MUJOCO_BODY_FRICTION_LOSS_NM), 29)
-        self.assertEqual(len(sonic.HAND_JOINT_ORDER), 7)
+        self.assertEqual(len(sonic.LEFT_HAND_JOINT_ORDER), 7)
+        self.assertEqual(len(sonic.RIGHT_HAND_JOINT_ORDER), 7)
+        self.assertEqual(sonic.LEFT_HAND_JOINT_ORDER[3:5], ("middle_0_joint", "middle_1_joint"))
+        self.assertEqual(sonic.RIGHT_HAND_JOINT_ORDER[3:5], ("index_0_joint", "index_1_joint"))
 
     def test_43dof_effort_limits_are_split_by_actuator_order(self) -> None:
         # The hands sit between the left and right arms in MJCF actuator order.

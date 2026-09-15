@@ -44,8 +44,45 @@ BODY_JOINT_ORDER: tuple[str, ...] = (
     "right_wrist_yaw_joint",
 )
 
+# Reference motions consumed by SONIC are *not* in the hardware/MuJoCo order
+# above.  The official motion contract uses IsaacLab order and remaps it inside
+# the deployment before writing motor commands.  Keep both vocabularies named:
+# treating one as the other produces anatomically valid shapes with the values
+# silently assigned to the wrong joints.
+SONIC_REFERENCE_JOINT_ORDER: tuple[str, ...] = (
+    "left_hip_pitch_joint",
+    "right_hip_pitch_joint",
+    "waist_yaw_joint",
+    "left_hip_roll_joint",
+    "right_hip_roll_joint",
+    "waist_roll_joint",
+    "left_hip_yaw_joint",
+    "right_hip_yaw_joint",
+    "waist_pitch_joint",
+    "left_knee_joint",
+    "right_knee_joint",
+    "left_shoulder_pitch_joint",
+    "right_shoulder_pitch_joint",
+    "left_ankle_pitch_joint",
+    "right_ankle_pitch_joint",
+    "left_shoulder_roll_joint",
+    "right_shoulder_roll_joint",
+    "left_ankle_roll_joint",
+    "right_ankle_roll_joint",
+    "left_shoulder_yaw_joint",
+    "right_shoulder_yaw_joint",
+    "left_elbow_joint",
+    "right_elbow_joint",
+    "left_wrist_roll_joint",
+    "right_wrist_roll_joint",
+    "left_wrist_pitch_joint",
+    "right_wrist_pitch_joint",
+    "left_wrist_yaw_joint",
+    "right_wrist_yaw_joint",
+)
+
 # Dex3 hand order, 7 joints per side, from the same pinned MJCF.
-HAND_JOINT_ORDER: tuple[str, ...] = (
+LEFT_HAND_JOINT_ORDER: tuple[str, ...] = (
     "thumb_0_joint",
     "thumb_1_joint",
     "thumb_2_joint",
@@ -53,6 +90,15 @@ HAND_JOINT_ORDER: tuple[str, ...] = (
     "middle_1_joint",
     "index_0_joint",
     "index_1_joint",
+)
+RIGHT_HAND_JOINT_ORDER: tuple[str, ...] = (
+    "thumb_0_joint",
+    "thumb_1_joint",
+    "thumb_2_joint",
+    "index_0_joint",
+    "index_1_joint",
+    "middle_0_joint",
+    "middle_1_joint",
 )
 
 # Effort limits the official MuJoCo loop clips body torques to
@@ -271,8 +317,13 @@ def named_pose(name: str) -> tuple[dict[str, float], float]:
 
 
 def hand_joint_names(side: str) -> tuple[str, ...]:
-    prefix = "left_hand" if side == "left" else "right_hand"
-    return tuple(f"{prefix}_{name}" for name in HAND_JOINT_ORDER)
+    if side == "left":
+        prefix, order = "left_hand", LEFT_HAND_JOINT_ORDER
+    elif side == "right":
+        prefix, order = "right_hand", RIGHT_HAND_JOINT_ORDER
+    else:
+        raise ValueError(f"unknown hand side {side!r}")
+    return tuple(f"{prefix}_{name}" for name in order)
 
 
 def effort_limits_for(side: str) -> tuple[float, ...]:

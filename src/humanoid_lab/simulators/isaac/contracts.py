@@ -106,6 +106,7 @@ class RobotSpec:
     asset_provenance: str
     initial_position_m: tuple[float, float, float]
     hand: HandSpec
+    fixed_base: bool = False
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "RobotSpec":
@@ -123,6 +124,7 @@ class RobotSpec:
             asset_provenance=str(data["asset_provenance"]),
             initial_position_m=_tuple(data["initial_position_m"], 3, "initial_position_m"),
             hand=HandSpec.from_dict(data["hand"]),
+            fixed_base=bool(data.get("fixed_base", False)),
         )
 
 
@@ -265,6 +267,7 @@ class RunProfile:
                     "behavior": self.robot.hand.behavior.value,
                     "joint_name_patterns": list(self.robot.hand.joint_name_patterns),
                 },
+                "fixed_base": self.robot.fixed_base,
             },
             "camera": {
                 "name": self.camera.name,
