@@ -31,4 +31,8 @@ def finite_difference(positions: np.ndarray, fps: float = PROCESSED_FPS) -> np.n
     velocity = np.zeros_like(q)
     if len(q) > 1:
         velocity[:-1] = np.diff(q, axis=0) * fps
+        # Match SONIC's 30→50 Hz planner: the terminal reference keeps the
+        # previous finite-difference velocity instead of introducing a false
+        # zero-velocity step into every clamped future window at the clip tail.
+        velocity[-1] = velocity[-2]
     return velocity.astype(np.asarray(positions).dtype)

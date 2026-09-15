@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 
@@ -12,6 +13,9 @@ SONIC_TOKEN_DIM = 64
 STATE_DIM = 46
 ACTION_DIM = 78
 PROCESSED_FPS = 50.0
+
+HAND_SCHEMA_VERIFIED = "verified"
+HAND_SCHEMA_UNRESOLVED = "unresolved"
 
 
 @dataclass(frozen=True)
@@ -61,3 +65,29 @@ def compose_action(motion_token: np.ndarray, left: np.ndarray, right: np.ndarray
     if result.shape[-1] != ACTION_DIM or not np.isfinite(result).all():
         raise ValueError("canonical action must be finite 78D")
     return result
+
+
+@dataclass(frozen=True)
+class CanonicalEpisodeBuild:
+    """A canonical episode plus everything needed to justify it.
+
+    ``hand_schema_status`` gates the 78D action: while a source's hand channel
+    order is unresolved, its hand slots stay zero and are excluded from any
+    action, so a 64D body-latent pilot can proceed without pretending the hand
+    numbers are data.
+
+    ``raw_hand_command`` carries source-rate hand channels that must *not* be
+    written into the canonical hand slots (for example the AppleToPlate
+    normalized open/close command, which has no proven radian mapping).  It is
+    persisted as its own artifact.
+    """
+
+    episode: CanonicalEpisode
+    provenance: dict[str, Any]
+    hand_schema_status: str
+    hand_schema_reason: str = ""
+    notes: tuple[str, ...] = field(default_factory=tuple)
+    raw_hand_command: dict[str, np.ndarray] | None = None
+
+    def final_action_allowed(self) -> bool:
+        return self.hand_schema_status == HAND_SCHEMA_VERIFIED

@@ -1,0 +1,19 @@
+{
+  "unitree": {
+    "dataset": "unitree-g1-dex3/G1_Dex3_ObjectPlacement_Dataset",
+    "episode": 74,
+    "note": "arm-only collection: lower body is synthetic static standing, arms are recorded absolute actions"
+  },
+  "fruits": {
+    "dataset": "nvidia-g1-fruits-1k/g1-pick-apple",
+    "episode": 0,
+    "note": "archived pilot only; excluded from processed conversion",
+    "bulk_conversion_status": "excluded",
+    "bulk_conversion_reason": "Human review rejected this dataset for training conversion: the recorded whole-body trajectory stays crouched and free SONIC walks backward while following the reference. Keep raw data and pilot evidence archived."
+  },
+  "apple": {
+    "dataset": "nvidia-gr00t-n1.7-apple-to-plate",
+    "episode": 179,
+    "note": "body-latent pilot under review; recorded state is clean, normalized hand action remains unresolved"
+  }
+}

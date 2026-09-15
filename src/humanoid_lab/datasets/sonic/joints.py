@@ -41,3 +41,19 @@ def canonical_body(values: np.ndarray, source_names: Sequence[str]) -> np.ndarra
 def sonic_reference_body(values: np.ndarray, source_names: Sequence[str]) -> np.ndarray:
     """Return the 29 body joints in SONIC's official reference-motion order."""
     return reorder(values, source_names, SONIC_REFERENCE_JOINT_ORDER)
+
+
+def hand_order(side: str) -> tuple[str, ...]:
+    """Canonical Dex3 motor order of one hand, as `left_hand_<name>`."""
+    if side == "left":
+        order = LEFT_HAND_ORDER
+    elif side == "right":
+        order = RIGHT_HAND_ORDER
+    else:
+        raise ValueError(f"unknown hand side {side!r}")
+    return tuple(f"{side}_hand_{name}" for name in order)
+
+
+def canonical_hand(values: np.ndarray, source_names: Sequence[str], side: str) -> np.ndarray:
+    """Reorder one hand from source motor order to the canonical Dex3 order."""
+    return reorder(values, source_names, hand_order(side))
