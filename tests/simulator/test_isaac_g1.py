@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 import tempfile
 import unittest
@@ -31,6 +32,77 @@ class IsaacG1ProfileTests(unittest.TestCase):
         # The base platform profiles declare no controller: that is what keeps
         # Gate 1 behaviour reproducible while control paths are added.
         self.assertTrue(all(profile.controller is None for profile in profiles))
+
+    def test_head_camera_declares_the_real_stream_geometry(self) -> None:
+        """The head camera stands in for the D435i color stream at 640x480. Its
+        horizontal angle is what the profile declares, because that is the one
+        this renderer honours; the vertical follows from the image size, and the
+        device's quoted pair is carried as data so the gap stays measurable."""
+        for path in sorted((ROOT / "configs/profiles").glob("isaac-g1-*.json")):
+            camera = RunProfile.load(path).camera
+            self.assertEqual((camera.width, camera.height), (640, 480), path.name)
+            self.assertAlmostEqual(camera.horizontal_fov_deg, 54.9, msg=path.name)
+            self.assertEqual(camera.nominal_fov_deg, (54.9, 42.5), path.name)
+            # The quoted vertical angle is not a renderer input.
+            assert camera.nominal_fov_deg is not None
+            self.assertNotAlmostEqual(
+                camera.rendered_fov_deg[1], camera.nominal_fov_deg[1], places=2
+            )
+
+    def test_rendered_angles_are_the_declared_horizontal_and_the_aspect_vertical(self) -> None:
+        """Isaac Sim projects square pixels: 640x480 at 54.9 deg horizontal is
+        42.571 deg vertical, which is 0.071 deg wider than the D435i's nominal
+        42.5. That gap is the renderer's, not a free parameter, so it is pinned
+        here instead of being papered over by a declared angle."""
+        camera = RunProfile.load(ROOT / "configs/profiles/isaac-g1-dex3.json").camera
+        horizontal, vertical = camera.rendered_fov_deg
+        self.assertAlmostEqual(horizontal, 54.9, places=9)
+        self.assertAlmostEqual(vertical, 42.5712, places=3)
+        self.assertAlmostEqual(vertical - 42.5, 0.0712, places=3)
+        # The focal length renders the declared horizontal angle, not the nominal vertical one.
+        drawn = math.degrees(
+            2.0 * math.atan(camera.horizontal_aperture_mm / (2.0 * camera.focal_length_mm))
+        )
+        self.assertAlmostEqual(drawn, camera.horizontal_fov_deg, places=9)
+
+    def test_camera_is_square_pixel(self) -> None:
+        """The renderer projects square pixels, so the simulator's two pixel
+        focal lengths are equal and the vertical aperture is the image-size one.
+        The retired camera was 461.7 px at 69.5 deg horizontal."""
+        camera = RunProfile.load(ROOT / "configs/profiles/isaac-g1-dex3.json").camera
+        fx, fy = camera.focal_length_px
+        self.assertAlmostEqual(fx, 616.03, delta=0.05)
+        self.assertAlmostEqual(fy, fx, places=9)
+        self.assertAlmostEqual(camera.vertical_aperture_mm, 20.955 * 480 / 640, places=9)
+
+    def test_rejects_camera_angles_outside_a_physical_range(self) -> None:
+        source = json.loads((ROOT / "configs/profiles/isaac-g1-no_hands.json").read_text())
+        source["camera"]["horizontal_fov_deg"] = 180.0
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bad.json"
+            path.write_text(json.dumps(source))
+            with self.assertRaisesRegex(ContractError, "horizontal_fov_deg"):
+                RunProfile.load(path)
+
+    def test_rejects_a_nominal_pair_outside_a_physical_range(self) -> None:
+        source = json.loads((ROOT / "configs/profiles/isaac-g1-no_hands.json").read_text())
+        source["camera"]["nominal_fov_deg"] = [54.9, 200.0]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bad.json"
+            path.write_text(json.dumps(source))
+            with self.assertRaisesRegex(ContractError, "nominal_fov_deg"):
+                RunProfile.load(path)
+
+    def test_rejects_a_profile_from_the_focal_length_schema(self) -> None:
+        """Schema 1 declared the head camera by focal length. That field is gone
+        and the version bump has to fail loudly rather than imply an angle."""
+        source = json.loads((ROOT / "configs/profiles/isaac-g1-no_hands.json").read_text())
+        source["schema_version"] = 1
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "old.json"
+            path.write_text(json.dumps(source))
+            with self.assertRaisesRegex(ContractError, "schema_version"):
+                RunProfile.load(path)
 
     def test_rejects_non_29dof_body(self) -> None:
         source = json.loads((ROOT / "configs/profiles/isaac-g1-no_hands.json").read_text())
@@ -77,6 +149,19 @@ class IsaacG1SourceInvariantTests(unittest.TestCase):
         source = (ROOT / "src/humanoid_lab/simulators/isaac/service.py").read_text()
         for forbidden in ("sonic_isaac", "cloudwalk", "groot", "StateLink", "LowCmd"):
             self.assertNotIn(forbidden, source)
+
+    def test_both_camera_paths_set_the_declared_vertical_aperture(self) -> None:
+        """Isaac Lab derives the vertical aperture from the image aspect ratio
+        when it is not given, which forces square pixels and a vertical angle
+        the real camera does not have. Both camera paths must declare it."""
+        for name in ("service.py", "replay.py"):
+            source = (ROOT / "src/humanoid_lab/simulators/isaac" / name).read_text()
+            self.assertIn("vertical_aperture=camera.vertical_aperture_mm", source, name)
+
+    def test_replay_manifest_records_the_projection_the_prim_holds(self) -> None:
+        source = (ROOT / "src/humanoid_lab/simulators/isaac/replay.py").read_text()
+        self.assertIn("GetVerticalApertureAttr", source)
+        self.assertIn('"usd_attributes"', source)
 
     def test_loop_decouples_physics_from_render(self) -> None:
         source = SERVICE.read_text()

@@ -302,7 +302,7 @@ case "${1:-}" in
     replay_args=()
     case "$profile" in
       grail-replay)
-        [ "$#" -ge 3 ] || { echo "usage: $0 isaac-g1 grail-replay <sequence-key> [--headless] [--replay-data-root PATH] [--replay-output-dir PATH]" >&2; exit 2; }
+        [ "$#" -ge 3 ] || { echo "usage: $0 isaac-g1 grail-replay <sequence-key> [--headless] [--replay-data-root PATH] [--replay-output-dir PATH] [--visibility [--visibility-threshold F] [--visibility-before S] [--visibility-after S]]" >&2; exit 2; }
         profile_file=configs/profiles/isaac-g1-dex3.json
         replay_args=(--replay "$3")
         extra=("${@:4}")
@@ -317,7 +317,7 @@ case "${1:-}" in
         ;;
       *)
         echo "usage: $0 isaac-g1 {no_hands|inspire-ftp|dex3} [--test passive-fall] [--headless] [--head-camera-window] [--duration SECONDS]" >&2
-        echo "       $0 isaac-g1 grail-replay <sequence-key> [--headless] [--replay-data-root PATH] [--replay-output-dir PATH]" >&2
+        echo "       $0 isaac-g1 grail-replay <sequence-key> [--headless] [--replay-data-root PATH] [--replay-output-dir PATH] [--visibility [--visibility-threshold F] [--visibility-before S] [--visibility-after S]]" >&2
         exit 2
         ;;
     esac

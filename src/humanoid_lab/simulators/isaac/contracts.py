@@ -13,6 +13,8 @@ from typing import Any, Mapping, Sequence
 DEVICE_PATTERN = re.compile(r"^(cpu|cuda(:\d+)?)$")
 DEFAULT_DEVICE = "cpu"
 DEFAULT_RENDER_INTERVAL = 8
+# 1 declared the head camera by focal length, 2 by its field-of-view angles.
+PROFILE_SCHEMA_VERSION = 2
 # Long enough to ride out a slow control tick, short enough that a vanished
 # controller leaves the robot passive well before it could look controlled.
 DEFAULT_COMMAND_TTL_S = 0.25
@@ -46,14 +48,34 @@ def _tuple(values: Sequence[Any], length: int, name: str) -> tuple[float, ...]:
 
 @dataclass(frozen=True)
 class CameraSpec:
+    """The head camera, declared by the angle this renderer can honour.
+
+    Isaac Sim projects square pixels: the declared horizontal angle and the
+    image size fix the vertical angle, and an authored vertical aperture has no
+    effect on the image (measured with probe renders, see README). The profile
+    therefore declares the horizontal angle of the real camera's stream and the
+    aperture the focal length is expressed against; the focal length, the
+    vertical aperture and both rendered angles are derived.
+
+    ``provenance`` carries what the camera is; ``nominal_fov_deg`` carries the
+    device's quoted pair (e.g. the D435i's 54.9 x 42.5) as data, so the gap
+    between a quoted vertical angle and the square-pixel one stays measurable
+    instead of living in prose.
+    """
+
     name: str
     parent_link: str
     width: int
     height: int
-    focal_length_mm: float
+    horizontal_fov_deg: float
     horizontal_aperture_mm: float
     position_m: tuple[float, float, float]
     rotation_wxyz: tuple[float, float, float, float]
+    # What the device is quoted at, e.g. the D435i's 54.9 x 42.5 degrees. It is
+    # recorded, never fed to the renderer: the vertical part is not reachable in
+    # a square-pixel render of a 4:3 image.
+    nominal_fov_deg: tuple[float, float] | None = None
+    provenance: str = ""
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "CameraSpec":
@@ -63,6 +85,17 @@ class CameraSpec:
         width, height = (int(value) for value in data["resolution"])
         if width <= 0 or height <= 0:
             raise ContractError("camera resolution must be positive")
+        angle = float(data["horizontal_fov_deg"])
+        if not math.isfinite(angle) or not 0.0 < angle < 180.0:
+            raise ContractError("camera horizontal_fov_deg must be one angle between 0 and 180 degrees")
+        aperture = float(data["horizontal_aperture_mm"])
+        if not math.isfinite(aperture) or aperture <= 0.0:
+            raise ContractError("camera horizontal_aperture_mm must be positive and finite")
+        nominal = data.get("nominal_fov_deg")
+        if nominal is not None:
+            nominal = _tuple(nominal, 2, "camera nominal_fov_deg")
+            if not all(0.0 < value < 180.0 for value in nominal):
+                raise ContractError("camera nominal_fov_deg must be two angles between 0 and 180 degrees")
         rotation = _tuple(data["rotation_wxyz"], 4, "camera rotation_wxyz")
         if abs(sum(value * value for value in rotation) - 1.0) > 1e-5:
             raise ContractError("camera rotation_wxyz must be normalized")
@@ -71,11 +104,43 @@ class CameraSpec:
             parent_link=parent,
             width=width,
             height=height,
-            focal_length_mm=float(data["focal_length_mm"]),
-            horizontal_aperture_mm=float(data["horizontal_aperture_mm"]),
+            horizontal_fov_deg=angle,
+            horizontal_aperture_mm=aperture,
             position_m=_tuple(data["position_m"], 3, "camera position_m"),
             rotation_wxyz=rotation,
+            nominal_fov_deg=nominal,
+            provenance=str(data.get("provenance", "")),
         )
+
+    @property
+    def focal_length_mm(self) -> float:
+        """Focal length that renders the declared horizontal angle."""
+        return self.horizontal_aperture_mm / (2.0 * math.tan(math.radians(self.horizontal_fov_deg / 2.0)))
+
+    @property
+    def focal_length_px(self) -> tuple[float, float]:
+        """Rendered pixel focal lengths ``(f_x, f_y)``: this camera is square-pixel."""
+        focal = self.width * self.focal_length_mm / self.horizontal_aperture_mm
+        return (focal, focal)
+
+    @property
+    def vertical_aperture_mm(self) -> float:
+        """Aperture height that belongs to this image size.
+
+        It is what Isaac Lab derives on its own, and what the rendered image
+        already does; passing it keeps the prim saying what the projection does.
+        """
+        return self.horizontal_aperture_mm * self.height / self.width
+
+    @property
+    def vertical_fov_deg(self) -> float:
+        """Vertical angle this image size renders at the declared horizontal one."""
+        return math.degrees(2.0 * math.atan((self.height / 2.0) / self.focal_length_px[0]))
+
+    @property
+    def rendered_fov_deg(self) -> tuple[float, float]:
+        """The two angles the renderer produces ``(horizontal, vertical)``."""
+        return (self.horizontal_fov_deg, self.vertical_fov_deg)
 
 
 @dataclass(frozen=True)
@@ -195,7 +260,7 @@ class RunProfile:
             data = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError) as exc:
             raise ContractError(f"cannot load profile {path}: {exc}") from exc
-        if int(data.get("schema_version", 0)) != 1:
+        if int(data.get("schema_version", 0)) != PROFILE_SCHEMA_VERSION:
             raise ContractError("unsupported Isaac G1 profile schema_version")
         dt = float(data["simulation"]["physics_dt"])
         if not math.isfinite(dt) or dt <= 0.0:
@@ -218,7 +283,7 @@ class RunProfile:
         if support is not None and controller is None:
             raise ContractError("a support band only means something with a controller attached")
         return cls(
-            schema_version=1,
+            schema_version=PROFILE_SCHEMA_VERSION,
             profile_id=str(data["profile_id"]),
             robot=RobotSpec.from_dict(data["robot"]),
             camera=CameraSpec.from_dict(data["camera"]),
@@ -270,10 +335,17 @@ class RunProfile:
                 "name": self.camera.name,
                 "parent_link": self.camera.parent_link,
                 "resolution": [self.camera.width, self.camera.height],
+                "rendered_fov_deg": list(self.camera.rendered_fov_deg),
+                "nominal_fov_deg": (
+                    list(self.camera.nominal_fov_deg) if self.camera.nominal_fov_deg else None
+                ),
                 "focal_length_mm": self.camera.focal_length_mm,
                 "horizontal_aperture_mm": self.camera.horizontal_aperture_mm,
+                "vertical_aperture_mm": self.camera.vertical_aperture_mm,
+                "focal_length_px": list(self.camera.focal_length_px),
                 "position_m": list(self.camera.position_m),
                 "rotation_wxyz": list(self.camera.rotation_wxyz),
+                "provenance": self.camera.provenance,
             },
             "simulation": {
                 "physics_dt": self.physics_dt,

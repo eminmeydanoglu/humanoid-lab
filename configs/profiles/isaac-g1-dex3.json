@@ -1,12 +1,12 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "profile_id": "isaac-g1-29dof-dex3-head-camera",
   "robot": {
     "name": "g1-29dof-dex3",
     "body_dofs": 29,
     "asset_kind": "usd",
-    "asset_reference": "/data/models/sonic-assets/g1_29dof_with_hand_rev_1_0.usd",
-    "asset_provenance": "pinned SONIC gear_sonic G1 rev 1.0 Dex3 asset (sha256 a7a2bab7), materialized into the data root",
+    "asset_reference": "/workspace/humanoid-lab/configs/assets/g1_29dof_with_hand_rev_1_0_appearance.usda",
+    "asset_provenance": "pinned SONIC gear_sonic G1 rev 1.0 Dex3 asset (sha256 a7a2bab7) in the data root, wrapped by the in-repo appearance-only overlay configs/assets/g1_29dof_with_hand_rev_1_0_appearance.usda (material inputs and the seven dark-link bindings; no geometry, joint, mass or collision opinion)",
     "initial_position_m": [
       0.0,
       0.0,
@@ -30,8 +30,13 @@
       640,
       480
     ],
-    "focal_length_mm": 15.1159925892,
+    "horizontal_fov_deg": 54.9,
+    "nominal_fov_deg": [
+      54.9,
+      42.5
+    ],
     "horizontal_aperture_mm": 20.955,
+    "provenance": "RealSense D435i color stream at 640x480 (4:3 crop of the 16:9 sensor)",
     "position_m": [
       0.0576235,
       0.01753,

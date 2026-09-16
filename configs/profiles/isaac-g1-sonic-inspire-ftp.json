@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "profile_id": "isaac-g1-29dof-inspire-ftp-sonic",
   "robot": {
     "name": "g1-29dof-inspire-ftp",
@@ -32,8 +32,13 @@
       640,
       480
     ],
-    "focal_length_mm": 15.1159925892,
+    "horizontal_fov_deg": 54.9,
+    "nominal_fov_deg": [
+      54.9,
+      42.5
+    ],
     "horizontal_aperture_mm": 20.955,
+    "provenance": "RealSense D435i color stream at 640x480 (4:3 crop of the 16:9 sensor)",
     "position_m": [
       0.0576235,
       0.01753,

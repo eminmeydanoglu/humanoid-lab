@@ -27,6 +27,7 @@ from humanoid_lab.simulators.isaac.replay import (  # noqa: E402
     RENDER_FRAME_MULTIPLIER,
     TRAJECTORY_JOINT_NAMES,
     ReplayError,
+    detect_grasp_source_frame,
     interpolated_frame,
     joint_layout,
     joint_positions,
@@ -63,6 +64,47 @@ class SequenceKeyTests(unittest.TestCase):
         for key in ("", ".", "..", "../robot/x", "a/b", "/abs"):
             with self.subTest(key=key), self.assertRaises(ReplayError):
                 validate_sequence_key(key)
+
+
+class GraspDetectionTests(unittest.TestCase):
+    """The grasp event is the release's own discrete right-hand command."""
+
+    def test_first_open_to_closed_transition_is_the_grasp(self) -> None:
+        series = [-1.0] * 5 + [1.0] * 3
+        self.assertEqual(detect_grasp_source_frame(series), 5)
+
+    def test_multiple_close_transitions_are_ambiguous(self) -> None:
+        with self.assertRaisesRegex(ReplayError, "ambiguous"):
+            detect_grasp_source_frame([-1.0, -1.0, 1.0, -1.0, 1.0])
+
+    def test_series_that_never_closes_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ReplayError, "never closes"):
+            detect_grasp_source_frame([-1.0] * 4)
+
+    def test_series_that_starts_closed_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ReplayError, "already closed"):
+            detect_grasp_source_frame([1.0, 1.0, 1.0])
+
+    def test_non_discrete_values_are_rejected(self) -> None:
+        for series in ([-1.0, 0.0, 1.0], [-1.0, 0.5, 1.0], [-1.0, 2.0]):
+            with self.subTest(series=series), self.assertRaisesRegex(ReplayError, "discrete"):
+                detect_grasp_source_frame(series)
+
+    def test_non_finite_values_are_rejected(self) -> None:
+        for series in ([-1.0, float("nan"), 1.0], [-1.0, float("inf")]):
+            with self.subTest(series=series), self.assertRaisesRegex(ReplayError, "finite"):
+                detect_grasp_source_frame(series)
+
+    def test_too_short_and_nested_series_are_rejected(self) -> None:
+        for series in ([], [-1.0]):
+            with self.subTest(series=series), self.assertRaisesRegex(ReplayError, "at least 2"):
+                detect_grasp_source_frame(series)
+        with self.assertRaisesRegex(ReplayError, "one-dimensional"):
+            detect_grasp_source_frame([[-1.0, 1.0], [-1.0, 1.0]])
+
+    def test_key_prefixes_the_error(self) -> None:
+        with self.assertRaisesRegex(ReplayError, "^pickup_table__unit_0__000: "):
+            detect_grasp_source_frame([-1.0], key="pickup_table__unit_0__000")
 
 
 class JointMappingTests(unittest.TestCase):
@@ -212,6 +254,10 @@ def _write_motion_lib(
         "root_rot": root_rot_xyzw,
         "dof": np.tile(np.arange(29, dtype=np.float32), (frames, 1)),
         "fps": 25.0,
+        # Open for the first half, closed from the middle frame on.
+        "hand_action_right": np.concatenate(
+            [np.full(frames // 2, -1.0, dtype=np.float32), np.full(frames - frames // 2, 1.0, dtype=np.float32)]
+        ),
     }
     if hands:
         entry["hand_dof_pos"] = np.tile(np.arange(100, 114, dtype=np.float32), (frames, 1))
@@ -255,6 +301,35 @@ class SyntheticDatasetTests(unittest.TestCase):
         # Body columns follow the MuJoCo -> IsaacLab reorder, hands follow verbatim.
         np.testing.assert_array_equal(dof[0, :29], np.asarray(MUJOCO_TO_ISAACLAB_BODY, dtype=np.float32))
         np.testing.assert_array_equal(dof[0, 29:], np.arange(100, 114, dtype=np.float32))
+
+    def test_grasp_comes_from_the_source_right_hand_command(self) -> None:
+        sequence = self._load()
+        # The synthetic library closes at source frame 3 of 6.
+        self.assertEqual(sequence.grasp_source_frame, 3)
+        self.assertAlmostEqual(sequence.grasp_time_seconds, 3 / 25.0)
+        self.assertEqual(sequence.grasp_render_frame, 6)
+
+    def test_missing_or_invalid_right_hand_signal_fails_loudly(self) -> None:
+        cases = {
+            "absent": lambda entry: entry.pop("hand_action_right"),
+            "non-discrete": lambda entry: entry.update(hand_action_right=np.zeros(6, dtype=np.float32)),
+            "never closes": lambda entry: entry.update(
+                hand_action_right=np.full(6, -1.0, dtype=np.float32)
+            ),
+            "wrong length": lambda entry: entry.update(
+                hand_action_right=np.array([-1.0, 1.0], dtype=np.float32)
+            ),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "pickup_table"
+                key = "pickup_table__unit_0__000"
+                _write_motion_lib(root, key)
+                payload = joblib.load(root / "robot" / f"{key}.pkl")
+                mutate(next(iter(payload.values())))
+                joblib.dump(payload, root / "robot" / f"{key}.pkl")
+                with self.assertRaises(ReplayError):
+                    load_sequence(key, root)
 
     def test_quaternions_arrive_as_wxyz(self) -> None:
         sequence = self._load()
@@ -329,6 +404,19 @@ class ReleasedDatasetTests(unittest.TestCase):
         self.assertEqual(EXTERNAL_RESOLUTION, (1920, 1080))
         self.assertEqual(sequence.render_frames, 500)
         self.assertEqual(sequence.render_fps, 50.0)
+
+    def test_apple_grasp_is_the_first_right_hand_close_of_the_source_pkl(self) -> None:
+        sequence = load_sequence(APPLE_KEY, DATA_ROOT)
+        self.assertEqual(sequence.grasp_source_frame, 96)
+        self.assertAlmostEqual(sequence.grasp_time_seconds, 96 / 25.0)
+        self.assertEqual(sequence.grasp_render_frame, 192)
+        # Independently re-derive the transition from the raw source pkl.
+        payload = joblib.load(sequence.robot_pkl)
+        entry = next(iter(payload.values()))
+        command = np.asarray(entry["hand_action_right"], dtype=np.float64)
+        transitions = np.flatnonzero((command[:-1] < 0) & (command[1:] > 0))
+        self.assertEqual(len(transitions), 1)
+        self.assertEqual(int(transitions[0]) + 1, sequence.grasp_source_frame)
 
     def test_apple_hand_columns_fit_the_independently_declared_joint_limits(self) -> None:
         sequence = load_sequence(APPLE_KEY, DATA_ROOT)

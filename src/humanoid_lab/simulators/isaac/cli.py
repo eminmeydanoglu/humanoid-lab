@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import threading
@@ -36,6 +37,29 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--replay-data-root", type=Path, help="GRAIL pickup_table directory")
     parser.add_argument("--replay-output-dir", type=Path, help="replay output directory")
+    parser.add_argument(
+        "--visibility",
+        action="store_true",
+        help="measure how much of the target object is visible in the head camera and write visibility.json",
+    )
+    parser.add_argument(
+        "--visibility-threshold",
+        type=float,
+        default=None,
+        help="visible-fraction threshold of the grasp-window summary (default 0.5)",
+    )
+    parser.add_argument(
+        "--visibility-before",
+        type=float,
+        default=None,
+        help="seconds before the grasp the summary window starts at (default 1.0)",
+    )
+    parser.add_argument(
+        "--visibility-after",
+        type=float,
+        default=None,
+        help="seconds after the grasp the summary window ends at (default 1.0)",
+    )
     from isaaclab.app import AppLauncher
 
     AppLauncher.add_app_launcher_args(parser)
@@ -51,7 +75,27 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         args.duration = 12.0
     if args.replay and (args.test or args.duration is not None):
         parser.error("--replay cannot be combined with --test or --duration")
+    _validate_visibility_args(parser, args)
     return args
+
+
+def _validate_visibility_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Reject visibility flags that are ignored, unbounded or nonsensical."""
+    if not args.visibility:
+        for flag in ("--visibility-threshold", "--visibility-before", "--visibility-after"):
+            if getattr(args, flag[2:].replace("-", "_")) is not None:
+                parser.error(f"{flag} only means something together with --visibility")
+        return
+    if not args.replay:
+        parser.error("--visibility only means something together with --replay")
+    if args.visibility_threshold is not None and not (
+        math.isfinite(args.visibility_threshold) and 0.0 <= args.visibility_threshold <= 1.0
+    ):
+        parser.error("--visibility-threshold must be one finite value between 0 and 1")
+    for flag in ("--visibility-before", "--visibility-after"):
+        value = getattr(args, flag[2:].replace("-", "_"))
+        if value is not None and not (math.isfinite(value) and value >= 0.0):
+            parser.error(f"{flag} must be one finite non-negative number of seconds")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -68,14 +112,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         profile = RunProfile.load(args.profile).with_device(device_override)
         if args.replay:
             from .replay import DEFAULT_DATA_ROOT, DEFAULT_OUTPUT_ROOT, ReplayService, load_sequence
+            from .visibility import DEFAULT_AFTER_SECONDS, DEFAULT_BEFORE_SECONDS, DEFAULT_THRESHOLD, VisibilityConfig
 
             sequence = load_sequence(args.replay, args.replay_data_root or DEFAULT_DATA_ROOT)
+            visibility = (
+                VisibilityConfig(
+                    threshold=DEFAULT_THRESHOLD if args.visibility_threshold is None else args.visibility_threshold,
+                    before_seconds=DEFAULT_BEFORE_SECONDS if args.visibility_before is None else args.visibility_before,
+                    after_seconds=DEFAULT_AFTER_SECONDS if args.visibility_after is None else args.visibility_after,
+                )
+                if args.visibility
+                else None
+            )
             service = ReplayService(
                 profile,
                 simulation_app,
                 sequence,
                 output_dir=args.replay_output_dir or DEFAULT_OUTPUT_ROOT / args.replay,
                 show_ui=not args.headless,
+                visibility=visibility,
             )
         else:
             from .service import SimulatorService

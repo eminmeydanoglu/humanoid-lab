@@ -124,7 +124,7 @@ Varsayılan:
 - robot asset’i,
 - object USD ve uygulanan scale,
 - table pose/size,
-- head/external camera çözünürlükleri,
+- head/external camera çözünürlükleri ve head camera'nın açı/odak değerleri (USD prim'den okunan dahil),
 - quaternion convention,
 - sonuç ve hata bilgisi.
 

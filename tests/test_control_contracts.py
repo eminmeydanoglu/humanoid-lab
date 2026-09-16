@@ -21,7 +21,11 @@ from humanoid_lab.contracts.commands import (
     resolve_layouts,
 )
 from humanoid_lab.controllers import sonic
-from humanoid_lab.simulators.isaac.contracts import ContractError, RunProfile
+from humanoid_lab.simulators.isaac.contracts import (
+    ContractError,
+    PROFILE_SCHEMA_VERSION,
+    RunProfile,
+)
 
 PROFILES = Path(__file__).resolve().parents[1] / "configs" / "profiles"
 REPO = Path(__file__).resolve().parents[1]
@@ -173,7 +177,7 @@ class ProfileTests(unittest.TestCase):
         for path in sorted(PROFILES.glob("*.json")):
             with self.subTest(profile=path.name):
                 profile = RunProfile.load(path)
-                self.assertEqual(profile.schema_version, 1)
+                self.assertEqual(profile.schema_version, PROFILE_SCHEMA_VERSION)
                 self.assertEqual(profile.robot.body_dofs, 29)
 
     def test_sonic_profiles_declare_a_controller_pose_and_support(self) -> None:

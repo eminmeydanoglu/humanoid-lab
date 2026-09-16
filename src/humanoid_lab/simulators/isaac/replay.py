@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import pickle
 import sys
 import tempfile
@@ -23,6 +24,14 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .contracts import RunProfile
+from .visibility import (
+    VISIBILITY_REPORT_NAME,
+    FrameVisibility,
+    VisibilityConfig,
+    VisibilityError,
+    build_report,
+    window_bounds,
+)
 
 DEFAULT_DATA_ROOT = Path("/data/datasets/grail/data/pickup_table")
 DEFAULT_OUTPUT_ROOT = Path("/outputs/grail-replay")
@@ -97,7 +106,7 @@ class ReplayError(ValueError):
 
 @dataclass(frozen=True)
 class ReplaySequence:
-    """One validated motion: its files, its trajectory and its table."""
+    """One validated motion: its files, its trajectory, its table and its grasp."""
 
     key: str
     data_root: Path
@@ -109,6 +118,8 @@ class ReplaySequence:
     table_pos: tuple[float, float, float]
     table_quat_wxyz: tuple[float, float, float, float]
     table_size: tuple[float, float, float]
+    grasp_source_frame: int
+    grasp_time_seconds: float
 
     @property
     def frames(self) -> int:
@@ -126,11 +137,60 @@ class ReplaySequence:
     def render_fps(self) -> float:
         return self.fps * RENDER_FRAME_MULTIPLIER
 
+    @property
+    def grasp_render_frame(self) -> int:
+        """Render frame that reproduces the grasp keyframe exactly."""
+        return self.grasp_source_frame * RENDER_FRAME_MULTIPLIER
+
 
 def validate_sequence_key(key: str) -> None:
     """Reject keys that are not one plain file name stem."""
     if not key or key in {".", ".."} or Path(key).name != key:
         raise ReplayError(f"invalid sequence key {key!r}: expected one file name stem")
+
+
+def detect_grasp_source_frame(hand_action_right: Sequence[float], *, key: str = "") -> int:
+    """Return the source frame at which the right hand first closes.
+
+    The release stores one discrete command per source frame: -1 is open and +1
+    is closed, so the grasp frame is the first closed frame that follows an open
+    one. Every ``pickup_table`` motion resolves to exactly one such transition.
+    Non-discrete, non-finite, already-closed and transition-free series are
+    rejected instead of being interpreted.
+    """
+    label = f"{key}: " if key else ""
+    try:
+        values = [float(value) for value in hand_action_right]
+    except (TypeError, ValueError) as exc:
+        raise ReplayError(f"{label}hand_action_right is not a one-dimensional numeric series") from exc
+    if len(values) < 2:
+        raise ReplayError(f"{label}hand_action_right has {len(values)} frames, a transition needs at least 2")
+    for frame, value in enumerate(values):
+        if not math.isfinite(value):
+            raise ReplayError(f"{label}hand_action_right is not finite at source frame {frame}")
+        if value not in (-1.0, 1.0):
+            raise ReplayError(
+                f"{label}hand_action_right must be discrete -1 (open) or +1 (closed), "
+                f"got {value!r} at source frame {frame}"
+            )
+    transitions = [
+        frame
+        for frame in range(1, len(values))
+        if values[frame - 1] < 0.0 < values[frame]
+    ]
+    if len(transitions) == 1:
+        return transitions[0]
+    if len(transitions) > 1:
+        raise ReplayError(
+            f"{label}hand_action_right closes {len(transitions)} times at source frames "
+            f"{transitions}; the grasp event is ambiguous"
+        )
+    if values[0] > 0.0:
+        raise ReplayError(
+            f"{label}the right hand is already closed at the first source frame; "
+            "the grasp transition is not inside the recording"
+        )
+    raise ReplayError(f"{label}hand_action_right never closes: no open-to-closed transition")
 
 
 def joint_layout(articulation_names: Sequence[str]) -> list[int]:
@@ -317,10 +377,14 @@ def _set_xform_value(op: Any, values: Sequence[float]) -> None:
         op.Set(Gf.Vec3f(*numbers) if single else Gf.Vec3d(*numbers))
 
 
-def _validate_source_robot(key: str, robot_pkl: Path) -> None:
-    """Require the public-release body-plus-separate-hands source layout."""
+def _source_robot_entry(key: str, robot_pkl: Path) -> Mapping[str, Any]:
+    """Load the robot pkl and resolve its motion entry.
+
+    The public release wraps one motion per file; a file that also carries the
+    sequence key as its own inner key is accepted as well. Anything else is a
+    structure replay does not understand.
+    """
     import joblib
-    import numpy as np
 
     payload = joblib.load(robot_pkl)
     if not isinstance(payload, Mapping) or not payload:
@@ -330,9 +394,17 @@ def _validate_source_robot(key: str, robot_pkl: Path) -> None:
     elif len(payload) == 1:
         entry = next(iter(payload.values()))
     else:
-        entry = None
+        raise ReplayError(f"{key}: unexpected robot pkl structure")
     if not isinstance(entry, Mapping):
         raise ReplayError(f"{key}: unexpected robot pkl structure")
+    return entry
+
+
+def _validate_source_robot(key: str, robot_pkl: Path) -> Mapping[str, Any]:
+    """Require the public-release body-plus-separate-hands source layout."""
+    import numpy as np
+
+    entry = _source_robot_entry(key, robot_pkl)
     root = np.asarray(entry.get("root_trans_offset"))
     if root.ndim != 2 or root.shape[1] != 3 or len(root) == 0:
         raise ReplayError(f"{key}: source root_trans_offset has invalid shape {root.shape}")
@@ -343,6 +415,14 @@ def _validate_source_robot(key: str, robot_pkl: Path) -> None:
         raise ReplayError(f"{key}: source body dof has shape {body.shape}, expected {(frames, 29)}")
     if hands.shape != (frames, 14):
         raise ReplayError(f"{key}: source hand_dof_pos has shape {hands.shape}, expected {(frames, 14)}")
+    if "hand_action_right" not in entry:
+        raise ReplayError(f"{key}: source robot pkl has no hand_action_right series")
+    hand_action = np.asarray(entry["hand_action_right"])
+    if hand_action.shape != (frames,):
+        raise ReplayError(
+            f"{key}: source hand_action_right has shape {hand_action.shape}, expected {(frames,)}"
+        )
+    return entry
 
 
 def _validate_source_scale(key: str, object_pkl: Path) -> None:
@@ -414,7 +494,7 @@ def load_sequence(key: str, data_root: Path = DEFAULT_DATA_ROOT) -> ReplaySequen
     for path in (robot_pkl, object_pkl, meta_pkl, object_usd):
         if not path.is_file():
             raise ReplayError(f"{key}: missing dataset file {path}")
-    _validate_source_robot(key, robot_pkl)
+    robot_entry = _validate_source_robot(key, robot_pkl)
     with tempfile.TemporaryDirectory(prefix="grail-replay-") as shard:
         converter = _converter()
         try:
@@ -437,6 +517,10 @@ def load_sequence(key: str, data_root: Path = DEFAULT_DATA_ROOT) -> ReplaySequen
         trajectory[name] = quaternions / np.linalg.norm(quaternions, axis=1, keepdims=True)
     _validate_trajectory(key, trajectory)
     _validate_source_scale(key, object_pkl)
+    grasp_source_frame = detect_grasp_source_frame(robot_entry["hand_action_right"], key=key)
+    if grasp_source_frame >= int(trajectory["total_frames"]):
+        raise ReplayError(f"{key}: grasp source frame {grasp_source_frame} is outside the trajectory")
+    grasp_time_seconds = grasp_source_frame / float(trajectory["fps"])
     pos, quat, size = _table_metadata(key, meta_pkl)
     return ReplaySequence(
         key=key,
@@ -449,6 +533,8 @@ def load_sequence(key: str, data_root: Path = DEFAULT_DATA_ROOT) -> ReplaySequen
         table_pos=pos,
         table_quat_wxyz=quat,
         table_size=size,
+        grasp_source_frame=grasp_source_frame,
+        grasp_time_seconds=grasp_time_seconds,
     )
 
 
@@ -463,14 +549,18 @@ class ReplayService:
         *,
         output_dir: Path,
         show_ui: bool = False,
+        visibility: VisibilityConfig | None = None,
     ) -> None:
         self.profile = profile
         self.app = simulation_app
         self.sequence = sequence
         self.output_dir = Path(output_dir)
         self.show_ui = show_ui
+        self.visibility_config = visibility
         self.head_camera_distinct_frames = 0
         self._articulation: dict[str, Any] = {}
+        self._visibility: Any = None
+        self._visibility_rows: list[FrameVisibility] = []
         # Largest gap between what replay writes and what Isaac actually holds.
         self._joint_tracking_error = 0.0
         self._root_tracking_error = 0.0
@@ -480,26 +570,42 @@ class ReplayService:
         self._sim: Any = None
         self._robot: Any = None
         self._head_camera: Any = None
+        self._head_camera_path = ""
+        # What Isaac authored on the prim, or None while no scene exists yet.
+        self._head_camera_usd: dict[str, float] | None = None
         self._external_camera: Any = None
         self._object_ops: tuple[Any, Any, Any] | None = None
         self._external_eye = (0.0, 0.0, 0.0)
         self._external_target = (0.0, 0.0, 0.0)
         self._joint_map: list[int] = []
         self._viewport_windows: list[Any] = []
+        if visibility is not None:
+            # A window that cannot contain one render frame must fail before any
+            # rendering, not produce an empty summary afterwards.
+            try:
+                window_bounds(sequence.grasp_time_seconds, visibility, sequence.render_fps, sequence.render_frames)
+            except VisibilityError as exc:
+                raise ReplayError(f"{sequence.key}: invalid visibility window: {exc}") from exc
 
     def run(self) -> dict[str, Any]:
         summary = self._manifest()
+        # A run that dies mid-clip must not leave the previous run's result on
+        # disk next to its own truncated videos. That covers visibility.json.
+        self._clear_visibility_report()
         if not self.show_ui:
-            # A run that dies mid-clip must not leave the previous run's result
-            # on disk next to its own truncated videos.
             self._write_manifest(summary)
         try:
             self._build_scene()
             summary["articulation"] = self._articulation
+            # The camera block carries what the prim holds, so it is refreshed
+            # after the scene exists; the first write only claimed the profile.
+            summary["cameras"] = self._camera_summary()
             if self.show_ui:
                 self._open_ui()
             self._render_clip()
             summary["head_camera_distinct_frames"] = self.head_camera_distinct_frames
+            if self.visibility_config is not None:
+                summary["visibility"] = self._finish_visibility()
             summary["result"] = "COMPLETED"
         except Exception as exc:
             summary["result"] = "FAILED"
@@ -514,15 +620,107 @@ class ReplayService:
                 self._write_manifest(summary)
         return summary
 
+    def _clear_visibility_report(self) -> None:
+        if self.visibility_config is not None:
+            (self.output_dir / VISIBILITY_REPORT_NAME).unlink(missing_ok=True)
+
+    def _head_camera_report(self) -> dict[str, Any]:
+        camera = self.profile.camera
+        return {
+            "name": camera.name,
+            "resolution": [camera.width, camera.height],
+            "horizontal_fov_deg": camera.horizontal_fov_deg,
+            "rendered_fov_deg": list(camera.rendered_fov_deg),
+            "nominal_fov_deg": list(camera.nominal_fov_deg) if camera.nominal_fov_deg else None,
+            "focal_length_mm": camera.focal_length_mm,
+            "focal_length_px": list(camera.focal_length_px),
+            "position_m": list(camera.position_m),
+            "rotation_wxyz": list(camera.rotation_wxyz),
+            "provenance": camera.provenance,
+        }
+
+    def _finish_visibility(self) -> dict[str, Any]:
+        """Write the visibility report and return its manifest summary."""
+        visibility = self._visibility
+        config = self.visibility_config
+        if visibility is None or config is None:  # pragma: no cover - guarded by run()
+            raise ReplayError("visibility analysis was requested but the scene never prepared it")
+        if not visibility.saw_target:
+            raise ReplayError(
+                "visibility analysis never saw the target object: no labelled pixel or bounding box "
+                "appeared in any frame, so all-zero values would not mean 'not visible'"
+            )
+        report = build_report(
+            sequence_key=self.sequence.key,
+            grasp_source_frame=self.sequence.grasp_source_frame,
+            grasp_time_seconds=self.sequence.grasp_time_seconds,
+            source_fps=self.sequence.fps,
+            source_frames=self.sequence.frames,
+            render_fps=self.sequence.render_fps,
+            render_frames=self.sequence.render_frames,
+            config=config,
+            head_camera=self._head_camera_report(),
+            frames=self._visibility_rows,
+            analysis_resolution=visibility.resolution,
+            analysis_view_scale=visibility.scale,
+            result="COMPLETED",
+        )
+        report_path = self.output_dir / VISIBILITY_REPORT_NAME
+        report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        summary = report["summary"]
+        return {
+            "enabled": True,
+            "report": str(report_path),
+            "threshold": config.threshold,
+            "before_seconds": config.before_seconds,
+            "after_seconds": config.after_seconds,
+            "measurement": visibility.summary(),
+            "grasp_render_frame": report["grasp"]["render_frame"],
+            "window_start_render_frame": report["window"]["start_render_frame"],
+            "window_end_render_frame": report["window"]["end_render_frame"],
+            "window_frames": summary["window_frames"],
+            "window_min_fraction": summary["window_min_fraction"],
+            "window_mean_fraction": summary["window_mean_fraction"],
+            "grasp_fraction": summary["grasp_fraction"],
+            "window_below_threshold_fraction": summary["window_below_threshold_fraction"],
+            "object_below_threshold_for_whole_window": summary["object_below_threshold_for_whole_window"],
+            "object_out_of_frame_for_whole_window": summary["object_out_of_frame_for_whole_window"],
+            "invalid_frames": summary["invalid_frames"],
+        }
+
     def _write_manifest(self, summary: Mapping[str, Any]) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         (self.output_dir / "manifest.json").write_text(
             json.dumps(summary, indent=2, sort_keys=True) + "\n"
         )
 
+    def _camera_summary(self) -> dict[str, Any]:
+        """Declared camera geometry, the angles it renders, and the prim's values."""
+        camera = self.profile.camera
+        return {
+            "head": {
+                "name": camera.name,
+                "resolution": [camera.width, camera.height],
+                "rendered_fov_deg": list(camera.rendered_fov_deg),
+                "nominal_fov_deg": (
+                    list(camera.nominal_fov_deg) if camera.nominal_fov_deg else None
+                ),
+                "focal_length_mm": camera.focal_length_mm,
+                "horizontal_aperture_mm": camera.horizontal_aperture_mm,
+                "vertical_aperture_mm": camera.vertical_aperture_mm,
+                "focal_length_px": list(camera.focal_length_px),
+                "provenance": camera.provenance,
+                # What Isaac authored on the prim; null until the scene exists,
+                # so "not read yet" cannot be mistaken for "read and empty".
+                "usd_attributes": (
+                    None if self._head_camera_usd is None else dict(self._head_camera_usd)
+                ),
+            },
+            "external": {"name": "external", "resolution": list(EXTERNAL_RESOLUTION)},
+        }
+
     def _manifest(self) -> dict[str, Any]:
         sequence = self.sequence
-        camera = self.profile.camera
         return {
             "schema_version": 1,
             "sequence_key": sequence.key,
@@ -553,14 +751,30 @@ class ReplayService:
                 "quaternion_wxyz": list(sequence.table_quat_wxyz),
                 "size": list(sequence.table_size),
             },
-            "cameras": {
-                "head": {"name": camera.name, "resolution": [camera.width, camera.height]},
-                "external": {"name": "external", "resolution": list(EXTERNAL_RESOLUTION)},
+            "cameras": self._camera_summary(),
+            "grasp": {
+                "source_frame": sequence.grasp_source_frame,
+                "source_time_seconds": sequence.grasp_time_seconds,
+                "render_frame": sequence.grasp_render_frame,
             },
+            "visibility": self._visibility_manifest(),
             "outputs": (
                 [] if self.show_ui else [str(self.output_dir / f"{name}.mp4") for name in ("external", "head")]
             ),
             "result": "PENDING",
+        }
+
+    def _visibility_manifest(self) -> dict[str, Any] | None:
+        """The manifest's visibility block: claimed before the run, filled after it."""
+        config = self.visibility_config
+        if config is None:
+            return None
+        return {
+            "enabled": True,
+            "report": str(self.output_dir / VISIBILITY_REPORT_NAME),
+            "threshold": config.threshold,
+            "before_seconds": config.before_seconds,
+            "after_seconds": config.after_seconds,
         }
 
     # ------------------------------------------------------------------- scene
@@ -575,6 +789,8 @@ class ReplayService:
         from isaaclab.sensors import Camera, CameraCfg
         from isaaclab.sim import SimulationContext
         from isaacsim.core.simulation_manager import SimulationManager
+
+        from .visibility_sensor import LABEL_FILTER, TargetVisibility
 
         profile = self.profile
         device = profile.device
@@ -619,16 +835,22 @@ class ReplayService:
         )
         self._robot = Articulation(robot_cfg)
         camera = profile.camera
+        visibility = self.visibility_config is not None
+        head_data_types = ["rgb"] + (["semantic_segmentation"] if visibility else [])
+        self._head_camera_path = f"{env_path}/Robot/{camera.parent_link}/{camera.name}"
         self._head_camera = Camera(
             CameraCfg(
-                prim_path=f"{env_path}/Robot/{camera.parent_link}/{camera.name}",
+                prim_path=self._head_camera_path,
                 update_period=0.0,
                 width=camera.width,
                 height=camera.height,
-                data_types=["rgb"],
+                data_types=head_data_types,
+                colorize_semantic_segmentation=False,
+                semantic_filter=LABEL_FILTER if visibility else "*:*",
                 spawn=sim_utils.PinholeCameraCfg(
                     focal_length=camera.focal_length_mm,
                     horizontal_aperture=camera.horizontal_aperture_mm,
+                    vertical_aperture=camera.vertical_aperture_mm,
                     clipping_range=(0.05, 20.0),
                 ),
                 offset=CameraCfg.OffsetCfg(
@@ -651,12 +873,29 @@ class ReplayService:
             )
         )
         self._spawn_table(stage, env_path)
-        self._spawn_object(stage, env_path)
+        object_prim = self._spawn_object(stage, env_path)
+        if visibility:
+            # The analysis camera shares the head camera's pose, optics and
+            # pixel scale with a wider view, so it can measure projections the
+            # 640x480 image clips away.
+            try:
+                self._visibility = TargetVisibility(profile, env_path)
+            except ValueError as exc:
+                raise ReplayError(f"{self.sequence.key}: visibility setup failed: {exc}") from exc
 
         self._sim.reset()
-        for sensor in (self._head_camera, self._external_camera):
+        sensors = [self._head_camera, self._external_camera]
+        if self._visibility is not None:
+            sensors.append(self._visibility.camera)
+        for sensor in sensors:
             sensor.reset()
         self._robot.reset()
+        self._head_camera_usd = self._read_head_camera_usd()
+        if self._visibility is not None:
+            try:
+                self._visibility.attach(object_prim, self._head_camera)
+            except ValueError as exc:
+                raise ReplayError(f"{self.sequence.key}: visibility setup failed: {exc}") from exc
         sensor_device = getattr(self._external_camera, "_device", "cpu")
         self._external_camera.set_world_poses_from_view(
             torch.tensor([list(self._external_eye)], dtype=torch.float32, device=sensor_device),
@@ -680,6 +919,24 @@ class ReplayService:
         for _ in range(5):  # warm up the shaders and the sensor render products
             self._sim.step(render=True)
             self._read_cameras()
+
+    def _read_head_camera_usd(self) -> dict[str, float]:
+        """Read the projection attributes Isaac authored on the camera prim.
+
+        The manifest then carries the angles, the derived millimetres and the
+        prim's own focal length and apertures, so a parameter that never reached
+        the camera shows up as a difference instead of as a different view.
+        """
+        import omni.usd
+        from pxr import UsdGeom
+
+        stage = omni.usd.get_context().get_stage()
+        prim = UsdGeom.Camera(stage.GetPrimAtPath(self._head_camera_path))
+        return {
+            "focal_length_mm": float(prim.GetFocalLengthAttr().Get()),
+            "horizontal_aperture_mm": float(prim.GetHorizontalApertureAttr().Get()),
+            "vertical_aperture_mm": float(prim.GetVerticalApertureAttr().Get()),
+        }
 
     def _external_view(self) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
         """Frame the table and the robot from the side the robot is facing."""
@@ -724,7 +981,7 @@ class ReplayService:
             )
             xformable.AddScaleOp().Set(Gf.Vec3f(leg_width, leg_width, leg_height))
 
-    def _spawn_object(self, stage: Any, env_path: str) -> None:
+    def _spawn_object(self, stage: Any, env_path: str) -> Any:
         from pxr import UsdGeom
 
         # A raw reference keeps the USD's relative texture paths intact and lets
@@ -733,6 +990,7 @@ class ReplayService:
         prim.GetReferences().AddReference(str(self.sequence.object_usd))
         self._object_ops = _xform_ops(UsdGeom.Xformable(prim))
         _set_xform_value(self._object_ops[2], self.sequence.trajectory["object_scale"])
+        return prim
 
     # ------------------------------------------------------------------ render
 
@@ -779,11 +1037,19 @@ class ReplayService:
             self._root_tracking_error,
             float((physx_root_pos - root_state[0, :3]).abs().max()),
         )
-        return self._read_cameras()
+        return self._read_cameras(frame)
 
-    def _read_cameras(self) -> tuple[Any, Any]:
+    def _read_cameras(self, frame: int | None = None) -> tuple[Any, Any]:
         self._head_camera.update(dt=0.0)
         self._external_camera.update(dt=0.0)
+        if self._visibility is not None and frame is not None:
+            self._visibility_rows.append(
+                self._visibility.read(
+                    frame,
+                    render_fps=self.sequence.render_fps,
+                    grasp_time_seconds=self.sequence.grasp_time_seconds,
+                )
+            )
         return (
             self._head_camera.data.output["rgb"][0].cpu().numpy()[..., :3],
             self._external_camera.data.output["rgb"][0].cpu().numpy()[..., :3],
@@ -853,9 +1119,8 @@ class ReplayService:
         from omni.kit.viewport.utility import create_viewport_window
         from pxr import Sdf
 
-        camera = self.profile.camera
         panels = (
-            ("GRAIL Replay Head Camera", f"/World/envs/env_0/Robot/{camera.parent_link}/{camera.name}", 120),
+            ("GRAIL Replay Head Camera", self._head_camera_path, 120),
             ("GRAIL Replay External Camera", "/World/ExternalCamera", 500),
         )
         for name, camera_path, position_y in panels:

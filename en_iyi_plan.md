@@ -563,12 +563,16 @@ Arşivlenmiş ve mevcut tasarımdaki camera korunur ve CloudWalk scene kodundan
 ```yaml
 id: g1-head-rgb-v1
 resolution: [640, 480]
-focal_length_mm: 15.1159925892
+horizontal_fov_deg: 54.9
 horizontal_aperture_mm: 20.955
 parent_link: torso_link
 position_rel_parent_m: [0.0576235, 0.01753, 0.41987]
 rotation_wxyz_parent: [0.9149596678, 0.0, 0.4035452964, 0.0]
 ```
+
+Yatay açı gerçek kameranın kendi değeridir (D435i color 640x480: nominal 54.9 x 42.5).
+Isaac kare-piksel izdüşüm yapar; bu yüzden dikey açı ayrıca bildirilmez, görüntü
+boyutundan türetilir ve 640x480'de 42.57° olur.
 
 Bu camera hem Inspire hem Dex3 varyantında bulunmalıdır. Her varyant için:
 

@@ -416,6 +416,7 @@ class SimulatorService:
                 spawn=sim_utils.PinholeCameraCfg(
                     focal_length=camera.focal_length_mm,
                     horizontal_aperture=camera.horizontal_aperture_mm,
+                    vertical_aperture=camera.vertical_aperture_mm,
                     clipping_range=(0.05, 20.0),
                 ),
                 offset=CameraCfg.OffsetCfg(
