@@ -91,7 +91,16 @@ client — NVIDIA ships a native viewer for Linux, Windows and macOS.
 | --- | --- |
 | Server | `./dev.sh isaac-g1 dex3` (streams by default), or `./dev.sh isaac-stream` for the empty Isaac Sim UI |
 | Address | the host's Tailscale IPv4, advertised automatically; override with `ISAAC_LIVESTREAM_ENDPOINT`, port `49100` |
-| Viewer | `./scripts/install-isaac-webrtc-client.sh` once per machine, then `./dev.sh webrtc-client`: enter the address and connect |
+| Viewer | `./dev.sh webrtc-view` starts the client on emin-1 and connects it; `./dev.sh webrtc-view raider` watches from the MSI laptop |
+
+`webrtc-view` copies a small helper over ssh, starts the client on that machine,
+points it at this host and confirms the connection from this side. NVIDIA's
+client takes no server argument, so the address is written into the client's own
+storage through its DevTools port. Each viewer machine needs the client
+(`./scripts/install-isaac-webrtc-client.sh`) and `python3-websocket` once; the
+laptop's account is named once with `ISAAC_VIEW_RAIDER=user@host`. The command
+does nothing while that machine is already watching — `ISAAC_VIEW_RESTART=1`
+restarts its client instead.
 
 The viewer needs no Isaac Sim installation and no GPU. One client connects at a
 time; the stream ends when the run ends.
@@ -127,6 +136,7 @@ motion, `R` resets, `O` is the emergency stop. `Enter` to switch to planner to t
 | `./dev.sh isaac-demo <demo.py>` | an Isaac Lab demo from `/opt/src/isaaclab/scripts/demos`, streamed over WebRTC |
 | `./dev.sh isaac-stream` | the Isaac Sim UI with no scene, streamed over WebRTC |
 | `./dev.sh webrtc-client` | Isaac Sim WebRTC client, for watching a streaming host |
+| `./dev.sh webrtc-view [emin-1\|raider]` | start the client on that machine and connect it to this host's stream (emin-1 by default) |
 | `./dev.sh doctor` | full host + container report, written to `$HUMANOID_DATA_ROOT/diagnostics/` |
 | `./dev.sh smoke` | in-container environment, asset and model checks |
 | `./dev.sh sync` | re-provisions the environment whose lock or pinned source changed |

@@ -40,4 +40,5 @@ işleri burada çalıştırılır; başka bir host'a SSH gerekmez.
 - Uygulama çalıştırma komutları: `./setup.sh`, `./dev.sh`, `./doctor.sh`,
   `./scripts/smoke-test.sh`. Görsel Isaac koşuları varsayılan olarak WebRTC ile
   yayınlanır ve yerel pencere açmaz; yerel X11 penceresi için `--gui`, arayüzsüz
-  koşular için `--headless`.
+  koşular için `--headless`. İzleme, istemciyi izleyen makinede başlatan
+  `./dev.sh webrtc-view [emin-1|raider]` ile yapılır.

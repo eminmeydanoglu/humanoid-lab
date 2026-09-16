@@ -472,6 +472,12 @@ case "${1:-}" in
     # can never be root-owned; the trusted NVIDIA client runs without it.
     exec "$client_path" --no-sandbox "${@:2}"
     ;;
+  webrtc-view)
+    # Watch this host's livestream from the machine in front of you: emin-1 by
+    # default, "raider" or a user@host for another viewer.  The client runs
+    # there, not here, because a streamed run has no local window.
+    exec ./scripts/webrtc-view.sh "${@:2}"
+    ;;
   sonic-sim)  shell_env use-sonic-sim ;;
   groot)      shell_env use-groot ;;
   psi0)       shell_env use-psi0 ;;
@@ -732,7 +738,7 @@ case "${1:-}" in
     exit 2
     ;;
   *)
-    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-direct-reference dex3|isaac-g1-sonic-fixed-base dex3|isaac-g1-sonic {dex3|inspire-ftp}|isaac-g1-sonic-rough dex3|instinct-parkour|instinct-parkour-drive|sonic-controller|sonic-dataset-validate|sonic-pilot|sonic-encode|sonic-review|sonic-review-serve|sonic-convert|sonic-convert-unitree|sonic-tests|sonic-verify|doctor|smoke|groot-finetune-smoke|psi0-smoke|sync|fetch-models|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
+    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|webrtc-view {emin-1|raider}|sonic-sim|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-direct-reference dex3|isaac-g1-sonic-fixed-base dex3|isaac-g1-sonic {dex3|inspire-ftp}|isaac-g1-sonic-rough dex3|instinct-parkour|instinct-parkour-drive|sonic-controller|sonic-dataset-validate|sonic-pilot|sonic-encode|sonic-review|sonic-review-serve|sonic-convert|sonic-convert-unitree|sonic-tests|sonic-verify|doctor|smoke|groot-finetune-smoke|psi0-smoke|sync|fetch-models|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
     exit 2
     ;;
 esac
