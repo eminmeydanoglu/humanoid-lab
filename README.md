@@ -121,6 +121,9 @@ motion, `R` resets, `O` is the emergency stop. `Enter` to switch to planner to t
 | --- | --- |
 | `./dev.sh` | interactive shell in the container, no environment pre-selected |
 | `./dev.sh isaac-g1-test-controller dex3` | G1 driven by the deterministic scripted test controller |
+| `./dev.sh isaac-g1-sonic-rough dex3` | the SONIC G1 on the InstinctLab parkour terrain, streamed by default |
+| `./dev.sh instinct-parkour` | the Project-Instinct G1 parkour checkpoint, with the depth window, streamed by default |
+| `./dev.sh instinct-parkour-drive` | keyboard driver for a running playback, sending keys to its window |
 | `./dev.sh isaac-demo <demo.py>` | an Isaac Lab demo from `/opt/src/isaaclab/scripts/demos`, streamed over WebRTC |
 | `./dev.sh isaac-stream` | the Isaac Sim UI with no scene, streamed over WebRTC |
 | `./dev.sh webrtc-client` | Isaac Sim WebRTC client, for watching a streaming host |
