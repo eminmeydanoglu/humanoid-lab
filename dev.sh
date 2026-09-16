@@ -269,6 +269,59 @@ run_isaac_g1() { # $1 = profile path; remaining args belong to the runner
   return "$rc"
 }
 
+# Project-Instinct G1 parkour playback.  This one runs foreground rather than
+# through the setsid/pidfile dance above: the GUI window is the point, and the
+# user closes it (or Ctrl+C here) to stop.
+run_instinct_parkour() {
+  local checkpoint_root="$HUMANOID_DATA_ROOT/checkpoints/instinct-parkour/data&model/checkpoints"
+  local checkpoint="${INSTINCT_PARKOUR_CHECKPOINT:-$checkpoint_root/parkour_onboard_preview_stair}"
+  local headless=0
+  local arg
+  for arg in "$@"; do
+    [ "$arg" != "--headless" ] || headless=1
+  done
+  [ "$headless" -eq 1 ] || require_x11_display
+
+  if [ ! -d "$checkpoint/exported" ]; then
+    echo "error: checkpoint has no exported/ directory: $checkpoint" >&2
+    echo "set INSTINCT_PARKOUR_CHECKPOINT, or re-run ./dev.sh instinct-parkour-fetch" >&2
+    return 2
+  fi
+
+  # The container mounts the data root somewhere else, so translate the host
+  # checkpoint path into its in-container equivalent.  Only the known data-root
+  # prefix is rewritten; anything else is passed through untouched.
+  local container_checkpoint="$checkpoint"
+  case "$checkpoint" in
+    "$HUMANOID_DATA_ROOT"/*)
+      container_checkpoint="/workspace/humanoid-lab/data/${checkpoint#"$HUMANOID_DATA_ROOT"/}"
+      ;;
+    /workspace/humanoid-lab/*|/data/*|/outputs/*)
+      container_checkpoint="$checkpoint"
+      ;;
+    *)
+      echo "error: checkpoint path must live under the data root ($HUMANOID_DATA_ROOT)" >&2
+      echo "       got: $checkpoint" >&2
+      return 2
+      ;;
+  esac
+
+  up_once
+  DC exec -e DISPLAY="$DISPLAY" dev bash -lc '
+    source /opt/humanoid-lab/entrypoint.sh
+    use-isaac-sonic
+    export INSTINCTLAB_ROOT=/workspace/humanoid-lab/data/src/InstinctLab
+    # Kit treats every directory entry as a candidate extension; run from a
+    # scratch directory so the repository is not scanned.
+    mkdir -p /tmp/humanoid-lab-kit-cwd
+    cd /tmp/humanoid-lab-kit-cwd
+    exec python /workspace/humanoid-lab/scripts/play-instinct-parkour.py \
+      --task=Instinct-Parkour-Target-Amp-G1-v0 \
+      --load_run="$1" \
+      "${@:2}"
+  ' -- "$container_checkpoint" "$@"
+}
+
 case "${1:-}" in
   "")
     up_once
@@ -371,6 +424,18 @@ case "${1:-}" in
     [ "$headless" -eq 1 ] || require_x11_display
     up_once
     run_isaac_g1 "$profile_file" "${@:3}"
+    ;;
+  instinct-parkour)
+    # Project-Instinct G1 parkour checkpoint playback.  The shipped checkpoint is
+    # ONNX-only, so this runs scripts/play-instinct-parkour.py rather than the
+    # upstream task script.  See docs/instinct-parkour.md.
+    run_instinct_parkour "${@:2}"
+    ;;
+  instinct-parkour-drive)
+    # Keyboard driver for an already-running playback.  It sends key events to
+    # the Isaac Sim window by id, so the robot can be driven from this terminal
+    # even when that window does not have focus.
+    exec ./scripts/instinct-parkour-keyboard.sh "${@:2}"
     ;;
   sonic-controller)
     # The official SONIC deployment in this terminal, exactly as the upstream

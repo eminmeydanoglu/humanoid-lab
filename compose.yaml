@@ -67,6 +67,19 @@ services:
       - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/outputs:/outputs
       - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/diagnostics:/data/diagnostics
       - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/runtime:/data/runtime:ro
+      # InstinctLab, instinct_rl, the shipped checkpoint and the motion reference
+      # live in the shared data root (not in this worktree).  They are mounted at
+      # /workspace/humanoid-lab/data -- the exact path the shared isaac-sonic venv
+      # recorded for its editable installs -- so both worktrees reuse one 11 GB
+      # environment instead of provisioning a second copy.
+      - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/src:/workspace/humanoid-lab/data/src
+      - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/checkpoints:/workspace/humanoid-lab/data/checkpoints
+      - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/datasets:/workspace/humanoid-lab/data/datasets
+      # InstinctLab's AmassMotionCfg defaults to ~/Datasets (it is a training
+      # default, not a play one), so the parkour scene needs the motion reference
+      # to exist at the container user's home.  Mounted rather than symlinked so
+      # it survives `docker compose up --force-recreate`.
+      - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/datasets/instinct-parkour-motion:/home/ubuntu/Datasets
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       # F310/joystick access for the SONIC input adapter.  The cgroup rule is
       # scoped to the input-event major rather than making the container
