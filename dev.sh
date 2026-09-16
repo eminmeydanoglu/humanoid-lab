@@ -498,6 +498,14 @@ case "${1:-}" in
       use-sonic-sim
       PYTHONPATH=src python3 -m unittest discover -s tests -p "test_sonic_encoder_runner.py" -v' sonic-tests "${@:2}"
     ;;
+  sonic-verify)
+    # Independent arithmetic check of a converted Unitree episode: re-derives the
+    # canonical reference from the raw parquet without importing the pipeline and
+    # compares it against the stored artifacts (joint mapping, resampling,
+    # velocities, limits, hand order, the 1751D observation, the 78D action).
+    up_once
+    DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && cd /workspace/humanoid-lab && exec python3 scripts/verify-sonic-unitree-conversion.py "$@"' sonic-verify "${@:2}"
+    ;;
   fetch-psi0-ckpt)
     up_once
     # Same HF CLI and lock-reading python as fetch-models; the psi0 environment
@@ -536,7 +544,7 @@ case "${1:-}" in
     exit 2
     ;;
   *)
-    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-direct-reference dex3|isaac-g1-sonic-fixed-base dex3|isaac-g1-sonic {dex3|inspire-ftp}|sonic-controller|sonic-dataset-validate|sonic-pilot|sonic-encode|sonic-review|sonic-review-serve|sonic-convert|sonic-tests|doctor|smoke|groot-finetune-smoke|psi0-smoke|sync|fetch-models|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
+    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-direct-reference dex3|isaac-g1-sonic-fixed-base dex3|isaac-g1-sonic {dex3|inspire-ftp}|sonic-controller|sonic-dataset-validate|sonic-pilot|sonic-encode|sonic-review|sonic-review-serve|sonic-convert|sonic-tests|sonic-verify|doctor|smoke|groot-finetune-smoke|psi0-smoke|sync|fetch-models|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
     exit 2
     ;;
 esac

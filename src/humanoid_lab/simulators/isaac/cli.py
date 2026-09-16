@@ -21,6 +21,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--record-video", type=Path, help="record a fixed external validation camera to MP4")
     parser.add_argument("--metrics-output", type=Path, help="write the final run summary as JSON")
     parser.add_argument("--tracking-output", type=Path, help="write 50 Hz body/hand command tracking as Parquet")
+    parser.add_argument("--replay-clock-output", type=Path, help="publish simulation time for a paced offline latent replay")
     parser.add_argument("--trajectory-reference", type=Path,
                         help="canonical NPZ used by the fixed-base direct trajectory provider")
     parser.add_argument("--kinematic-reference", type=Path,
@@ -81,6 +82,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             trajectory_reference=args.trajectory_reference,
             kinematic_reference=args.kinematic_reference,
             kinematic_label=args.kinematic_label,
+            replay_clock_output=args.replay_clock_output,
         )
         summary = service.run()
         if args.tracking_output:

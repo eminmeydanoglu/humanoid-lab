@@ -14,6 +14,7 @@ import zmq
 
 from humanoid_lab.datasets.sonic.protocol_v1 import pack_command_message
 from humanoid_lab.datasets.sonic.protocol_v4 import pack_latent_action_message
+from humanoid_lab.datasets.sonic.fidelity import simulation_frame_due
 
 
 def main() -> None:
@@ -23,6 +24,8 @@ def main() -> None:
     parser.add_argument("--pre-roll", type=float, default=2.0)
     parser.add_argument("--post-roll", type=float, default=2.0)
     parser.add_argument("--stop-after", action="store_true")
+    parser.add_argument("--timeline-output", type=Path, help="save publisher send times for A/B/C alignment")
+    parser.add_argument("--sim-clock", type=Path, help="pace each token by Isaac simulation time")
     args = parser.parse_args()
 
     with np.load(args.tokens) as payload:
@@ -54,6 +57,15 @@ def main() -> None:
         )
 
     context = zmq.Context.instance()
+
+    def sim_clock() -> float | None:
+        if args.sim_clock is None:
+            return None
+        try:
+            return float(args.sim_clock.read_text(encoding="ascii").strip())
+        except (OSError, ValueError):
+            return None
+
     socket = context.socket(zmq.PUB)
     socket.bind(args.endpoint)
     debug = context.socket(zmq.SUB)
@@ -107,12 +119,47 @@ def main() -> None:
 
         started = time.monotonic()
         max_lateness = 0.0
+        sent_wall_time_ns = np.empty(len(tokens), dtype=np.int64)
+        sent_sim_s = np.empty(len(tokens), dtype=np.float64)
+        start_sim = sim_clock()
+        if args.sim_clock is not None and start_sim is None:
+            raise RuntimeError(f"Isaac simulation clock is unavailable: {args.sim_clock}")
         for row in range(len(tokens)):
+            if start_sim is not None:
+                target_sim = start_sim + row / 50.0
+                stalled_at = time.monotonic()
+                previous_sim = None
+                while True:
+                    current_sim = sim_clock()
+                    if current_sim is not None and simulation_frame_due(current_sim, start_sim, row):
+                        break
+                    if current_sim != previous_sim:
+                        stalled_at = time.monotonic()
+                        previous_sim = current_sim
+                    if time.monotonic() - stalled_at > 5.0:
+                        raise RuntimeError(f"Isaac simulation clock stalled before token {row}/{len(tokens)}")
+                    time.sleep(0.002)
+                sent_sim_s[row] = current_sim
+                max_lateness = max(max_lateness, current_sim - target_sim)
+            else:
+                sent_sim_s[row] = np.nan
+            sent_wall_time_ns[row] = time.time_ns()
             socket.send(message(row))
-            deadline = started + (row + 1) / 50.0
-            now = time.monotonic()
-            max_lateness = max(max_lateness, now - deadline)
-            time.sleep(max(0.0, deadline - now))
+            if start_sim is None:
+                deadline = started + (row + 1) / 50.0
+                now = time.monotonic()
+                max_lateness = max(max_lateness, now - deadline)
+                time.sleep(max(0.0, deadline - now))
+
+        if args.timeline_output is not None:
+            args.timeline_output.parent.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(
+                args.timeline_output,
+                frame_index=frame_index,
+                sent_wall_time_ns=sent_wall_time_ns,
+                sent_sim_s=sent_sim_s,
+                expected_frames=np.asarray([len(tokens)], dtype=np.int64),
+            )
 
         last = message(len(tokens) - 1)
         until = time.monotonic() + args.post_roll
@@ -134,6 +181,7 @@ def main() -> None:
             "publish_hz": 50.0,
             "first_token_echo_max_abs": float(np.abs(observed - tokens[0]).max()),
             "max_publish_lateness_s": max(0.0, float(max_lateness)),
+            "pacing_clock": "Isaac simulation time" if start_sim is not None else "wall time",
             "terminal_state": terminal_state,
         }, indent=2))
     except Exception:

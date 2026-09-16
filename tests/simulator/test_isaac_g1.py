@@ -80,19 +80,36 @@ class IsaacG1SourceInvariantTests(unittest.TestCase):
 
     def test_loop_decouples_physics_from_render(self) -> None:
         source = SERVICE.read_text()
+        # Two steppers exist: the ordinary physics step and the frame-exact
+        # kinematic replay.  Both must advance physics with render=False and
+        # render separately, so the invariant is checked per stepper instead of
+        # counting occurrences across the whole module (a shared count silently
+        # breaks as soon as a second, correctly-written stepper is added).
+        physics_body = source[source.index("    def _step_physics") : source.index("    def _step_kinematic")]
+        kinematic_body = source[source.index("    def _step_kinematic") : source.index("    def _render_paused")]
         step_body = source[source.index("    def _step_physics") : source.index("    def _render_paused")]
         paused_body = source[
             source.index("    def _render_paused") : source.index("    def run(self)")
         ]
         run_body = source[source.index("    def run(self)") : source.index("    def _accounting")]
-        self.assertEqual(source.count("self._sim.step(render=False)"), 1)
+        for name, body in (("physics", physics_body), ("kinematic", kinematic_body)):
+            self.assertEqual(
+                body.count("self._sim.step(render=False)"),
+                1,
+                f"{name} stepper must advance physics exactly once with render=False",
+            )
         self.assertNotIn("self._sim.step()", source)
-        self.assertEqual(step_body.count("self._sim.render()"), 1)
-        self.assertIn(
-            "rendered = self._is_rendering and self.tick % self.profile.render_interval == 0",
-            step_body,
-        )
-        self.assertIn("if rendered:", step_body)
+        # The kinematic stepper must not integrate physics after authoring the
+        # frame, and must refresh kinematics without stepping time.
+        self.assertIn("self._sim.forward()", kinematic_body)
+        self.assertNotIn("self._sim.render()", kinematic_body.split("self._sim.forward()")[0])
+        self.assertEqual(physics_body.count("self._sim.render()"), 1)
+        self.assertEqual(kinematic_body.count("self._sim.render()"), 1)
+        # Render cadence comes from the profile outside a kinematic replay; the
+        # replay overrides it with its own ticks-per-frame.
+        self.assertIn("if self._kinematic is not None else self.profile.render_interval", physics_body)
+        self.assertIn("rendered = self._is_rendering and self.tick % render_interval == 0", physics_body)
+        self.assertIn("if rendered:", physics_body)
         self.assertIn("self._consume_head_camera_frame()", step_body)
         self.assertEqual(run_body.count("self._step_physics()"), 2)
         self.assertNotIn("self._sim.render()", run_body)

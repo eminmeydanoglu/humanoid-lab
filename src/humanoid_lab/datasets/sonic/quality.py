@@ -13,6 +13,9 @@ from typing import Any
 
 import numpy as np
 
+from .joints import hand_order
+from .schema import HAND_DIM
+
 #: Guard rails for the 50 Hz canonical reference.  They are deliberately loose:
 #: they exist to catch broken indexing (a joint column fed by the wrong source),
 #: not to judge an individual demonstration.
@@ -227,6 +230,86 @@ def permutation_round_trip(source_names: tuple[str, ...], target_names: tuple[st
         "ok": bool(np.array_equal(forward[..., inverse], marker)),
         "joints": len(target_names),
         "identity": permutation == list(range(len(permutation))),
+    }
+
+
+def hand_range_report(
+    left: np.ndarray,
+    right: np.ndarray,
+    limits: dict[str, tuple[float, float]],
+) -> dict[str, Any]:
+    """Range check the Dex3 hand channels, per side and per joint.
+
+    The body range check does not cover the hands, so before this existed a hand
+    trajectory could sit arbitrarily far outside the modelled Dex3 range and the
+    episode still reported ``range.violation_count = 0``.  The report is
+    informational (a recorded source may legitimately use a different Dex3
+    hardware revision whose stroke is wider than the pinned model's); callers
+    decide with :func:`hand_range_decision` whether that is tolerable.
+    """
+    report: dict[str, Any] = {"sides": {}, "max_excess_rad": 0.0, "violating_channels": 0}
+    worst = 0.0
+    violating = 0
+    for side, values in (("left", left), ("right", right)):
+        data = np.asarray(values, dtype=np.float64)
+        if data.ndim != 2 or data.shape[1] != HAND_DIM:
+            raise ValueError("hand range check needs [frames, 7] per side")
+        channels: dict[str, dict[str, float]] = {}
+        side_worst = 0.0
+        for index, name in enumerate(hand_order(side)):
+            if name not in limits:
+                raise ValueError(f"joint limits are missing {name!r}")
+            lower, upper = limits[name]
+            excess = np.maximum(np.maximum(lower - data[:, index], data[:, index] - upper), 0.0)
+            if excess.max() > 0.0:
+                channels[name] = {
+                    "max_excess_rad": float(excess.max()),
+                    "frames": int(np.count_nonzero(excess > 0.0)),
+                    "observed": [float(data[:, index].min()), float(data[:, index].max())],
+                    "limits": [float(lower), float(upper)],
+                }
+        report["sides"][side] = {
+            "channels": channels,
+            "violating_channels": len(channels),
+            "max_excess_rad": side_worst if channels else 0.0,
+        }
+        if channels:
+            report["sides"][side]["max_excess_rad"] = max(item["max_excess_rad"] for item in channels.values())
+            side_worst = report["sides"][side]["max_excess_rad"]
+        violating += len(channels)
+        worst = max(worst, side_worst)
+    report["max_excess_rad"] = worst
+    report["violating_channels"] = violating
+    return report
+
+
+def hand_range_decision(
+    report: dict[str, Any],
+    *,
+    allowed_channels: int,
+    excess_tolerance_rad: float = 0.0,
+) -> dict[str, Any]:
+    """Decide whether a hand range report is tolerable for a given source.
+
+    ``allowed_channels`` and ``excess_tolerance_rad`` are a source-specific
+    policy: a source known to be recorded on a wider-stroke Dex3 revision
+    declares how many channels may sit outside the pinned model, and by how much,
+    before the trajectory is treated as a mapping error instead of a known
+    hardware difference.  The tolerance is what separates "the same systematic
+    revision delta" from "a channel that is simply wrong": a source allowed 8
+    channels with a 0.35 rad tolerance still fails if any channel deviates by
+    more than the revision delta.
+    """
+    excess = float(report.get("max_excess_rad", 0.0))
+    observed = int(report.get("violating_channels", 0))
+    within = observed <= allowed_channels and excess <= excess_tolerance_rad + 1e-9
+    return {
+        "metric": "hand_range.violating_channels",
+        "value": float(observed),
+        "limit": float(allowed_channels),
+        "max_excess_rad": excess,
+        "excess_tolerance_rad": float(excess_tolerance_rad),
+        "result": "PASS" if within else "FAIL",
     }
 
 

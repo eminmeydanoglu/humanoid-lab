@@ -59,22 +59,78 @@ Diagnostic orientation variants remain test-only; production always uses
 #    scripts/run-sonic-pilot-sim.sh first produces the root-inclusive frame-exact
 #    replay, then optionally keeps the old fixed-base PD run as controller
 #    debugging. The simulator comes up first, the deployment attaches, and only
-#    then replay-sonic-latent.py publishes action_tokens.npz at 50 Hz. This path
+#    then replay-sonic-latent.py publishes action_tokens.npz at 50 Hz of Isaac
+#    simulation time. This path
 #    tests the persisted offline token; the older reference→live-C++-encoder run
 #    remains a separate comparison artifact.
-scripts/run-sonic-pilot-sim.sh <pilot_dir> --duration 70
+scripts/run-sonic-pilot-sim.sh <pilot_dir>
+
+# Primary replay acceptance: A=reference.npz, B=SONIC body/hand target,
+# C=measured robot. The simulator clock and publisher timeline align samples.
+# Incomplete publisher, SONIC receiver, or robot-trace coverage fails even if
+# the observed prefix has low error.
+# The left wrist is compared in pelvis-local and world-frame metres using the
+# pinned G1 model and measured root pose.
+# This command exits nonzero when the A/B/C gate fails.
+docker exec humanoid-lab-dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && cd /workspace/humanoid-lab && PYTHONPATH=src python3 scripts/evaluate-sonic-latent-replay.py /data/outputs/sonic-abc-20260916/unitree_ep003_full_action --require-pass'
+
+# Outputs: sonic_fidelity.json, sonic_left_wrist_world_abc.png, sonic_left_wrist_abc.png,
+# sonic_left_arm_abc.png, sonic_left_hand_abc.png, and a verified complete
+# sonic_latent_motion.mp4. A/B and A/C are primary fidelity values; B/C checks
+# how well the simulated actuators followed the SONIC command. A visually
+# wrong replay does not pass just because B/C is small.
 
 # 4. Review page (videos side by side, per-joint plots, verdicts, assumptions)
 ./dev.sh sonic-review [--output <path>]
 
-# 4b. Serve it with byte ranges so the shared timeline can seek.  Plain
+# 4b. Minimal three-video page for one episode: recorded head camera, the
+#      whole-body trajectory written straight into the simulator, and the free
+#      SONIC run driven by the produced latent.
+python3 scripts/write-sonic-pilot-page.py --pilot-dir <pilot_dir> --output <pilot_dir>/review.html
+
+# 4c. Serve it with byte ranges so the shared timeline can seek.  Plain
 #     `python3 -m http.server` sends no Accept-Ranges/206, which leaves
 #     HTMLMediaElement.seekable empty and freezes every video timeline.
 ./dev.sh sonic-review-serve [--port 8765]
 
 # 5. Tests (unit suite + real ONNX encoder tests)
 ./dev.sh sonic-tests
+
+# 6. Independent arithmetic check of a converted Unitree episode.  Re-derives the
+#    canonical reference from the raw parquet WITHOUT importing the pipeline and
+#    compares it against the stored artifacts, so a bug shared by the producer and
+#    the checker cannot hide: joint mapping and cross-joint swaps, the 50 Hz
+#    timeline, resampling, velocities (gain, lag, integrated displacement), the
+#    pinned joint limits, hand order and motion, the full 1751D observation
+#    rebuilt block by block, and the 78D action composition.
+./dev.sh sonic-verify 3 74
 ```
+
+## Bulk conversion
+
+Bulk conversion is gated, resumable and per-dataset:
+
+```bash
+# One dataset, every episode it declares
+./dev.sh sonic-convert --pilot unitree \
+  --dataset unitree-g1-dex3/G1_Dex3_PickDoll_Dataset --all-episodes --no-video
+
+# An explicit episode range (applied to every selected dataset)
+./dev.sh sonic-convert --pilot unitree --pilot apple --episodes 0:50 --no-video
+```
+
+* `--all-episodes` uses each dataset's own declared `total_episodes`, so datasets
+  of different sizes can be converted without hand-computing ranges.
+* `--dataset` restricts a kind to one of its declared `bulk_datasets`; without it
+  every declared dataset of the kind is converted.  The output directory follows
+  the selected dataset (`<kind>_<dataset>_epNNN`), never the pilot's own dataset.
+* Episodes that already have **both** `action_tokens.npz` and
+  `encoder_manifest.json` are skipped, which makes a long batch resumable and
+  prevents duplicate timestamped copies of the same episode.  `--force` re-runs
+  them.
+* `--no-video` skips cutting the source camera clip.  That clip is what makes a
+  conversion ~15× slower, and it is only needed for pilots that get a review
+  page, so bulk conversion normally runs without it.
 
 ## Encoder observation semantics
 
@@ -144,9 +200,15 @@ a parity gate.
   finite difference to match SONIC's own resampler. `observation.state` is kept
   separately as the measured 30 Hz replay and is not fed to the encoder.
   `action[29:36]` and `action[36:43]` are normalized open/close commands rather
-  than actuator radians. Their normalized-command → Dex3-radian mapping remains
-  unproven and the right action hand is zero in all 402 episodes, so the 78D
-  action stays blocked while the 64D body token can be inspected as a pilot.
+  than actuator radians, so they are never written into the canonical hand slots.
+  The hands instead come from `observation.state`, which carries the same channels
+  as **measured radians in canonical Dex3 order**; that path is opt-in via
+  `hands_from_state` in the pilot config (on for `apple`) and the manifest records
+  which field supplied the hands. The measured left hand moves in 58/58 sampled
+  episodes and stays inside the pinned limits; the right hand rests near its
+  modelled zero and barely moves, so its channels carry little motion even though
+  they are real measurements. The raw normalized commands are preserved as a pilot
+  artifact either way.
 
 ## QC
 
@@ -159,17 +221,53 @@ model), `velocity/acceleration/jerk.abs_p99`, `source_echo.max_abs_error_rad`
 marker vector, not by shape. The pilot verdict is `FAIL` if any threshold fails,
 `UNVERIFIED` while a hand schema blocks the 78D action, otherwise `PASS`.
 
+**QC is a gate, not a report.** Bulk conversion refuses an episode whose QC
+verdict is `FAIL` (`require_episode_qc`), naming the failing metrics, so no tokens
+are written for it. Only the 29 body joints are covered by
+`range.violation_count`; the 14 Dex3 hand channels get their own
+`hand_range.violating_channels` decision described below.
+
 Simulation runs add per-joint MAE/p95/max, root height and tilt, and a fall flag
 for the free window in `sonic_pilot_review.json`.
 
+### Dex3 hand range policy
+
+The Unitree Dex3 collections record hand values that leave the pinned model's
+range on the index/middle distal joints, in **both** the commanded `action` and
+the measured `observation.state`. The pinned `g1_29dof_with_hand` model, all three
+shipped URDFs and the deployment's own `MAX_LIMITS_*`/`MIN_LIMITS_*` tables in
+`dex3_hands.hpp` all stop at 1.7453 rad (100°); the data reaches 2.0944 rad (120°),
+which is the documented stroke of the **earlier** Dex3 revision.
+
+That is a hardware-revision difference, not a conversion defect: an exhaustive
+search over all 5040 column permutations per hand ranks the canonical order first,
+and the measured state violates in the same channels as the commanded action.
+
+Measured over a 551-episode sample across all 13 collections, the excess is
+bimodal and never in between — exactly 0.3491 rad (= 2.0944 − 1.7453) or ~0.0010
+rad (a resting pose a hair past modelled zero). `HAND_RANGE_POLICY` in
+`datasets/sonic/pilot.py` therefore keys on the **tolerance** rather than the
+channel count: every hand channel may deviate, but by no more than the documented
+stroke difference. Values are emitted as recorded — no clipping, no rescaling,
+matching how the LeRobot converter stores raw `qpos`. Anything beyond the
+tolerance is treated as a mapping error and fails the episode.
+
+AppleToPlate's hands come from measured `observation.state` (see below); its right
+hand rests about 0.053 rad below modelled zero, a real offset.
+
 ## Gate
 
-Bulk conversion (`./dev.sh sonic-convert --pilot <kind> --episodes START:STOP`)
-refuses to run unless **every** requested source kind is marked `eligible` in the
-pilot configuration and has a pilot whose `human_review.json` status is
-`accepted` or `accepted_with_notes`. There is no flag that overrides either
-condition. A human review file cannot re-enable a source marked `excluded`;
-Fruits / `g1-pick-apple` is currently excluded and remains archive-only.
+Bulk conversion (`./dev.sh sonic-convert ...`) refuses to run unless **every**
+requested source kind is marked `eligible` in the pilot configuration and has a
+pilot whose `human_review.json` status is `accepted` or `accepted_with_notes`.
+There is no flag that overrides either condition. A human review file cannot
+re-enable a source marked `excluded`; Fruits / `g1-pick-apple` is currently
+excluded and remains archive-only.
+
+The gate resolves the reviewed run itself: `latest_pilot_dir` only considers runs
+that actually wrote a `human_review.json`, so an aborted later run cannot shadow
+the pilot a human accepted and turn the gate into a confusing "status is
+'missing'" refusal.
 
 Per episode the command runs the full pipeline, not only the reference composer:
 `prepare_pilot()` writes the canonical reference plus the 1751D encoder
@@ -179,6 +277,7 @@ in the onnxruntime environment (`--encoder-python`, default
 and `--expected-sha256`. An episode is counted as converted only when both
 `action_tokens.npz` and `encoder_manifest.json` exist in the output directory
 taken from the returned manifest (`processed_dir`); any other outcome is reported
-as that episode's failure and the batch continues. Sources with an unresolved
-hand schema still produce their 64D body-latent token — only the 78D action stays
+as that episode's failure and the batch continues. A `FAIL` QC verdict is fatal
+for the episode and is reported as its failure. Sources with an unresolved hand
+schema still produce their 64D body-latent token — only the 78D action stays
 blocked, as recorded in the encoder manifest.

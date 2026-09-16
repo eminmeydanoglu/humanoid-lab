@@ -207,9 +207,16 @@ to inspect what the adapter actually produced.
 scripts/run-sonic-pilot-sim.sh <pilot_dir> --duration 60
 ```
 
-This publishes `action_tokens.npz` at 50 Hz through SONIC Protocol v4 and records
-the closed-loop robot motion. It tests the persisted offline latent rather than
-asking the live C++ encoder to encode the reference again.
+This publishes `action_tokens.npz` at 50 Hz of Isaac simulation time through
+SONIC Protocol v4 and records the closed-loop robot motion. The replay writes
+the publisher timeline and a 50 Hz trace of SONIC joint targets and measured
+robot joints. `sonic_fidelity.json` compares A (canonical reference), B (SONIC
+joint-position command), and C (robot response), including pelvis-local and
+world-frame left-wrist motion. The trace also retains B's velocity target,
+gains, feed-forward torque, and applied actuator torque for diagnosis.
+Missing publisher, SONIC receiver, or robot-trace frames fail the completeness
+gate; no review clip is made from a truncated replay. The fixed minimum wall-time
+budget includes model startup.
 
 ### Build and serve the review page
 

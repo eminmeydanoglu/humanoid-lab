@@ -35,7 +35,7 @@ from humanoid_lab.controllers.sonic import BODY_JOINT_ORDER, SONIC_REFERENCE_JOI
 
 from ..joints import hand_order, sonic_reference_body
 from ..reference import StandingPose
-from ..schema import HAND_SCHEMA_UNRESOLVED, CanonicalEpisode, CanonicalEpisodeBuild
+from ..schema import HAND_SCHEMA_UNRESOLVED, HAND_SCHEMA_VERIFIED, CanonicalEpisode, CanonicalEpisodeBuild
 from ..state_reference import StateReference, build_state_reference
 from ..timeline import finite_difference, linear_resample, uniform_timeline
 
@@ -294,6 +294,7 @@ def load_body_pilot(
     *,
     standing: StandingPose,
     assume_unitree_mujoco_body_order: bool = True,
+    hands_from_state: bool = False,
 ) -> CanonicalEpisodeBuild:
     """Load the 29-channel body trajectory; the normalized hands stay blocked.
 
@@ -301,8 +302,15 @@ def load_body_pilot(
     is accepted for backwards compatibility only.  The raw normalized hand
     commands are kept in ``raw_hand_command`` and never enter the canonical hand
     slots.
+
+    ``hands_from_state`` optionally fills the canonical hand slots from
+    ``observation.state``, which *is* measured qpos in radians in canonical Dex3
+    motor order (see :func:`load_state_reference`).  It is off by default because
+    it changes the meaning of the emitted 78D action from "commanded" to
+    "measured", so a caller has to ask for it explicitly and the manifest records
+    which field supplied the hands.
     """
-    action, _, timestamps, slices = _read_episode(dataset, episode_index)
+    action, state, timestamps, slices = _read_episode(dataset, episode_index)
     evidence = hand_command_evidence(dataset, episode_index)
     validate_hand_schema(evidence)
     body_source = np.concatenate([action[:, slices[block]] for block in BODY_BLOCKS], axis=1)
@@ -310,16 +318,25 @@ def load_body_pilot(
     target = uniform_timeline(timestamps)
     body_resampled = linear_resample(timestamps, body, target)
     zeros = np.zeros((len(target), 7), dtype=np.float32)
+    if hands_from_state:
+        # Measured radians, already in canonical Dex3 motor order per side.
+        left_hands = linear_resample(timestamps, state[:, slices["left_hand"]], target)
+        right_hands = linear_resample(timestamps, state[:, slices["right_hand"]], target)
+        hand_source = "observation.state"
+    else:
+        left_hands, right_hands = zeros, zeros.copy()
+        hand_source = "zeros (placeholder)"
     episode: CanonicalEpisode = CanonicalEpisode(
         timestamps=target,
         joint_pos=body_resampled.astype(np.float32),
         joint_vel=finite_difference(body_resampled).astype(np.float32),
         body_quat_wxyz=np.tile(standing.body_quat_wxyz.astype(np.float32), (len(target), 1)),
         body_pos=np.tile(standing.body_pos.astype(np.float32), (len(target), 1)),
-        # Hand slots stay zero because the normalized command has no proven
-        # radian mapping; the build status keeps them out of any 78D action.
-        left_hand_joints=zeros,
-        right_hand_joints=zeros.copy(),
+        # Without ``hands_from_state`` the hand slots stay zero because the
+        # normalized action command has no proven radian mapping; the build status
+        # keeps them out of any 78D action.
+        left_hand_joints=left_hands.astype(np.float32),
+        right_hand_joints=right_hands.astype(np.float32),
     )
     episode.validate()
     provenance = {
@@ -344,7 +361,8 @@ def load_body_pilot(
         "hand_command_semantics": "action: quantized normalized open/close command; state: measured radians",
         "hand_command_is_radians": False,
         "hand_command_evidence": evidence,
-        "hand_values_written": "zeros (placeholder), excluded from any action; raw commands kept separately",
+        "hand_values_written": hand_source,
+        "hand_values_are_measured": bool(hands_from_state),
         "raw_hand_command_artifact": "raw_hand_command.npz (source rate, normalized action)",
         "visual_state_artifact": "reference_state.npz (observation.state, radians, canonical Dex3 order)",
         "velocity_source": "re-derived by finite difference of the resampled 50 Hz positions",
@@ -371,6 +389,26 @@ def load_body_pilot(
         "left": np.ascontiguousarray(action[:, slices["left_hand"]], dtype=np.float64),
         "right": np.ascontiguousarray(action[:, slices["right_hand"]], dtype=np.float64),
     }
+    if hands_from_state:
+        notes = (
+            f"body channel order is verified ({BODY_ORDER})",
+            "hand channels are the measured observation.state radians in canonical Dex3 order "
+            "(hands_from_state); the normalized action hand block is NOT used",
+            "the right hand is nearly static in most episodes, so the right-hand channels carry "
+            "little motion even though they are real measurements",
+            "raw normalized hand commands are preserved in raw_hand_command.npz (source rate)",
+        )
+        return CanonicalEpisodeBuild(
+            episode=episode,
+            provenance=provenance,
+            hand_schema_status=HAND_SCHEMA_VERIFIED,
+            hand_schema_reason=(
+                "hand radians come from observation.state (measured qpos) in canonical Dex3 motor order, "
+                "not from the unresolved normalized action command; requested explicitly via hands_from_state"
+            ),
+            notes=notes,
+            raw_hand_command=raw_hand_command,
+        )
     notes = (
         f"body channel order is verified ({BODY_ORDER})",
         "hand action is a normalized open/close signal without a proven Dex3 radian mapping: "
