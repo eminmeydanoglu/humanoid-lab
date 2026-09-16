@@ -481,9 +481,21 @@ case "${1:-}" in
     exec python3 scripts/serve-sonic-review.py \
       --directory "$HUMANOID_DATA_ROOT/datasets/first_tur_processed" "${@:2}"
     ;;
+  sonic-unitree-qc-serve)
+    exec python3 scripts/serve-sonic-review.py \
+      --directory "$HUMANOID_DATA_ROOT/datasets" "${@:2}"
+    ;;
   sonic-convert)
     up_once
     DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && cd /workspace/humanoid-lab && PYTHONPATH=src exec python3 scripts/convert-sonic-dataset.py "$@"' sonic-convert "${@:2}"
+    ;;
+  sonic-convert-unitree)
+    up_once
+    DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && cd /workspace/humanoid-lab && PYTHONPATH=src exec python3 scripts/convert-unitree-sonic-production.py "$@"' sonic-convert-unitree "${@:2}"
+    ;;
+  sonic-convert-unitree-summary)
+    up_once
+    DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && cd /workspace/humanoid-lab && exec python3 scripts/summarize-unitree-sonic-production.py "$@"' sonic-convert-unitree-summary "${@:2}"
     ;;
   sonic-tests)
     # Unit tests run in the conversion environment; the ONNX encoder tests need
@@ -544,7 +556,7 @@ case "${1:-}" in
     exit 2
     ;;
   *)
-    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-direct-reference dex3|isaac-g1-sonic-fixed-base dex3|isaac-g1-sonic {dex3|inspire-ftp}|sonic-controller|sonic-dataset-validate|sonic-pilot|sonic-encode|sonic-review|sonic-review-serve|sonic-convert|sonic-tests|sonic-verify|doctor|smoke|groot-finetune-smoke|psi0-smoke|sync|fetch-models|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
+    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-direct-reference dex3|isaac-g1-sonic-fixed-base dex3|isaac-g1-sonic {dex3|inspire-ftp}|sonic-controller|sonic-dataset-validate|sonic-pilot|sonic-encode|sonic-review|sonic-review-serve|sonic-convert|sonic-convert-unitree|sonic-tests|sonic-verify|doctor|smoke|groot-finetune-smoke|psi0-smoke|sync|fetch-models|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
     exit 2
     ;;
 esac

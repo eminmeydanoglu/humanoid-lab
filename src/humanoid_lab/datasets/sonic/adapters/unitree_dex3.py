@@ -11,6 +11,7 @@ standing frame and the root with an explicit upright assumption
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -64,6 +65,21 @@ def validate_metadata(dataset: Path) -> dict[str, object]:
     return {"fps": 30.0, "action_names": names, "total_episodes": int(info["total_episodes"])}
 
 
+@lru_cache(maxsize=32)
+def episode_row_index(dataset: Path) -> dict[int, dict[str, object]]:
+    """Read LeRobot episode metadata once per collection, not once per episode."""
+    import pyarrow.parquet as pq
+
+    rows: dict[int, dict[str, object]] = {}
+    for path in sorted((Path(dataset) / "meta/episodes").glob("chunk-*/*.parquet")):
+        for row in pq.read_table(path).to_pylist():
+            index = int(row["episode_index"])
+            if index in rows:
+                raise ValueError(f"duplicate Unitree episode metadata row {index}")
+            rows[index] = row
+    return rows
+
+
 def resolve_episode_rows(dataset: Path, episode_index: int) -> tuple[np.ndarray, np.ndarray]:
     """Return ``action`` and ``timestamp`` of one episode as stored."""
     try:
@@ -71,14 +87,10 @@ def resolve_episode_rows(dataset: Path, episode_index: int) -> tuple[np.ndarray,
     except ImportError as exc:  # pragma: no cover - environment diagnostic
         raise RuntimeError("Unitree conversion requires pyarrow") from exc
 
-    episode_files = sorted((dataset / "meta/episodes").glob("chunk-*/*.parquet"))
-    matches: list[dict[str, object]] = []
-    for path in episode_files:
-        table = pq.read_table(path)
-        matches.extend(row for row in table.to_pylist() if int(row["episode_index"]) == episode_index)
-    if len(matches) != 1:
-        raise ValueError(f"episode {episode_index} resolved to {len(matches)} metadata rows")
-    row = matches[0]
+    try:
+        row = episode_row_index(Path(dataset))[episode_index]
+    except KeyError as error:
+        raise ValueError(f"episode {episode_index} has no metadata row") from error
     data_path = dataset / f"data/chunk-{int(row['data/chunk_index']):03d}/file-{int(row['data/file_index']):03d}.parquet"
     start, stop = int(row["dataset_from_index"]), int(row["dataset_to_index"])
     table = pq.read_table(data_path, columns=["episode_index", "timestamp", "action"]).slice(start, stop - start)

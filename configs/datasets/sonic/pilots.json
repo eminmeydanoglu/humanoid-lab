@@ -30,7 +30,9 @@
   "apple": {
     "dataset": "nvidia-gr00t-n1.7-apple-to-plate",
     "episode": 179,
-    "note": "whole-body pilot; hands are taken from measured observation.state radians, not from the normalized action command",
-    "hands_from_state": true
+    "note": "whole-body 64D pilot; measured observation.state hands are diagnostic only, not action labels",
+    "hands_from_state": false,
+    "bulk_conversion_status": "excluded",
+    "bulk_conversion_reason": "Body labels come from action_t but the only radian hand values are observation.state_t. Their command mapping and action-to-state latency are unverified, so a mixed 78D label is not valid VLA supervision."
   }
 }

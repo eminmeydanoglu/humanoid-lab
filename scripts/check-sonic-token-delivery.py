@@ -8,14 +8,18 @@ import json
 import re
 from pathlib import Path
 
-RECEIVED = re.compile(r"Protocol v4: Received 64D token.*frame_index: (\d+)")
+# Upstream writes from several threads to stdout without a logging mutex.  A
+# valid receiver message can therefore be split by reset/debug output between
+# its prefix and ``frame_index`` (seen reproducibly at a temporary-motion
+# boundary).  The controller log has no other frame_index producer, so parse
+# the stable field itself instead of requiring one physically intact line.
+RECEIVED = re.compile(r"frame_index: (\d+)")
 
 
 def receiver_coverage(log: Path, expected_frames: int) -> dict:
     if expected_frames < 2:
         raise ValueError("expected_frames must be at least two")
-    indices = [int(match.group(1)) for line in log.open(encoding="utf-8", errors="replace")
-               if (match := RECEIVED.search(line))]
+    indices = [int(value) for value in RECEIVED.findall(log.read_text(encoding="utf-8", errors="replace"))]
     received = set(indices)
     expected = set(range(expected_frames))
     missing = sorted(expected - received)

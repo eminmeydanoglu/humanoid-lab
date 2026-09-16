@@ -28,6 +28,20 @@ class SonicFidelityTest(unittest.TestCase):
         self.assertFalse(result["complete"])
         self.assertEqual(result["missing_frames"], [2])
 
+    def test_receiver_gate_accepts_upstream_interleaved_log_line(self):
+        script = Path(__file__).resolve().parents[1] / "scripts/check-sonic-token-delivery.py"
+        check = runpy.run_path(str(script))["receiver_coverage"]
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "controller.log"
+            log.write_text(
+                "Protocol v4: Received 64D token, frame_index: 0\n"
+                "Protocol v4: Received Reset init reference data root rotation\n"
+                "0.1250, frame_index: 1\n",
+                encoding="utf-8",
+            )
+            result = check(log, 2)
+        self.assertTrue(result["complete"])
+
     def test_quantized_simulation_clock_does_not_skip_a_frame(self):
         # Binary floating point represents 26.1 below 25.94 + 8/50.
         self.assertTrue(simulation_frame_due(26.1, 25.94, 8))
@@ -68,10 +82,12 @@ class SonicFidelityTest(unittest.TestCase):
         self.assertTrue(result["coverage"]["full_motion"])
         self.assertEqual(result["pairs"]["reference_to_command"]["body_mae_rad"], 0.0)
 
-    def test_good_command_tracking_cannot_hide_bad_reference_fidelity(self):
-        result = compare_reference_command_response(*self.fixture(wrong_left_arm=True))
-        self.assertEqual(result["pairs"]["command_to_response"]["body_mae_rad"], 0.0)
-        self.assertEqual(result["result"], "FAIL")
+    def test_decoder_q_target_is_diagnostic_not_a_latent_fidelity_gate(self):
+        reference, tracking, timeline = self.fixture(wrong_left_arm=True)
+        tracking["body_measured"] = reorder(reference["joint_pos"], SONIC_REFERENCE_JOINT_ORDER, BODY_JOINT_ORDER)
+        result = compare_reference_command_response(reference, tracking, timeline)
+        self.assertGreater(result["pairs"]["command_to_response"]["body_mae_rad"], 0.0)
+        self.assertEqual(result["result"], "PASS")
         self.assertLess(result["pairs"]["reference_to_command"]["body_mae_rad"], 0.35)
         self.assertGreater(result["pairs"]["reference_to_command"]["body_worst_joint_mae_rad"], 0.50)
         self.assertGreater(result["pairs"]["reference_to_command"]["left_arm_worst_joint_mae_rad"], 0.45)

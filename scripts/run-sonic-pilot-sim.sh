@@ -28,6 +28,29 @@ done
 [ -d "$PILOT_DIR" ] || { echo "error: pilot directory not found: $PILOT_DIR" >&2; exit 2; }
 [ -f "$PILOT_DIR/reference.npz" ] || { echo "error: $PILOT_DIR/reference.npz missing" >&2; exit 2; }
 [ -f "$PILOT_DIR/action_tokens.npz" ] || { echo "error: $PILOT_DIR/action_tokens.npz missing" >&2; exit 2; }
+[ -f "$PILOT_DIR/encoder_manifest.json" ] || { echo "error: $PILOT_DIR/encoder_manifest.json missing" >&2; exit 2; }
+
+# A 64D vector has meaning only inside one encoder/decoder family. Refuse to
+# replay tokens when the controller's v1.1 bundle differs from the encoder and
+# observation config recorded at conversion time.
+SONIC_BUNDLE="$PWD/data/models/sonic/sonic_v1_1"
+python3 - "$PILOT_DIR/encoder_manifest.json" "$SONIC_BUNDLE" <<'PY'
+import hashlib, json, pathlib, sys
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+bundle = pathlib.Path(sys.argv[2])
+def digest(name):
+    return hashlib.sha256((bundle / name).read_bytes()).hexdigest()
+expected = {
+    "model_encoder.onnx": manifest["encoder"]["sha256"],
+    "observation_config.yaml": manifest["observation_config_sha256"],
+    "model_decoder.onnx": "34bae8570d4a4421a5391a5c2befd745d4a02d182ec539e5f9da44c091c67509",
+}
+for name, wanted in expected.items():
+    actual = digest(name)
+    if actual != wanted:
+        raise SystemExit(f"SONIC v1.1 bundle mismatch: {name} {actual} != {wanted}")
+print("[pilot-sim] SONIC v1.1 encoder/config/decoder family verified")
+PY
 
 # --duration belongs to the whole simulator process, including model startup.
 # A short fixed 60 s budget cut the 822-frame Dex3 replay at frame 481.  Give

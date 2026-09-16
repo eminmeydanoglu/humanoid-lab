@@ -16,19 +16,14 @@ from humanoid_lab.controllers.sonic import BODY_JOINT_ORDER, SONIC_REFERENCE_JOI
 from .joints import reorder
 
 
-# Gross-fidelity gates, deliberately independent of the existing B-to-C PD gate.
-# These are provisional pilot limits; preserve failing measurements while
-# evaluating whether the policy's q setpoint is an appropriate fidelity target.
+# Only A->C is an execution-fidelity gate.  B is the decoder/controller's
+# instantaneous q target, not the encoder reconstruction target; A->B and B->C
+# remain useful controller diagnostics but must never reject a latent label.
 FIDELITY_LIMITS = {
-    "reference_to_command.body_mae_rad": 0.35,
-    "reference_to_command.body_worst_joint_mae_rad": 0.50,
-    "reference_to_command.left_arm_mae_rad": 0.45,
-    "reference_to_command.left_arm_worst_joint_mae_rad": 0.45,
     "reference_to_response.body_mae_rad": 0.45,
     "reference_to_response.body_worst_joint_mae_rad": 0.60,
     "reference_to_response.left_arm_mae_rad": 0.55,
     "reference_to_response.left_arm_worst_joint_mae_rad": 0.55,
-    "command_to_response.body_mae_rad": 0.35,
 }
 LEFT_ARM_NAMES = tuple(name for name in BODY_JOINT_ORDER if name.startswith(("left_shoulder", "left_elbow", "left_wrist")))
 DEFAULT_MODEL_XML = Path("/opt/src/sonic/gear_sonic/data/robot_model/model_data/g1/g1_29dof_with_hand.xml")
@@ -62,6 +57,37 @@ def left_wrist_positions(body_positions: np.ndarray, model_xml: Path) -> np.ndar
     return result
 
 
+def left_wrist_orientations(body_positions: np.ndarray, model_xml: Path) -> np.ndarray:
+    """Pelvis-local wrist rotation matrices from the same pinned geometry."""
+    import mujoco
+
+    model = mujoco.MjModel.from_xml_path(str(model_xml))
+    data = mujoco.MjData(model)
+    data.qpos[3] = 1.0
+    addresses = []
+    for name in BODY_JOINT_ORDER:
+        joint = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
+        addresses.append(model.jnt_qposadr[joint])
+    wrist = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "left_wrist_yaw_link")
+    pelvis = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
+    result = np.empty((len(body_positions), 3, 3), dtype=np.float64)
+    for row, values in enumerate(body_positions):
+        data.qpos[addresses] = values
+        mujoco.mj_forward(model, data)
+        wrist_world = data.xmat[wrist].reshape(3, 3)
+        pelvis_world = data.xmat[pelvis].reshape(3, 3)
+        result[row] = pelvis_world.T @ wrist_world
+    return result
+
+
+def orientation_error(first: np.ndarray, second: np.ndarray) -> dict[str, float]:
+    relative = np.einsum("nij,njk->nik", np.swapaxes(first, 1, 2), second)
+    cosine = np.clip((np.trace(relative, axis1=1, axis2=2) - 1.0) / 2.0, -1.0, 1.0)
+    angle = np.arccos(cosine)
+    return {"p50_rad": float(np.percentile(angle, 50)), "p95_rad": float(np.percentile(angle, 95)),
+            "max_rad": float(angle.max()), "mean_rad": float(angle.mean())}
+
+
 def root_local_to_world(local: np.ndarray, root_pos: np.ndarray, root_quat_wxyz: np.ndarray) -> np.ndarray:
     """Apply a wxyz root pose to local wrist points, row by row."""
     quaternion = np.asarray(root_quat_wxyz, dtype=np.float64)
@@ -81,7 +107,9 @@ def _errors(first: np.ndarray, second: np.ndarray, names: tuple[str, ...]) -> di
     }
     result = {
         "body_mae_rad": float(difference.mean()),
+        "body_p50_rad": float(np.percentile(difference, 50)),
         "body_p95_rad": float(np.percentile(difference, 95)),
+        "body_max_rad": float(difference.max()),
         "body_worst_joint_mae_rad": float(difference.mean(axis=0).max()),
         "per_joint": per_joint,
     }
@@ -91,6 +119,49 @@ def _errors(first: np.ndarray, second: np.ndarray, names: tuple[str, ...]) -> di
         result["left_arm_p95_rad"] = float(np.percentile(difference[:, indices], 95))
         result["left_arm_worst_joint_mae_rad"] = float(difference[:, indices].mean(axis=0).max())
     return result
+
+
+def _temporal_alignment(reference: np.ndarray, response: np.ndarray, max_lag_frames: int = 15) -> dict:
+    """Best position-trajectory lag; positive means C lags A."""
+    scores: list[tuple[float, int]] = []
+    for lag in range(-max_lag_frames, max_lag_frames + 1):
+        if lag >= 0:
+            first, second = reference[: len(reference) - lag or None], response[lag:]
+        else:
+            first, second = reference[-lag:], response[: len(response) + lag]
+        if len(first) < 3 or len(second) != len(first):
+            continue
+        # Ignore nominally static joints: a tiny sensor/control wobble can have
+        # a mathematically defined but task-irrelevant correlation and dominate
+        # a whole-body average (notably AppleToPlate's parked right arm).
+        moving = np.ptp(first, axis=0) > 0.05
+        if not np.any(moving):
+            continue
+        a = first[:, moving] - first[:, moving].mean(axis=0)
+        b = second[:, moving] - second[:, moving].mean(axis=0)
+        denom = np.linalg.norm(a, axis=0) * np.linalg.norm(b, axis=0)
+        valid = denom > 1e-9
+        correlation = float(np.mean(np.sum(a[:, valid] * b[:, valid], axis=0) / denom[valid])) if np.any(valid) else 0.0
+        scores.append((correlation, lag))
+    if not scores:
+        return {"best_lag_frames": 0, "best_lag_s": 0.0, "mean_correlation": None}
+    correlation, lag = max(scores)
+    return {"best_lag_frames": int(lag), "best_lag_s": float(lag / 50.0), "mean_correlation": correlation}
+
+
+def _catastrophic_windows(reference: np.ndarray, response: np.ndarray, *, threshold_rad: float = 0.75) -> dict:
+    per_frame = np.max(np.abs(reference - response), axis=1)
+    bad = per_frame > threshold_rad
+    runs: list[dict[str, int | float]] = []
+    start = None
+    for index, value in enumerate(np.r_[bad, False]):
+        if value and start is None:
+            start = index
+        elif not value and start is not None:
+            runs.append({"start_frame": start, "end_frame": index - 1, "frames": index - start,
+                         "duration_s": (index - start) / 50.0})
+            start = None
+    return {"threshold_rad": threshold_rad, "frame_fraction": float(np.mean(bad)), "windows": runs}
 
 
 def compare_reference_command_response(
@@ -157,6 +228,8 @@ def compare_reference_command_response(
         "reference_to_response": _errors(desired, measured, BODY_JOINT_ORDER),
         "command_to_response": _errors(command, measured, BODY_JOINT_ORDER),
     }
+    temporal_alignment = _temporal_alignment(desired, measured)
+    catastrophic = _catastrophic_windows(desired, measured)
     hands = {}
     for side in ("left", "right"):
         desired_hand = np.asarray(reference[f"{side}_hand_joints"])[indices]
@@ -169,10 +242,9 @@ def compare_reference_command_response(
             "command_to_response": _errors(command_hand, measured_hand, names),
         }
     decisions = []
-    for pair in ("reference_to_command", "reference_to_response"):
-        value = hands["left"][pair]["body_mae_rad"]
-        decisions.append({"metric": f"{pair}.left_hand_mae_rad", "value": value, "limit": 0.35,
-                          "result": "PASS" if value <= 0.35 else "FAIL"})
+    value = hands["left"]["reference_to_response"]["body_mae_rad"]
+    decisions.append({"metric": "reference_to_response.left_hand_mae_rad", "value": value, "limit": 0.35,
+                      "result": "PASS" if value <= 0.35 else "FAIL"})
     for metric, limit in FIDELITY_LIMITS.items():
         pair, field = metric.split(".")
         value = pairs[pair][field]
@@ -180,11 +252,24 @@ def compare_reference_command_response(
     decisions.insert(0, {"metric": "coverage.full_motion", "value": float(coverage["full_motion"]), "limit": 1.0,
                          "result": "PASS" if coverage["full_motion"] else "FAIL"})
     wrist = None
+    wrist_orientation = None
     world_wrist = None
     if model_xml is not None:
         paths = {"reference": left_wrist_positions(desired, model_xml),
                  "command": left_wrist_positions(command, model_xml),
                  "response": left_wrist_positions(measured, model_xml)}
+        orientations = {"reference": left_wrist_orientations(desired, model_xml),
+                        "command": left_wrist_orientations(command, model_xml),
+                        "response": left_wrist_orientations(measured, model_xml)}
+        wrist_orientation = {
+            "frame": "pelvis-local",
+            "reference_to_command": orientation_error(orientations["reference"], orientations["command"]),
+            "reference_to_response": orientation_error(orientations["reference"], orientations["response"]),
+        }
+        orientation_p95 = wrist_orientation["reference_to_response"]["p95_rad"]
+        decisions.append({"metric": "reference_to_response.left_wrist_orientation_p95_rad",
+                          "value": orientation_p95, "limit": 0.8,
+                          "result": "PASS" if orientation_p95 <= 0.8 else "FAIL"})
         wrist = {"frame": "pelvis-local", "link": "left_wrist_yaw_link", "model_xml": str(model_xml)}
         for pair, key in (("reference_to_command", "command"), ("reference_to_response", "response")):
             displacement = paths[key] - paths["reference"]
@@ -195,12 +280,13 @@ def compare_reference_command_response(
                 "reference_delta_y_m": float(paths["reference"][-1, 1] - paths["reference"][0, 1]),
                 "other_delta_y_m": float(paths[key][-1, 1] - paths[key][0, 1]),
             }
-            decisions.append({"metric": f"{pair}.left_wrist_path_mae_m", "value": value, "limit": limit,
-                              "result": "PASS" if value <= limit else "FAIL"})
+            if pair == "reference_to_response":
+                decisions.append({"metric": f"{pair}.left_wrist_path_mae_m", "value": value, "limit": limit,
+                                  "result": "PASS" if value <= limit else "FAIL"})
         # A direction gate is meaningful only for a substantial net lateral move.
         reference_y = wrist["reference_to_command"]["reference_delta_y_m"]
         if abs(reference_y) >= 0.08 and coverage["full_motion"]:
-            for pair in ("reference_to_command", "reference_to_response"):
+            for pair in ("reference_to_response",):
                 other_y = wrist[pair]["other_delta_y_m"]
                 same_direction = reference_y * other_y > 0
                 decisions.append({"metric": f"{pair}.left_wrist_lateral_direction", "value": float(same_direction),
@@ -223,12 +309,9 @@ def compare_reference_command_response(
             world_wrist[pair] = {"path_mae_m": value, "reference_delta_y_m": delta_a,
                                 "other_delta_y_m": delta_other}
             limit = 0.20 if key == "command" else 0.22
-            decisions.append({"metric": f"{pair}.world_left_wrist_path_mae_m", "value": value, "limit": limit,
-                              "result": "PASS" if value <= limit else "FAIL"})
-            if abs(delta_a) >= 0.08 and coverage["full_motion"]:
-                same_direction = delta_a * delta_other > 0
-                decisions.append({"metric": f"{pair}.world_left_wrist_lateral_direction", "value": float(same_direction),
-                                  "limit": 1.0, "result": "PASS" if same_direction else "FAIL"})
+            # World A uses a frequently synthetic dataset root while C uses the
+            # measured simulator root.  Report this, but never call it latent
+            # failure unless a future dataset supplies a real root trajectory.
     action_components = None
     required = ("body_velocity_target", "body_feedforward_torque", "body_kp", "body_kd",
                 "body_applied_torque", "body_measured_velocity")
@@ -256,8 +339,11 @@ def compare_reference_command_response(
         "pairs": pairs,
         "hands": hands,
         "left_wrist": wrist,
+        "left_wrist_orientation": wrist_orientation,
         "world_left_wrist": world_wrist,
         "sonic_action_components": action_components,
+        "temporal_alignment": temporal_alignment,
+        "catastrophic_windows": catastrophic,
         "decisions": decisions,
         "result": "PASS" if all(item["result"] == "PASS" for item in decisions) else "FAIL",
         "plot_data": {

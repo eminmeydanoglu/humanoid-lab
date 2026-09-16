@@ -14,6 +14,7 @@ raw dataset
   -> SONIC observation [frames, 1751]
   -> production.encode_prepared_episode()
   -> motion_token [frames, 64]
+  -> training_valid_mask (unclamped future windows only)
   -> optional Dex3 hands [frames, 7 + 7]
   -> action [frames, 78]
 ```
@@ -88,6 +89,12 @@ This function:
 7. Adds the two seven-joint Dex3 targets only when the adapter has verified the
    hand schema.
 
+The supervised VLA contract is `observation_t -> z_t`, where `z_t` encodes the
+reference window beginning at `t`. The final 45 rows are retained so a SONIC
+replay can execute the complete episode, but their future windows contain
+upstream last-frame clamping and `training_valid_mask` excludes them from VLA
+losses.
+
 The pinned encoder checksum is exported as `PINNED_ENCODER_SHA256`.
 
 No other production module writes `action_tokens.npz` or
@@ -111,12 +118,46 @@ The adapter therefore:
 This policy is intended for stationary manipulation. It must not be interpreted
 as a recorded walking or pelvis trajectory.
 
-The hand schema is verified, so the output contains both:
+The action hand schema is verified, so the output contains both:
 
 - 64D SONIC motion tokens.
 - 78D actions: `64D token + 7D left hand + 7D right hand`.
 
+## Unitree production corpus
+
+The lean production path is deliberately separate from pilot/replay evidence:
+
+```bash
+scripts/convert-all-unitree-sonic.sh
+```
+
+It is blocked until `unitree-sonic-v1.1-78d/qc/unitree-production-qc.json`
+records a five-episode `PASS`. It writes only one `action.npz` and one
+`manifest.json` per episode. No videos, CSV/parquet mirrors, plots, HTML,
+Isaac rollout, or SONIC physics replay are part of bulk conversion.
+
+`action[:, :64]` is the SONIC v1.1 body latent, `action[:, 64:71]` the verified
+Unitree left Dex3 action, and `action[:, 71:78]` the verified right action.
+`SonicTrainingEpisode.load()` refuses legacy files without
+`training_valid_mask`. Frame loss uses `valid_actions()`. Chunked training uses
+`valid_action_chunks(horizon)`, which admits an anchor only when every target in
+the chunk is valid; no clamped-tail target can enter indirectly.
+
+The converter is sequential by collection to keep ONNX/GPU memory deterministic.
+Within each collection it reuses one encoder session, caches LeRobot episode
+metadata and source-file checksums, atomically replaces incomplete episode
+directories, and skips only outputs whose source identity, model/config hashes,
+schema and output checksum still match.
+
 ### NVIDIA AppleToPlate
+
+Body motion comes from same-row `action_t`. The normalized hand command has no
+verified conversion to Dex3 radians. Measured `observation.state_t` hands are
+kept for diagnostics, but must not be mixed into a 78D action label: equal
+timestamps do not make measured state and desired action the same semantic
+target. AppleToPlate bulk conversion therefore remains excluded until the hand
+command mapping and action-to-state latency are established; its safe output is
+the 64D body latent only.
 
 The adapter maps the 29 body action channels and resamples the 30 Hz source to
 50 Hz before it reaches `production.py`.
@@ -211,8 +252,10 @@ This publishes `action_tokens.npz` at 50 Hz of Isaac simulation time through
 SONIC Protocol v4 and records the closed-loop robot motion. The replay writes
 the publisher timeline and a 50 Hz trace of SONIC joint targets and measured
 robot joints. `sonic_fidelity.json` compares A (canonical reference), B (SONIC
-joint-position command), and C (robot response), including pelvis-local and
-world-frame left-wrist motion. The trace also retains B's velocity target,
+joint-position command), and C (robot response). Only A-to-C execution fidelity
+and complete delivery determine PASS/FAIL. B is a controller diagnostic, not an
+encoder reconstruction. Pelvis-local wrist position/orientation is primary;
+world-frame wrist motion is diagnostic when A has a synthetic root. The trace also retains B's velocity target,
 gains, feed-forward torque, and applied actuator torque for diagnosis.
 Missing publisher, SONIC receiver, or robot-trace frames fail the completeness
 gate; no review clip is made from a truncated replay. The fixed minimum wall-time
@@ -257,7 +300,7 @@ A completed pilot directory contains:
 | `reference.npz` | Canonical 50 Hz body/root/hand episode. |
 | `reference.parquet` | Inspectable tabular form of the canonical reference. |
 | `encoder_observation.npz` | Common `[frames, 1751]` encoder input. |
-| `action_tokens.npz` | 64D tokens and, when verified, 7+7 hand targets and 78D actions. |
+| `action_tokens.npz` | 64D tokens, frame timestamps, `training_valid_mask`, and, when action semantics are verified, 7+7 hand targets and 78D actions. |
 | `run_manifest.json` | Source mapping, assumptions, quality results, and provenance. |
 | `encoder_manifest.json` | Model checksum, ONNX contract, repeatability, dimensions, and token statistics. |
 | `human_review.json` | Explicit human review gate used by bulk conversion. |
