@@ -24,6 +24,17 @@ use-isaac-sonic() {
   unset HL_NO_ENV
 }
 
+use-unitree-sim() {
+  _hl_require_env "$HL_VENVS_ROOT/unitree-sim" || return 1
+  # Runs on the same Isaac Sim 5.1.0 Kit python/extension paths as isaac-sonic.
+  # shellcheck source=containers/isaac-sim-env.sh
+  source /opt/humanoid-lab/isaac-sim-env.sh
+  export HL_ACTIVE_ENV="unitree-sim"
+  export PATH="$HL_VENVS_ROOT/unitree-sim/bin:$PATH"
+  export VIRTUAL_ENV="$HL_VENVS_ROOT/unitree-sim"
+  unset HL_NO_ENV
+}
+
 use-sonic-sim() {
   _hl_require_env "$HL_VENVS_ROOT/sonic-sim" || return 1
   export HL_ACTIVE_ENV="sonic-sim"

@@ -84,6 +84,17 @@ repositories:
       - path: external_dependencies/robocasa-gr1-tabletop-tasks
         url: https://github.com/robocasa/robocasa-gr1-tabletop-tasks
         commit: 4840e671596f93ca03651524b9f72ffb1aadfeff
+  unitree_sim_isaaclab:
+    # Unitree's Isaac Lab task suite (G1/H1-2 pick-place/stack/wholebody tasks).
+    # Baked into the image like isaaclab/sonic/isaac-groot; the task assets are
+    # NOT in this repo and are fetched separately into the data root (see
+    # models.unitree_sim_assets). teleimager is its git submodule (branch sim).
+    url: https://github.com/unitreerobotics/unitree_sim_isaaclab.git
+    commit: e30c25b1dffdf92ada1d6c8c1fe9a47bdde0fecc   # HEAD == commit (verified)
+    submodules:
+      - path: teleimager
+        url: https://github.com/unitreerobotics/teleimager
+        commit: b81de448bca9c696d7ce145f4af71c66146d0b69   # recorded gitlink at the commit above
 
 python_environments:
   isaac_sonic:
@@ -116,6 +127,18 @@ python_environments:
       aborts before accelerate can fall back to DDP. flash_attn stays out:
       upstream comments it out in pyproject and the model falls back to sdpa.
       psi itself is installed editable from the pinned checkout with --no-deps.
+  unitree_sim:
+    python: "3.11"
+    torch: "2.7.0"
+    torchvision: "0.22.0"
+    cuda: "12.8"
+    note: >
+      Unitree's unitree_sim_isaaclab runs on the same Isaac Sim 5.1.0 Kit Python
+      3.11 as isaac-sonic, so its lock is derived from locks/isaac-sonic (same
+      torch/isaaclab pins) minus gear_sonic, plus the upstream requirements.txt
+      packages that the SONIC environment does not carry. The env is provisioned
+      into its own /opt/venvs/unitree-sim; existing environments are untouched.
+      teleimager is installed editable with --no-deps from the pinned image layer.
 
 models:
   sonic_deploy:
@@ -195,3 +218,18 @@ models:
       meta_info_json: 4167742a5dcadbda4ea53b6ad806da4f6ec3d541386f5b65fbcad9c68ebb33a0
       modality_json: 45ff0cd3e2d1221147588957b0fb788bf321599dcebc396cf1a71d97e5f6da5b
     total_episodes: 371
+  unitree_sim_assets:
+    # unitree_sim_isaaclab's scene assets (USDs, props, robot models) ship as a
+    # >1 GiB assets.zip inside a Hugging Face *dataset* repo, not the git repo.
+    # They are not baked into the image: scripts/fetch-unitree-sim-assets.sh
+    # clones the dataset into the persistent data root, verifies the archive
+    # size, extracts assets/ there, and points /opt/src/unitree-sim/assets at
+    # that copy (the link lives outside git; upstream .gitignore ignores assets/).
+    repo: unitreerobotics/unitree_sim_isaaclab_usds
+    kind: dataset
+    revision: 394cf2448f8a9ed815c77c701a761f3d1ff1c8fb
+    gated: false
+    dest_dir: unitree-sim-assets
+    archive: assets.zip
+    min_archive_bytes: 1073741824
+    required: true

@@ -15,6 +15,7 @@ services:
         ISAAC_LAB_COMMIT: ${REPOSITORIES_ISAAC_LAB_COMMIT:?render versions.lock.yaml first}
         SONIC_COMMIT: ${REPOSITORIES_SONIC_COMMIT:?render versions.lock.yaml first}
         ISAAC_GROOT_COMMIT: ${REPOSITORIES_ISAAC_GROOT_COMMIT:?render versions.lock.yaml first}
+        UNITREE_SIM_COMMIT: ${REPOSITORIES_UNITREE_SIM_ISAACLAB_COMMIT:?render versions.lock.yaml first}
         DEVELOPER_UID: ${DEVELOPER_UID:-1000}
         DEVELOPER_GID: ${DEVELOPER_GID:-1000}
         BUILD_DATE: ${BUILD_DATE:-unknown}

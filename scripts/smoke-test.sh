@@ -7,6 +7,7 @@ have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 PY_ISAAC=/opt/venvs/isaac-sonic/bin/python
 PY_SIM=/opt/venvs/sonic-sim/bin/python
+PY_UTREE=/opt/venvs/unitree-sim/bin/python
 PY_GROOT=/opt/venvs/groot-n17/bin/python
 PY_PSI0=/opt/venvs/psi0/bin/python
 
@@ -21,7 +22,7 @@ else
   FAIL=$((FAIL+1))
 fi
 
-for env_name in isaac-sonic sonic-sim groot-n17 psi0; do
+for env_name in isaac-sonic sonic-sim unitree-sim groot-n17 psi0; do
   venv="/opt/venvs/$env_name"
   if [ -x "$venv/bin/python" ]; then
     note PASS "$env_name: python $($venv/bin/python --version 2>&1)"
@@ -33,6 +34,7 @@ for env_name in isaac-sonic sonic-sim groot-n17 psi0; do
 done
 HAVE_ISAAC=$([ -x "$PY_ISAAC" ] && echo 1 || echo 0)
 HAVE_SIM=$([ -x "$PY_SIM" ] && echo 1 || echo 0)
+HAVE_UTREE=$([ -x "$PY_UTREE" ] && echo 1 || echo 0)
 HAVE_GROOT=$([ -x "$PY_GROOT" ] && echo 1 || echo 0)
 HAVE_PSI0=$([ -x "$PY_PSI0" ] && echo 1 || echo 0)
 
@@ -88,6 +90,48 @@ if [ "$HAVE_ISAAC" = 1 ]; then
     note FAIL "isaac-sonic: Unitree DDS bindings missing (SONIC bridge cannot run)"
     FAIL=$((FAIL+1))
   fi
+fi
+
+# unitree_sim_isaaclab runs on the same Kit python; sim_main.py needs isaaclab,
+# the Unitree DDS bindings, teleimager's runtime imports (cv2/aiohttp/aiortc/zmq)
+# and pinocchio, plus the separate data-root scene assets.
+if [ "$HAVE_UTREE" = 1 ]; then
+  if "$PY_UTREE" - <<'PY' >/dev/null 2>&1; then
+import isaaclab, pinocchio, unitree_sdk2py, zmq, onnxruntime, cv2, aiortc, logging_mp, teleimager
+print(f"isaaclab={isaaclab.__version__} onnxruntime={onnxruntime.__version__}")
+PY
+    note PASS "unitree-sim: isaaclab/pinocchio/DDS/cv2/aiortc/teleimager imports"
+    PASS=$((PASS+1))
+  else
+    note FAIL "unitree-sim: import check failed:"
+    "$PY_UTREE" -c 'import isaaclab, pinocchio, unitree_sdk2py, zmq, onnxruntime, cv2, aiortc, logging_mp, teleimager' 2>&1 | tail -5 | sed 's/^/           /'
+    FAIL=$((FAIL+1))
+  fi
+  if (
+    # shellcheck disable=SC1091 # Exists only in the dev container.
+    source /opt/humanoid-lab/entrypoint.sh
+    use-unitree-sim
+    test "$ISAAC_PATH" = /isaac-sim
+    test "$CARB_APP_PATH" = /isaac-sim/kit
+    test "$EXP_PATH" = /isaac-sim/apps
+  ) >/dev/null 2>&1; then
+    note PASS "unitree-sim: AppLauncher paths (ISAAC_PATH/CARB_APP_PATH/EXP_PATH)"
+    PASS=$((PASS+1))
+  else
+    note FAIL "unitree-sim: AppLauncher paths missing"
+    FAIL=$((FAIL+1))
+  fi
+  UTREE_ASSETS=/opt/src/unitree-sim/assets
+  if [ -d "$UTREE_ASSETS" ] && [ -n "$(ls -A "$UTREE_ASSETS" 2>/dev/null)" ]; then
+    note PASS "unitree-sim: scene assets linked ($(find -L "$UTREE_ASSETS" -maxdepth 2 -type d | wc -l) dirs under assets/)"
+    PASS=$((PASS+1))
+  else
+    note BLOCKED "unitree-sim: scene assets missing ($UTREE_ASSETS) — run ./dev.sh fetch-unitree-sim-assets"
+    BLOCK=$((BLOCK+1))
+  fi
+else
+  note FAIL "unitree-sim: env missing — cannot test"
+  FAIL=$((FAIL+1))
 fi
 
 SONIC_DEX3_USD="$MODEL_ROOT/sonic-assets/g1_29dof_with_hand_rev_1_0.usd"

@@ -4,12 +4,22 @@ set -euo pipefail
 
 VENV_ROOT=/opt/venvs
 STATE_ROOT="$VENV_ROOT/.humanoid-lab-state"
-LOCKS_ROOT=/workspace/humanoid-lab/locks
-[[ -f "$LOCKS_ROOT/isaac-sonic/uv.lock" ]] || LOCKS_ROOT=/opt/locks
 # A runtime container is an unprivileged user; managed Python downloads must
 # live in the host-mounted uv cache rather than the image's /opt prefix.
 export UV_PYTHON_INSTALL_DIR=/cache/uv/python
 mkdir -p "$STATE_ROOT"
+
+# Prefer the mounted checkout's lock so edits take effect without an image
+# rebuild, but fall back to the image-baked copy per environment. This lets a
+# container that mounts a checkout lacking a newer environment's lock (for
+# example a worktree without locks/unitree-sim) still provision it from /opt/locks.
+lock_dir() { # $1 = env name -> prints the lock project directory
+  if [[ -f "/workspace/humanoid-lab/locks/$1/uv.lock" ]]; then
+    printf '%s\n' "/workspace/humanoid-lab/locks/$1"
+  else
+    printf '%s\n' "/opt/locks/$1"
+  fi
+}
 
 fingerprint() {
   local lockfile="$1"
@@ -84,7 +94,9 @@ materialize_sonic_asset() {
 
 sync_isaac_sonic() {
   local name=isaac-sonic
-  local lockfile="$LOCKS_ROOT/isaac-sonic/uv.lock"
+  local lock_project
+  lock_project="$(lock_dir isaac-sonic)"
+  local lockfile="$lock_project/uv.lock"
   local current
   current="$(fingerprint "$lockfile" /opt/src/isaaclab /opt/src/sonic)"
   if is_current "$name" "$current" && has_unitree_dds "$name"; then
@@ -94,7 +106,7 @@ sync_isaac_sonic() {
 
   echo "[venv] $name: provisioning lock-pinned environment"
   uv venv --allow-existing --python /isaac-sim/kit/python/bin/python3 "$VENV_ROOT/$name"
-  UV_PROJECT_ENVIRONMENT="$VENV_ROOT/$name" uv sync --frozen --no-dev --project "$LOCKS_ROOT/isaac-sonic"
+  UV_PROJECT_ENVIRONMENT="$VENV_ROOT/$name" uv sync --frozen --no-dev --project "$lock_project"
   # Archive distributions omit data files; the checked-out pinned sources are authoritative.
   uv pip uninstall --python "$VENV_ROOT/$name/bin/python" \
     isaaclab isaaclab-assets isaaclab-tasks isaaclab-rl gear-sonic || true
@@ -111,7 +123,9 @@ sync_isaac_sonic() {
 
 sync_sonic_sim() {
   local name=sonic-sim
-  local lockfile="$LOCKS_ROOT/sonic-sim/uv.lock"
+  local lock_project
+  lock_project="$(lock_dir sonic-sim)"
+  local lockfile="$lock_project/uv.lock"
   local current
   current="$(fingerprint "$lockfile" /opt/src/sonic)"
   if is_current "$name" "$current" && has_unitree_dds "$name"; then
@@ -121,12 +135,82 @@ sync_sonic_sim() {
 
   echo "[venv] $name: provisioning lock-pinned environment"
   uv venv --allow-existing --python 3.11 "$VENV_ROOT/$name"
-  UV_PROJECT_ENVIRONMENT="$VENV_ROOT/$name" uv sync --frozen --no-dev --project "$LOCKS_ROOT/sonic-sim"
+  UV_PROJECT_ENVIRONMENT="$VENV_ROOT/$name" uv sync --frozen --no-dev --project "$lock_project"
   install_unitree_dds "$name"
   uv pip uninstall --python "$VENV_ROOT/$name/bin/python" gear-sonic || true
   uv pip install --python "$VENV_ROOT/$name/bin/python" --no-deps -e '/opt/src/sonic/gear_sonic[sim]'
   "$VENV_ROOT/$name/bin/python" -c 'import mujoco, gear_sonic, unitree_sdk2py'
   record_current "$name" "$current"
+}
+
+# unitree_sim_isaaclab reads its scene assets from <project>/assets. The assets
+# are a data-root download (see versions.lock models.unitree_sim_assets), so link
+# the fetched copy into the pinned image tree. Upstream .gitignore ignores
+# assets/, so the source layer stays byte-identical.
+link_unitree_sim_assets() {
+  local dest="${HUMANOID_DATA_ROOT:-/data}/models/unitree-sim-assets/assets"
+  local link=/opt/src/unitree-sim/assets
+  if [ ! -d "$dest" ]; then
+    echo "[asset] unitree-sim: assets not fetched yet (run ./dev.sh fetch-unitree-sim-assets)" >&2
+    return 0
+  fi
+  if [ -e "$link" ] && [ ! -L "$link" ]; then
+    echo "[asset] unitree-sim: $link exists and is not a symlink; leaving it untouched" >&2
+    return 0
+  fi
+  ln -sfn "$dest" "$link"
+  echo "[asset] unitree-sim: assets linked -> $dest"
+}
+
+# The teleimager WebRTC publisher needs a TLS cert/key; upstream generates them
+# during setup. Create them idempotently so the image server does not log a
+# missing-certificate error on every start. Streaming is disabled on this host,
+# but the publisher thread still starts for cameras that enable WebRTC.
+prepare_unitree_sim_certs() {
+  local dir="${HOME:-/home/ubuntu}/.config/xr_teleoperate"
+  if [ -f "$dir/cert.pem" ] && [ -f "$dir/key.pem" ]; then
+    return 0
+  fi
+  command -v openssl >/dev/null 2>&1 || {
+    echo "[cert] openssl missing; WebRTC certs not generated (stream disabled)" >&2
+    return 0
+  }
+  mkdir -p "$dir"
+  openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+    -keyout "$dir/key.pem" -out "$dir/cert.pem" \
+    -subj "/CN=humanoid-lab-unitree-sim" >/dev/null 2>&1
+  echo "[cert] generated self-signed WebRTC certs in $dir"
+}
+
+sync_unitree_sim() {
+  local name=unitree-sim
+  local lock_project
+  lock_project="$(lock_dir unitree-sim)"
+  local lockfile="$lock_project/uv.lock"
+  local current
+  current="$(fingerprint "$lockfile" /opt/src/unitree-sim)"
+  if is_current "$name" "$current" && has_unitree_dds "$name"; then
+    echo "[venv] $name: lock and sources unchanged"
+    link_unitree_sim_assets
+    return
+  fi
+
+  echo "[venv] $name: provisioning lock-pinned environment"
+  uv venv --allow-existing --python /isaac-sim/kit/python/bin/python3 "$VENV_ROOT/$name"
+  UV_PROJECT_ENVIRONMENT="$VENV_ROOT/$name" uv sync --frozen --no-dev --project "$lock_project"
+  # Archive distributions omit data files; the checked-out pinned sources are authoritative.
+  uv pip uninstall --python "$VENV_ROOT/$name/bin/python" \
+    isaaclab isaaclab-assets isaaclab-tasks isaaclab-rl || true
+  uv pip install --python "$VENV_ROOT/$name/bin/python" --no-deps \
+    -e /opt/src/isaaclab/source/isaaclab \
+    -e /opt/src/isaaclab/source/isaaclab_assets \
+    -e /opt/src/isaaclab/source/isaaclab_tasks \
+    -e /opt/src/isaaclab/source/isaaclab_rl \
+    -e /opt/src/unitree-sim/teleimager
+  install_unitree_dds "$name"
+  "$VENV_ROOT/$name/bin/python" -c 'import isaaclab, pinocchio, unitree_sdk2py, zmq, onnxruntime'
+  record_current "$name" "$current"
+  link_unitree_sim_assets
 }
 
 remove_unusable_groot_deepspeed() {
@@ -173,10 +257,18 @@ sync_psi0() {
   # Upstream Psi0 is a git submodule of this checkout, not an image layer; the
   # workspace mount makes it visible here without rebuilding the image.
   local source=/workspace/humanoid-lab/third_party/Psi0
-  local lockfile="$LOCKS_ROOT/psi0/uv.lock"
+  local lock_project
+  lock_project="$(lock_dir psi0)"
+  local lockfile="$lock_project/uv.lock"
   local current
   [ -f "$source/uv.lock" ] || { echo "[venv] $name: checkout missing: $source" >&2; return 1; }
-  current="$(fingerprint "$lockfile" "$source")"
+  # A git worktree mounted without its common .git directory cannot resolve the
+  # submodule's HEAD. Keep the already-provisioned env instead of failing the
+  # whole sync; the lock alone still fingerprints nothing, so skip cleanly.
+  if ! current="$(fingerprint "$lockfile" "$source" 2>/dev/null)"; then
+    echo "[venv] $name: pinned checkout git metadata unavailable (worktree mount); keeping existing env" >&2
+    return 0
+  fi
   if is_current "$name" "$current"; then
     echo "[venv] $name: lock and sources unchanged"
     remove_unusable_psi0_deepspeed
@@ -189,7 +281,7 @@ sync_psi0() {
   # uv.lock: that file has a duplicate TOML key (upstream bug) and this repo
   # already keeps frozen locks for every environment. See locks/psi0/pyproject.toml
   # for the two deliberate deltas (cu128 torch, no deepspeed).
-  UV_PROJECT_ENVIRONMENT="$VENV_ROOT/$name" uv sync --frozen --no-dev --project "$LOCKS_ROOT/psi0"
+  UV_PROJECT_ENVIRONMENT="$VENV_ROOT/$name" uv sync --frozen --no-dev --project "$lock_project"
   # psi itself is installed from the pinned checkout, editable and without
   # dependency resolution, so the sources under third_party/Psi0 stay authoritative.
   uv pip install --python "$VENV_ROOT/$name/bin/python" --no-deps -e "$source"
@@ -200,8 +292,10 @@ sync_psi0() {
 
 sync_isaac_sonic
 sync_sonic_sim
+sync_unitree_sim
 sync_groot
 sync_psi0
+prepare_unitree_sim_certs
 
 # The container already exports HUMANOID_DATA_ROOT with the in-container path
 # (/data); the repository's .env holds the host path and must not be used here.

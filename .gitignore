@@ -33,6 +33,7 @@ docs/
 !docs/
 docs/*
 !docs/sonic-isaac.md
+!docs/unitree-sim-isaac.md
 # buyuk model dosyalari
 .pretrained_checkpoints/
 AGENTS.md

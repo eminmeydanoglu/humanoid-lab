@@ -29,8 +29,10 @@ have_sha() { # $1 repo, $2 sha -> 0/1 (exact SHA in refs, else GitHub API)
 have_tag() { # $1 repo, $2 tag -> 0/1
   git ls-remote --tags "$1" "refs/tags/$2" 2>/dev/null | grep -q "refs/tags/$2"
 }
-have_hf_rev() { # $1 repo, $2 sha -> 0/1
-  curl -fsS "https://huggingface.co/api/models/$1/revision/$2" >/dev/null 2>&1
+have_hf_rev() { # $1 repo, $2 sha -> 0/1 (model repos, then dataset repos)
+  curl -fsS "https://huggingface.co/api/models/$1/revision/$2" >/dev/null 2>&1 && return 0
+  # unitree_sim_isaaclab's assets live in a dataset repo, not a model repo.
+  curl -fsS "https://huggingface.co/api/datasets/$1/revision/$2" >/dev/null 2>&1
 }
 
 RC=0

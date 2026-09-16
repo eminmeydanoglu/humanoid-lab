@@ -269,6 +269,95 @@ run_isaac_g1() { # $1 = profile path; remaining args belong to the runner
   return "$rc"
 }
 
+cleanup_unitree_sim() { # $1 = container-side pidfile
+  local pidfile="$1"
+  local container_id
+  container_id="$(DC ps -q dev 2>/dev/null)" || return 0
+  [ -n "$container_id" ] || return 0
+  # shellcheck disable=SC2016 # Variables in this string expand in the container.
+  docker exec "$container_id" bash -lc '
+    pidfile=$1
+    [ -r "$pidfile" ] || exit 0
+    read -r pid <"$pidfile" || exit 0
+    case "$pid" in (*[!0-9]*|"") rm -f -- "$pidfile"; exit 0;; esac
+    if [ -r "/proc/$pid/cmdline" ] &&
+       tr "\\0" " " <"/proc/$pid/cmdline" | grep -Fq "sim_main.py"; then
+      kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+      for _ in {1..20}; do
+        [ ! -d "/proc/$pid" ] && break
+        sleep 0.1
+      done
+      [ ! -d "/proc/$pid" ] || kill -KILL -- "-$pid" 2>/dev/null || true
+    fi
+    rm -f -- "$pidfile" "${pidfile}.status"
+  ' -- "$pidfile" >/dev/null 2>&1 || true
+}
+
+run_unitree_sim() { # remaining args belong to sim_main.py
+  local pidfile="/tmp/humanoid-lab-unitree-sim-$$-$RANDOM.pid"
+  local statusfile="${pidfile}.status"
+  local container_id
+  local exec_pid=""
+  local recorded_rc=""
+  local rc
+
+  container_id="$(DC ps -q dev)"
+  [ -n "$container_id" ] || { echo "error: dev container is not running" >&2; return 2; }
+
+  on_unitree_sim_signal() {
+    cleanup_unitree_sim "$pidfile"
+    if [ -n "$exec_pid" ]; then
+      kill "$exec_pid" 2>/dev/null || true
+      wait "$exec_pid" 2>/dev/null || true
+    fi
+    exit 143
+  }
+  trap on_unitree_sim_signal INT TERM HUP
+  # shellcheck disable=SC2016 # Variables in this string expand in the container.
+  # sim_main.py owns its process group (os.setpgrp) and installs its own signal
+  # handlers, so it runs under setsid and a short-lived wrapper records the
+  # authoritative exit status, exactly like run_isaac_g1.
+  docker exec -e DISPLAY="$DISPLAY" "$container_id" bash -lc '
+    source /opt/humanoid-lab/entrypoint.sh
+    use-unitree-sim
+    cd /opt/src/unitree-sim
+    pidfile=$1
+    statusfile=$2
+    shift 2
+    exec 9>/tmp/humanoid-lab-unitree-sim.lock
+    if ! flock -n 9; then
+      echo "error: another unitree_sim_isaaclab simulation is already running" >&2
+      exit 3
+    fi
+    rm -f -- "$pidfile"
+    rm -f -- "$statusfile"
+    setsid python sim_main.py "$@" &
+    sim_pid=$!
+    printf "%s\n" "$sim_pid" >"$pidfile"
+    cleanup_runner() {
+      kill -- "-$sim_pid" 2>/dev/null || kill "$sim_pid" 2>/dev/null || true
+      rm -f -- "$pidfile" "$statusfile"
+    }
+    trap "cleanup_runner; exit 143" INT TERM HUP
+    if wait "$sim_pid"; then rc=0; else rc=$?; fi
+    printf "{\"event\":\"unitree_sim_process_exit\",\"exit_code\":%s}\n" "$rc"
+    printf "%s\n" "$rc" >"$statusfile"
+    trap - INT TERM HUP
+    rm -f -- "$pidfile"
+    exit "$rc"
+  ' -- "$pidfile" "$statusfile" "$@" &
+  exec_pid=$!
+  if wait "$exec_pid"; then rc=0; else rc=$?; fi
+  recorded_rc="$(docker exec "$container_id" bash -lc 'cat -- "$1" 2>/dev/null' -- "$statusfile" || true)"
+  case "$recorded_rc" in
+    0|1|2|3|126|127) rc="$recorded_rc" ;;
+  esac
+  docker exec "$container_id" rm -f -- "$statusfile" >/dev/null 2>&1 || true
+  trap - INT TERM HUP
+  cleanup_unitree_sim "$pidfile"
+  return "$rc"
+}
+
 case "${1:-}" in
   "")
     up_once
@@ -298,6 +387,18 @@ case "${1:-}" in
   sonic-sim)  shell_env use-sonic-sim ;;
   groot)      shell_env use-groot ;;
   psi0)       shell_env use-psi0 ;;
+  unitree-sim)
+    # unitree_sim_isaaclab's sim_main.py runs from its project root and, without
+    # --headless/--no_render, opens a GUI window (needs X11). Any other flags are
+    # passed straight through (--task, --robot_type, --enable_dex3_dds, ...).
+    headless=0
+    for arg in "${@:2}"; do
+      case "$arg" in --headless|--no_render) headless=1 ;; esac
+    done
+    [ "$headless" -eq 1 ] || require_x11_display
+    up_once
+    run_unitree_sim "${@:2}"
+    ;;
   isaac-g1)
     profile="${2:-}"
     case "$profile" in
@@ -461,6 +562,10 @@ case "${1:-}" in
     up_once
     DC exec dev bash -lc "source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && scripts/fetch-models.sh"
     ;;
+  fetch-unitree-sim-assets)
+    up_once
+    DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && exec /workspace/humanoid-lab/scripts/fetch-unitree-sim-assets.sh "$@"' fetch-unitree-sim-assets "${@:2}"
+    ;;
   fetch-groot-demo-data)
     up_once
     DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-groot && exec /opt/humanoid-lab/fetch-groot-demo-data.sh "$@"' fetch-groot-demo-data "${@:2}"
@@ -485,7 +590,7 @@ case "${1:-}" in
     exit 2
     ;;
   *)
-    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-direct-reference dex3|isaac-g1-sonic-fixed-base dex3|isaac-g1-sonic {dex3|inspire-ftp}|sonic-controller|sonic-dataset-validate|doctor|smoke|groot-finetune-smoke|psi0-smoke|sync|fetch-models|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
+    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|unitree-sim [sim_main args]|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-direct-reference dex3|isaac-g1-sonic-fixed-base dex3|isaac-g1-sonic {dex3|inspire-ftp}|sonic-controller|sonic-dataset-validate|doctor|smoke|groot-finetune-smoke|psi0-smoke|sync|fetch-models|fetch-unitree-sim-assets|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
     exit 2
     ;;
 esac

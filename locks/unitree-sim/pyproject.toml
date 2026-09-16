@@ -1,0 +1,58 @@
+[project]
+name = "humanoid-lab-unitree-sim"
+version = "0.0.0"
+description = "unitree_sim_isaaclab task suite, resolved for the Isaac Sim 5.1.0 Kit Python 3.11 runtime"
+requires-python = "==3.11.*"
+# Derived from locks/isaac-sonic so the shared packages (torch/torchvision/numpy/
+# scipy/isaaclab) resolve to the exact versions that environment already uses.
+# Two deliberate deltas: gear_sonic is dropped (this stack does not use it), and
+# unitree_sim_isaaclab's upstream requirements.txt packages that isaac-sonic does
+# not carry are added on top. teleimager is installed editable, --no-deps, by
+# bootstrap-venvs.sh from the pinned /opt/src/unitree-sim layer.
+dependencies = [
+    "torch==2.7.0",
+    "torchvision==0.22.0",
+    "numpy==1.26.4",
+    "scipy==1.15.3",
+    "isaaclab @ https://github.com/isaac-sim/IsaacLab/archive/37ddf626871758333d6ed89cf64ad702aef127d0.tar.gz#subdirectory=source/isaaclab",
+    "isaaclab-assets @ https://github.com/isaac-sim/IsaacLab/archive/37ddf626871758333d6ed89cf64ad702aef127d0.tar.gz#subdirectory=source/isaaclab_assets",
+    "isaaclab-tasks @ https://github.com/isaac-sim/IsaacLab/archive/37ddf626871758333d6ed89cf64ad702aef127d0.tar.gz#subdirectory=source/isaaclab_tasks",
+    "isaaclab-rl[rsl-rl] @ https://github.com/isaac-sim/IsaacLab/archive/37ddf626871758333d6ed89cf64ad702aef127d0.tar.gz#subdirectory=source/isaaclab_rl",
+    # Pinocchio bindings (sim_main.py imports `pinocchio`) come in transitively via
+    # isaaclab; pinned here so the import cannot silently disappear.
+    "pin-pink==3.1.0",
+    # unitree_sim_isaaclab requirements.txt, versions aligned to isaac-sonic where
+    # the package already exists there.
+    "rerun-sdk==0.20.1",
+    "pyzmq==27.0.0",
+    "logging_mp==0.1.5",
+    "onnxruntime==1.22.1",
+    "onnx==1.22.0",
+    "pynput==1.8.1",
+    "aiortc",
+    "aiohttp==3.14.3",
+    # teleimager is installed editable --no-deps from the pinned image layer, so
+    # its own runtime deps are declared here rather than resolved at runtime.
+    "opencv-python==4.11.0.86",
+    "pyyaml",
+]
+
+[tool.uv]
+package = false
+override-dependencies = [
+    "smpl-sim @ https://github.com/ZhengyiLuo/SMPLSim/archive/b5c08720503ad5fff64050c4d289c42d947fcf8d.tar.gz",
+    "smplx @ https://github.com/ZhengyiLuo/smplx/archive/a5b8e4ac14f79f3f33fd2cf2a16e6f507146b813.tar.gz",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+# SMPLSim/smplx floating VCS dep -> immutable archive override
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.extra-build-dependencies]
+flatdict = ["setuptools==80.9.0"]

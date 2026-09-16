@@ -12,6 +12,7 @@ ARG DEVELOPER_GID=1000
 ARG ISAAC_LAB_COMMIT=37ddf626871758333d6ed89cf64ad702aef127d0
 ARG SONIC_COMMIT=a0732b642c0333077e127a2f56ab0014c196bca4
 ARG ISAAC_GROOT_COMMIT=1a1837f20538b7d7e21f977a11a5aee14f99803c
+ARG UNITREE_SIM_COMMIT=e30c25b1dffdf92ada1d6c8c1fe9a47bdde0fecc
 ARG BUILD_DATE=unknown
 
 USER root
@@ -75,8 +76,14 @@ RUN set -eux; \
     checkout https://github.com/NVlabs/GR00T-WholeBodyControl.git "${SONIC_COMMIT}" /opt/src/sonic; \
     git -C /opt/src/sonic lfs pull \
       --include "gear_sonic/data/robot_model/model_data/g1/meshes/*"; \
+    git -C /opt/src/sonic lfs pull \
+      --include "external_dependencies/unitree_sdk2_python/unitree_sdk2py/utils/lib/*.so"; \
     test -f /opt/src/sonic/gear_sonic/data/robot_model/model_data/g1/meshes/head_link.STL; \
     test "$(head -c 5 /opt/src/sonic/gear_sonic/data/robot_model/model_data/g1/meshes/head_link.STL)" != "versi"; \
+    # unitree_sim_isaaclab's DDS bridge loads these CRC bindings from the copied \
+    # unitree_sdk2py; SONIC does not (it passes --disable-crc-check), so they must \
+    # be materialized here or they stay git-lfs pointers. \
+    test "$(head -c 5 /opt/src/sonic/external_dependencies/unitree_sdk2_python/unitree_sdk2py/utils/lib/crc_amd64.so)" != "versi"; \
     python3 /opt/humanoid-lab/prepare-g1-assets.py \
       --source /opt/src/sonic/gear_sonic/data/robot_model/model_data/g1 \
       --output /opt/assets/g1-mujoco-binary; \
@@ -94,6 +101,31 @@ RUN set -eux; \
     test "$(git -C /opt/src/isaac-groot/external_dependencies/robocasa-gr1-tabletop-tasks rev-parse HEAD)" = 4840e671596f93ca03651524b9f72ffb1aadfeff; \
     chown -R "${DEVELOPER_UID}:${DEVELOPER_GID}" /opt/src /opt/venvs /opt/humanoid-lab /opt/assets /workspace
 
+# unitree_sim_isaaclab is a separate, small layer on top of the cached upstream
+# checkouts above, so adding it does not invalidate the isaaclab/sonic/groot
+# source layer. Its scene assets are a data-root download (see
+# models.unitree_sim_assets), so assets/ stays absent here and is linked at
+# runtime by bootstrap-venvs.sh. Unlike the checkouts above, this fetch omits
+# `-c http.version=HTTP/1.1`: for this repository that flag makes the fetch fail
+# at the ref listing under BuildKit ("could not read Username ...").
+RUN set -eux; \
+    printf '%s' "$UNITREE_SIM_COMMIT" | grep -Eq '^[0-9a-f]{40}$'; \
+    checkout() { \
+      url="$1"; commit="$2"; target="$3"; \
+      git init "$target"; \
+      git -C "$target" remote add origin "$url"; \
+      git -C "$target" fetch --depth=1 origin "$commit"; \
+      git -C "$target" checkout --detach FETCH_HEAD; \
+      test "$(git -C "$target" rev-parse HEAD)" = "$commit"; \
+      test -z "$(git -C "$target" status --porcelain)"; \
+    }; \
+    checkout https://github.com/unitreerobotics/unitree_sim_isaaclab.git "${UNITREE_SIM_COMMIT}" /opt/src/unitree-sim; \
+    # teleimager is the task suite's image-server submodule (branch sim); pin the \
+    # recorded gitlink exactly rather than tracking the branch. \
+    git -C /opt/src/unitree-sim submodule update --init --depth 1 teleimager; \
+    test "$(git -C /opt/src/unitree-sim/teleimager rev-parse HEAD)" = b81de448bca9c696d7ce145f4af71c66146d0b69; \
+    chown -R "${DEVELOPER_UID}:${DEVELOPER_GID}" /opt/src/unitree-sim
+
 FROM sources AS dev
 
 # Runtime code is deliberately copied after the expensive source layer.  A
@@ -106,6 +138,7 @@ RUN set -eux; \
     # Pinned upstream sources stay byte-identical: nothing here patches /opt/src.
     test -z "$(git -c safe.directory='*' -C /opt/src/sonic status --porcelain)"; \
     test -z "$(git -c safe.directory='*' -C /opt/src/isaaclab status --porcelain)"; \
+    test -z "$(git -c safe.directory='*' -C /opt/src/unitree-sim status --porcelain)"; \
     chmod 0755 /opt/humanoid-lab/*.sh; \
     chown -R "${DEVELOPER_UID}:${DEVELOPER_GID}" /opt/humanoid-lab /opt/src
 
@@ -116,6 +149,7 @@ LABEL org.opencontainers.image.source="git@github.com:eminmeydanoglu/humanoid-la
       org.humanoid-lab.isaac-lab="2.3.2" \
       org.humanoid-lab.sonic="a0732b642c0333077e127a2f56ab0014c196bca4" \
       org.humanoid-lab.groot="1a1837f20538b7d7e21f977a11a5aee14f99803c" \
+      org.humanoid-lab.unitree-sim="e30c25b1dffdf92ada1d6c8c1fe9a47bdde0fecc" \
       org.humanoid-lab.uv="${UV_VERSION}" \
       org.humanoid-lab.build-date="${BUILD_DATE}"
 
