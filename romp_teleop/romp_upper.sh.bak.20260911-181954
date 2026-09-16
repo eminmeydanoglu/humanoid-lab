@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONTAINER="${ROMP_CONTAINER:-romp-faruk-dev}"
+WORKDIR="/workspace/humanoid-lab/romp_teleop"
+PYTHON="/opt/venvs/sonic-sim/bin/python"
+
+if ! docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -qx true; then
+  echo "error: container '$CONTAINER' is not running" >&2
+  echo "start it from ~/code/romp_faruk with docker compose first" >&2
+  exit 1
+fi
+
+# Default to the live Stage-1 ROMP stream.  Pass --play FILE (and any other
+# romp_to_sonic_bridge.py options) to replay a recording instead.
+if [[ $# -eq 0 ]]; then
+  set -- --subscribe
+fi
+
+docker exec -it "$CONTAINER" bash -lc '
+  set -euo pipefail
+  cd "$1"
+  python_bin="$2"
+  shift 2
+
+  : > /tmp/romp_upper_deploy.log
+  "$python_bin" run_deploy_zmq.py \
+    --input-type zmq_manager --print \
+    --drop-marker "" \
+    --log /tmp/romp_upper_deploy.log &
+  deploy_pid=$!
+
+  cleanup() {
+    kill -TERM "$deploy_pid" 2>/dev/null || true
+    wait "$deploy_pid" 2>/dev/null || true
+  }
+  trap cleanup EXIT INT TERM
+
+  # Do not publish the one-shot start command before the command/planner
+  # subscribers exist. Model/TRT initialization can take tens of seconds.
+  ready=0
+  for _ in $(seq 1 120); do
+    if grep -aq "Init Done" /tmp/romp_upper_deploy.log 2>/dev/null; then
+      ready=1
+      break
+    fi
+    if ! kill -0 "$deploy_pid" 2>/dev/null; then
+      echo "error: SONIC deploy exited during initialization" >&2
+      exit 1
+    fi
+    sleep 0.5
+  done
+  if [[ "$ready" -ne 1 ]]; then
+    echo "error: timed out waiting for SONIC deploy initialization" >&2
+    exit 1
+  fi
+
+  "$python_bin" romp_to_sonic_bridge.py \
+    --sonic-root /opt/src/sonic \
+    --control-mode upper-body \
+    "$@"
+' bash "$WORKDIR" "$PYTHON" "$@"
