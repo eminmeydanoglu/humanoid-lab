@@ -79,6 +79,9 @@ Flags:
 # terminal 1 — Isaac Sim: scene, physics loop, robot state on DDS, incoming joint commands applied
 ./dev.sh isaac-g1-sonic dex3
 
+# ...or the same path on the InstinctLab parkour terrain (stairs, gaps, obstacle fields)
+./dev.sh isaac-g1-sonic-rough dex3
+
 # terminal 2 — the official SONIC deployment: planner and keyboard on this terminal
 ./dev.sh sonic-controller
 ```

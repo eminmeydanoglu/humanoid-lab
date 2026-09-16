@@ -184,6 +184,38 @@ class SupportSpec:
 
 NAMED_POSES = ("sonic_standing",)
 
+#: Terrains a profile may ask for instead of the flat plane.  A preset names a
+#: world declared elsewhere (see `terrains.py`); the profile never restates the
+#: terrain itself, so there is one definition of it in the repository.
+TERRAIN_PRESETS = ("instinct_parkour_rough",)
+
+
+@dataclass(frozen=True)
+class TerrainSpec:
+    """The generated ground a run replaces the flat plane with.
+
+    ``max_init_terrain_level`` is the training-world curriculum band the robot
+    starts in, in that world's own units: the terrain grid is indexed by
+    difficulty along one axis, so a small band means an easy tile.  Zero pins
+    the spawn to the easiest tile, which is what makes an interactive run start
+    on ground the robot can stand on rather than inside a staircase.
+    """
+
+    preset: str
+    max_init_terrain_level: int = 0
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "TerrainSpec":
+        if "preset" not in data:
+            raise ContractError("terrain.preset is required")
+        preset = str(data["preset"])
+        if preset not in TERRAIN_PRESETS:
+            raise ContractError(f"terrain preset must be one of {TERRAIN_PRESETS}, got {preset!r}")
+        level = int(data.get("max_init_terrain_level", 0))
+        if level < 0:
+            raise ContractError("terrain.max_init_terrain_level cannot be negative")
+        return cls(preset=preset, max_init_terrain_level=level)
+
 
 @dataclass(frozen=True)
 class RunProfile:
@@ -197,6 +229,7 @@ class RunProfile:
     controller: Mapping[str, Any] | None = None
     initial_pose: str | None = None
     support: SupportSpec | None = None
+    terrain: TerrainSpec | None = None
 
     @classmethod
     def load(cls, path: Path) -> "RunProfile":
@@ -226,6 +259,11 @@ class RunProfile:
         support = data.get("support")
         if support is not None and controller is None:
             raise ContractError("a support band only means something with a controller attached")
+        terrain = data.get("terrain")
+        if terrain is not None:
+            if not isinstance(terrain, dict):
+                raise ContractError("terrain must be an object with a preset")
+            terrain = TerrainSpec.from_dict(terrain)
         return cls(
             schema_version=1,
             profile_id=str(data["profile_id"]),
@@ -235,6 +273,7 @@ class RunProfile:
             controller=controller,
             initial_pose=str(initial_pose) if initial_pose is not None else None,
             support=SupportSpec.from_dict(support) if support is not None else None,
+            terrain=terrain,
         )
 
     @property
@@ -295,6 +334,14 @@ class RunProfile:
             "initial_pose": self.initial_pose,
             "support": (
                 {"kind": self.support.kind, "release": self.support.release} if self.support else None
+            ),
+            "terrain": (
+                {
+                    "preset": self.terrain.preset,
+                    "max_init_terrain_level": self.terrain.max_init_terrain_level,
+                }
+                if self.terrain
+                else None
             ),
         }
 

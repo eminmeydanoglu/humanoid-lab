@@ -425,10 +425,24 @@ case "${1:-}" in
     up_once
     run_isaac_g1 "$profile_file" "${@:3}"
     ;;
+  isaac-g1-sonic-rough)
+    # The same SONIC path on the InstinctLab parkour terrain instead of the flat
+    # plane: stairs, gaps and obstacle fields, with the robot starting on the
+    # easiest tile.  See docs/sonic-isaac.md.
+    [ "${2:-}" = "dex3" ] || { echo "usage: $0 isaac-g1-sonic-rough dex3 [--headless] [--head-camera-window] [--duration SECONDS] [--record-video PATH] [--controller none]" >&2; exit 2; }
+    headless=0
+    for arg in "${@:3}"; do
+      [ "$arg" != "--headless" ] || headless=1
+    done
+    [ "$headless" -eq 1 ] || require_x11_display
+    up_once
+    run_isaac_g1 configs/profiles/isaac-g1-sonic-rough-dex3.json "${@:3}"
+    ;;
   instinct-parkour)
     # Project-Instinct G1 parkour checkpoint playback.  The shipped checkpoint is
     # ONNX-only, so this runs scripts/play-instinct-parkour.py rather than the
-    # upstream task script.  See docs/instinct-parkour.md.
+    # upstream task script.  The window shows the robot, with the head camera's
+    # depth image beside it.  See docs/instinct-parkour.md.
     run_instinct_parkour "${@:2}"
     ;;
   instinct-parkour-drive)
@@ -601,7 +615,7 @@ case "${1:-}" in
     exit 2
     ;;
   *)
-    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-direct-reference dex3|isaac-g1-sonic-fixed-base dex3|isaac-g1-sonic {dex3|inspire-ftp}|sonic-controller|sonic-dataset-validate|sonic-pilot|sonic-encode|sonic-review|sonic-review-serve|sonic-convert|sonic-tests|doctor|smoke|groot-finetune-smoke|psi0-smoke|sync|fetch-models|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
+    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-direct-reference dex3|isaac-g1-sonic-fixed-base dex3|isaac-g1-sonic {dex3|inspire-ftp}|isaac-g1-sonic-rough dex3|instinct-parkour|instinct-parkour-drive|sonic-controller|sonic-dataset-validate|sonic-pilot|sonic-encode|sonic-review|sonic-review-serve|sonic-convert|sonic-tests|doctor|smoke|groot-finetune-smoke|psi0-smoke|sync|fetch-models|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
     exit 2
     ;;
 esac

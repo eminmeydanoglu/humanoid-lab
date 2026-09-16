@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 import tempfile
@@ -9,7 +10,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
-from humanoid_lab.simulators.isaac.contracts import ContractError, RunProfile  # noqa: E402
+from humanoid_lab.simulators.isaac.contracts import (  # noqa: E402
+    ContractError,
+    RunProfile,
+    TerrainSpec,
+)
 
 SERVICE = ROOT / "src/humanoid_lab/simulators/isaac/service.py"
 
@@ -63,6 +68,241 @@ class IsaacG1SimulationConfigTests(unittest.TestCase):
         profile = RunProfile.load(ROOT / "configs/profiles/isaac-g1-dex3.json")
         self.assertEqual(profile.with_device(None).device, "cpu")
         self.assertEqual(profile.with_device("cuda").device, "cuda")
+
+
+class IsaacG1TerrainTests(unittest.TestCase):
+    ROUGH = "isaac-g1-sonic-rough-dex3.json"
+    FLAT = "isaac-g1-sonic-dex3.json"
+
+    def _load(self, name: str) -> RunProfile:
+        return RunProfile.load(ROOT / "configs/profiles" / name)
+
+    def test_rough_profile_is_the_sonic_profile_on_other_ground(self) -> None:
+        """The option must change the ground and nothing else."""
+        rough = self._load(self.ROUGH)
+        flat = self._load(self.FLAT)
+        self.assertIsNotNone(rough.terrain)
+        self.assertEqual(rough.terrain.preset, "instinct_parkour_rough")
+        self.assertEqual(rough.terrain.max_init_terrain_level, 0)
+        self.assertIsNone(flat.terrain)
+        self.assertEqual(dataclasses.replace(rough, terrain=None, profile_id=flat.profile_id), flat)
+
+    def test_flat_profiles_declare_no_terrain(self) -> None:
+        for path in sorted((ROOT / "configs/profiles").glob("isaac-g1-*.json")):
+            if path.name == self.ROUGH:
+                continue
+            self.assertIsNone(RunProfile.load(path).terrain, f"{path.name} declares a terrain")
+
+    def test_manifest_records_the_world_the_run_used(self) -> None:
+        manifest = self._load(self.ROUGH).as_manifest()
+        self.assertEqual(
+            manifest["terrain"],
+            {"preset": "instinct_parkour_rough", "max_init_terrain_level": 0},
+        )
+        self.assertIsNone(self._load(self.FLAT).as_manifest()["terrain"])
+
+    def test_start_level_is_a_declared_choice(self) -> None:
+        source = json.loads((ROOT / "configs/profiles" / self.ROUGH).read_text())
+        source["terrain"]["max_init_terrain_level"] = 5
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rough.json"
+            path.write_text(json.dumps(source))
+            self.assertEqual(RunProfile.load(path).terrain.max_init_terrain_level, 5)
+
+    def test_rejects_unknown_preset_and_negative_level(self) -> None:
+        source = json.loads((ROOT / "configs/profiles" / self.ROUGH).read_text())
+        for terrain, expected in (
+            ({"preset": "moon"}, "must be one of"),
+            ({"preset": "instinct_parkour_rough", "max_init_terrain_level": -1}, "negative"),
+            ({"max_init_terrain_level": 0}, "preset is required"),
+            ("instinct_parkour_rough", "must be an object"),
+        ):
+            source["terrain"] = terrain
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "bad.json"
+                path.write_text(json.dumps(source))
+                with self.assertRaisesRegex(ContractError, expected):
+                    RunProfile.load(path)
+
+    def test_terrain_presets_live_in_one_place(self) -> None:
+        """The preset resolves to the pinned instinct world, not to a copy here."""
+        terrains = (ROOT / "src/humanoid_lab/simulators/isaac/terrains.py").read_text()
+        self.assertIn('PARKOUR_CONFIG_MODULE = "instinctlab.tasks.parkour.config.parkour_env_cfg"', terrains)
+        self.assertIn("ROUGH_TERRAINS_CFG", terrains)
+        self.assertIn("SceneCfg.terrain", terrains)
+        self.assertIn("wall_prob = [0.0, 0.0, 0.0, 0.0]", terrains)
+        self.assertIn("importer.use_terrain_origins = True", terrains)
+        # A run without a terrain must not import the instinct stack at all.
+        self.assertIn("def _preset_source", terrains)
+        module_body = terrains.split("def _preset_source", 1)[0]
+        self.assertNotIn("import instinctlab", module_body)
+        self.assertNotIn("from instinctlab", module_body)
+
+    def test_the_option_trims_the_world_exactly_like_the_playback(self) -> None:
+        """Both entry points have to build the same world to be comparable."""
+        terrains = (ROOT / "src/humanoid_lab/simulators/isaac/terrains.py").read_text()
+        playback = (ROOT / "scripts/play-instinct-parkour.py").read_text()
+        self.assertIn("PLAY_ROWS = 4", terrains)
+        self.assertIn("PLAY_COLS = 10", terrains)
+        self.assertIn("min(generator.num_rows, PLAY_ROWS)", terrains)
+        self.assertIn("min(generator.num_cols, PLAY_COLS)", terrains)
+        for trim in ("gen.num_rows = min(gen.num_rows, 4)", "gen.num_cols = min(gen.num_cols, 10)"):
+            self.assertIn(trim, playback, f"the playback no longer trims the grid: {trim}")
+        self.assertIn("wall_prob = [0.0, 0.0, 0.0, 0.0]", playback)
+
+    def test_a_missing_instinct_checkout_fails_as_a_preset_error(self) -> None:
+        """The builder must import cleanly without Kit and fail readably."""
+        from humanoid_lab.simulators.isaac import terrains
+
+        original = terrains.PARKOUR_CONFIG_MODULE
+        terrains.PARKOUR_CONFIG_MODULE = "no_such_module_here"
+        try:
+            with self.assertRaisesRegex(ContractError, "no_such_module_here"):
+                terrains.build_terrain_importer(TerrainSpec(preset="instinct_parkour_rough"))
+        finally:
+            terrains.PARKOUR_CONFIG_MODULE = original
+
+    def test_the_builder_trims_the_world_without_touching_it(self) -> None:
+        """The builder's own work, with the upstream config objects stood in for.
+
+        The real ones need a Kit process to import; what is being checked here is
+        that the declared world is trimmed and re-pointed by copy, never edited,
+        so the training config in the interpreter stays intact.
+        """
+        import types
+
+        from humanoid_lab.simulators.isaac import terrains
+
+        def walled(probability: float) -> types.SimpleNamespace:
+            return types.SimpleNamespace(wall_prob=[probability] * 4)
+
+        generator = types.SimpleNamespace(
+            seed=0,
+            size=(8.0, 8.0),
+            curriculum=True,
+            num_rows=10,
+            num_cols=20,
+            sub_terrains={
+                "perlin_rough": walled(0.3),
+                "pyramid_stairs": walled(0.3),
+                # A sub-terrain that never had walls must not grow the attribute.
+                "hf_pyramid_slope_inv": types.SimpleNamespace(),
+            },
+        )
+        importer = types.SimpleNamespace(
+            prim_path="/World/ground",
+            terrain_type="generator",
+            terrain_generator=generator,
+            max_init_terrain_level=5,
+            use_terrain_origins=False,
+            virtual_obstacles={"edges": object()},
+            physics_material=types.SimpleNamespace(static_friction=1.0, dynamic_friction=1.0),
+        )
+        module_name = "fake_parkour_config"
+        fake = types.ModuleType(module_name)
+        fake.ROUGH_TERRAINS_CFG = generator
+
+        @dataclasses.dataclass
+        class FakeSceneCfg:
+            """The shape ``@configclass`` leaves behind.
+
+            Every member becomes a factory-backed field and Python drops the
+            class attribute of such a field, so ``SceneCfg.terrain`` raises
+            AttributeError at run time.  The stand-in keeps that property, and
+            hands out the shared object rather than a copy, so the builder's own
+            copy discipline stays observable.
+            """
+
+            terrain: object = dataclasses.field(default_factory=lambda: importer)
+
+        fake.SceneCfg = FakeSceneCfg
+        original = terrains.PARKOUR_CONFIG_MODULE
+        sys.modules[module_name] = fake
+        terrains.PARKOUR_CONFIG_MODULE = module_name
+        try:
+            built, summary = terrains.build_terrain_importer(TerrainSpec(preset="instinct_parkour_rough"))
+        finally:
+            terrains.PARKOUR_CONFIG_MODULE = original
+            del sys.modules[module_name]
+
+        self.assertFalse(hasattr(FakeSceneCfg, "terrain"), "the stand-in lost its factory-backed shape")
+        self.assertIsNot(built, importer, "the builder handed back the declared object itself")
+
+        self.assertEqual((built.terrain_generator.num_rows, built.terrain_generator.num_cols), (4, 10))
+        for name in ("perlin_rough", "pyramid_stairs"):
+            self.assertEqual(built.terrain_generator.sub_terrains[name].wall_prob, [0.0, 0.0, 0.0, 0.0])
+        self.assertFalse(hasattr(built.terrain_generator.sub_terrains["hf_pyramid_slope_inv"], "wall_prob"))
+        self.assertEqual(built.max_init_terrain_level, 0)
+        self.assertTrue(built.use_terrain_origins)
+        self.assertEqual(built.prim_path, "/World/ground")
+        self.assertEqual(built.terrain_type, "generator")
+        self.assertEqual(list(built.virtual_obstacles), ["edges"])
+        # The world the preset points at is untouched.
+        self.assertEqual(generator.num_rows, 10)
+        self.assertEqual(generator.sub_terrains["perlin_rough"].wall_prob, [0.3] * 4)
+        self.assertEqual(importer.max_init_terrain_level, 5)
+        self.assertEqual(summary["grid"], [4, 10])
+        self.assertEqual(summary["tile_size_m"], [8.0, 8.0])
+        self.assertEqual(summary["walls_removed"], ["perlin_rough", "pyramid_stairs"])
+        self.assertEqual(summary["max_init_terrain_level"], 0)
+        self.assertEqual(summary["static_friction"], 1.0)
+        self.assertEqual(summary["virtual_obstacles"], ["edges"])
+
+    def test_a_declared_default_that_cannot_be_read_fails_readably(self) -> None:
+        from humanoid_lab.simulators.isaac import terrains
+
+        @dataclasses.dataclass
+        class NoDefault:
+            other: object = dataclasses.field(default_factory=dict)
+
+        with self.assertRaisesRegex(ContractError, "declares no field named 'terrain'"):
+            terrains._declared_default(NoDefault, "terrain")
+
+        @dataclasses.dataclass
+        class Bare:
+            terrain: object
+
+        with self.assertRaisesRegex(ContractError, "without a default to copy"):
+            terrains._declared_default(Bare, "terrain")
+
+        with self.assertRaisesRegex(ContractError, "is not a dataclass"):
+            terrains._declared_default(object, "terrain")
+
+    def test_terrain_is_the_ground_and_rebases_world_points(self) -> None:
+        """Everything the profile declares in world coordinates follows the
+        environment origin, which is no longer the world origin once a terrain
+        decides where the robot stands."""
+        source = SERVICE.read_text()
+        self.assertIn("ground_entity", source, "the scene has no single ground entity")
+        self.assertIn("if self._terrain_cfg is None", source, "the terrain is not optional")
+        self.assertIn(
+            "sim_cfg.physics_material = copy.deepcopy(self._terrain_cfg.physics_material)",
+            source,
+            "the terrain's contact material does not reach the physics scene",
+        )
+        self.assertIn('{"event": "isaac_g1_terrain"', source, "the world is not reported at start-up")
+        self.assertIn('"terrain": self._terrain_summary', source, "the world is missing from the run summary")
+        origin_body = source[source.index("    def _env_origin") : source.index("    def _set_debug_camera")]
+        self.assertIn("self._scene.env_origins[0]", origin_body, "the environment origin is not read")
+        debug_body = source[source.index("    def _set_debug_camera") : source.index("    def _align_validation_camera")]
+        self.assertIn("self._env_origin()", debug_body, "the debug view ignores the environment origin")
+        support_body = source[source.index("    def _apply_support") : source.index("    def _resolve_band_body_id")]
+        self.assertIn(
+            "point = torch.tensor(support.point_m, device=self._robot.device) + origin",
+            support_body,
+            "the support band would pull the robot toward the world origin",
+        )
+        align_body = source[
+            source.index("    def _align_validation_camera") : source.index("    def _start_support")
+        ]
+        self.assertIn("camera.set_world_poses(positions=position.unsqueeze(0))", align_body)
+        self.assertIn("if self._terrain_cfg is None:\n            return", align_body)
+        self.assertIn('self._scene.sensors.get("validation_camera")', align_body)
+
+    def test_a_flat_run_keeps_the_plane_scene(self) -> None:
+        source = SERVICE.read_text()
+        self.assertIn('AssetBaseCfg(prim_path="/World/ground", spawn=sim_utils.GroundPlaneCfg())', source)
+        self.assertIn('self._sim.set_camera_view(eye=(2.6 + x, 2.4 + y, 1.6 + z), target=(x, y, 0.65 + z))', source)
 
 
 class IsaacG1SourceInvariantTests(unittest.TestCase):

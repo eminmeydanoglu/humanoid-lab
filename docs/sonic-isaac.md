@@ -85,6 +85,38 @@ uygular: bütün 43 eklemde armature `0.01`, viskoz sürtünme `0.05`, Coulomb
 sürtünmesi ise ekleme göre `0.1` veya `0.2 Nm` olur. IsaacLab'in varsayılan G1
 actuator armature değerleri (`0.001`–`0.03`) bu profilde kullanılmaz.
 
+## Engebeli arazi seçeneği
+
+Aynı kontrol hattı, düz zemin yerine InstinctLab parkour dünyasında:
+
+```
+./dev.sh isaac-g1-sonic-rough dex3    # 1. terminal: Isaac + robot, engebeli arazi
+./dev.sh sonic-controller             # 2. terminal: resmî SONIC (değişmez)
+```
+
+Zemin, `configs/profiles/isaac-g1-sonic-rough-dex3.json` içindeki `terrain`
+bloğuyla seçilir. Arazi burada tarif edilmez; pinli InstinctLab checkout'undaki
+`instinctlab.tasks.parkour.config.parkour_env_cfg` modülünden **olduğu gibi**
+alınır (sub-terrain karışımı, malzemeler, kenar silindiri katmanı). Böylece
+`./dev.sh instinct-parkour` ile aynı dünyadır; bu pakette bir kopyası tutulmaz.
+
+- `terrain.preset`: şu an tek değer, `instinct_parkour_rough`.
+- `terrain.max_init_terrain_level`: robotun başladığı zorluk bandı. `0` onu en
+  kolay kareye sabitler (düz sayılabilecek bir başlangıç), eğitimdeki gibi
+  rastgele daha zor bir karede başlamasını isterseniz yükseltin.
+
+Koşuya özgü üç uyarlama: eğitim sahnesinin 5 m duvarları kapatılır, ızgara
+4×10'a iner (izlenebilir koşu için), ve profilde dünya koordinatında verilen
+şeyler — hata ayıklama kamerası, kayıt kamerası, destek bandının çıpası —
+ortamın başlangıç noktasına göre kaydırılır. Başlangıçta
+`{"event":"isaac_g1_terrain", ...}` satırı hangi dünyanın kurulduğunu yazar ve
+aynı özet koşu çıktısındaki `terrain` alanında saklanır.
+
+Durum: seçenek Raider'da koşuldu (headless, kontrolcüsüz serbest koşu, 20 s).
+Engebeli arazi CPU fiziğinde ~370 Hz / RTF 1.8x, aynı sahne `cuda:0` ile
+~51 Hz / RTF 0.25x. Düz zemin aynı koşulda ~424 Hz / RTF 2.1x; arazinin
+maliyeti ~%13. Varsayılan `cpu` bu yüzden korunuyor.
+
 ## Model karşılaştırması (ölçülmüş)
 
 Isaac tarafındaki gövde, pinli SONIC kaynağındaki Dex3 G1 USD'sinden gelir; o

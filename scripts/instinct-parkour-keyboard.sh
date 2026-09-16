@@ -17,6 +17,8 @@
 #   a / d   strafe left / right (clamped to 0 by default; see --lat below)
 #   f / g   turn left / right   (+/- 0.5 rad/s, clamped to +/-1.0)
 #   x       stop (zero the whole command)
+#   c       toggle the camera between free and robot-follow (it does not move
+#           the robot; free is what lets the mouse fly the viewport camera)
 #   q       quit this driver (the simulation keeps running)
 
 set -uo pipefail
@@ -112,7 +114,7 @@ render() {
 
 cat <<EOF
 Driving Isaac Sim window $WID on DISPLAY=$DISPLAY
-  w/s forward/back   a/d strafe (limit ${VY_MAX})   f/g turn   x stop   q quit
+  w/s forward/back   a/d strafe (limit ${VY_MAX})   f/g turn   x stop   c camera   q quit
   envelope the checkpoint was trained on: vx [${VX_MIN}, ${VX_MAX}]  vy [$(awk -v m="$VY_MAX" 'BEGIN{printf "%.2f", -m}'), ${VY_MAX}]  wz [-${WZ_MAX}, ${WZ_MAX}]
 EOF
 [ -n "$LOG" ] && echo "  status line: $LOG"
@@ -125,6 +127,9 @@ while true; do
   case "$key" in
     q|Q) printf '\n'; exit 0 ;;
     w|s|a|d|f|g|x) mirror "$key"; xdotool key --window "$WID" --clearmodifiers "$key"; render ;;
+    # The camera toggle changes nothing in the command, so it is forwarded
+    # without touching the mirror the readout prints.
+    c|C) xdotool key --window "$WID" --clearmodifiers c; printf '\n  camera toggled in the Isaac window\n'; render ;;
     *) : ;;
   esac
 done

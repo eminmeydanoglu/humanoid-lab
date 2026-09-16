@@ -96,6 +96,8 @@ class SimulatorService:
         self.error: str | None = None
         self._sim: Any = None
         self._scene: Any = None
+        self._terrain_cfg: Any = None
+        self._terrain_summary: dict[str, Any] | None = None
         self._timeline: Any = None
         self._robot: Any = None
         self._body_ids: list[int] = []
@@ -193,25 +195,39 @@ class SimulatorService:
         settings.set_bool("/physics/fabricEnabled", use_fabric)
         settings.set_bool("/physics/updateToUsd", not use_fabric)
         SimulationManager.enable_fabric(use_fabric)
-        self._sim = sim_utils.SimulationContext(
-            sim_utils.SimulationCfg(
-                dt=self.profile.physics_dt,
-                device=self._device,
-                use_fabric=use_fabric,
-                # This service owns the outer render cadence. Passing the same
-                # interval here makes Kit wait that full period again inside
-                # app.update(), effectively charging it twice.
-                render_interval=1,
-                render=sim_utils.RenderCfg(
-                    rendering_mode="balanced",
-                    enable_dlssg=self.show_ui
-                    and self.test_mode is None
-                    and not self.show_head_camera,
-                    enable_dl_denoiser=True,
-                    dlss_mode=1,
-                ),
-            )
+        if self.profile.terrain is not None:
+            # Built before the physics scene because the terrain's own contact
+            # material is part of the world being reproduced. The build itself
+            # happens later: this only resolves the declared preset.
+            from .terrains import build_terrain_importer
+
+            self._terrain_cfg, self._terrain_summary = build_terrain_importer(self.profile.terrain)
+            print(json.dumps({"event": "isaac_g1_terrain", **self._terrain_summary}), flush=True)
+        sim_cfg = sim_utils.SimulationCfg(
+            dt=self.profile.physics_dt,
+            device=self._device,
+            use_fabric=use_fabric,
+            # This service owns the outer render cadence. Passing the same
+            # interval here makes Kit wait that full period again inside
+            # app.update(), effectively charging it twice.
+            render_interval=1,
+            render=sim_utils.RenderCfg(
+                rendering_mode="balanced",
+                enable_dlssg=self.show_ui
+                and self.test_mode is None
+                and not self.show_head_camera,
+                enable_dl_denoiser=True,
+                dlss_mode=1,
+            ),
         )
+        if self._terrain_cfg is not None:
+            # A flat run keeps Isaac Lab's default material; a terrain run uses
+            # the profile's world, whose friction the training scene applies to
+            # the physics scene as a whole as well as to its own tiles.
+            import copy
+
+            sim_cfg.physics_material = copy.deepcopy(self._terrain_cfg.physics_material)
+        self._sim = sim_utils.SimulationContext(sim_cfg)
         print('{"event":"isaac_g1_start","stage":"interactive_scene"}', flush=True)
         self._scene = InteractiveScene(self._make_scene_cfg())
         # Mirror DirectRLEnv: rendering is only needed for a GUI or an RTX sensor.
@@ -235,6 +251,7 @@ class SimulatorService:
         self._timeline = get_timeline_interface()
         self._timeline.pause()
         self._set_debug_camera()
+        self._align_validation_camera()
         if self.show_ui:
             self._open_ui()
         self._transition(TimelineState.PAUSED)
@@ -679,10 +696,19 @@ class SimulatorService:
         )
         camera = self.profile.camera
         camera_path = f"{{ENV_REGEX_NS}}/Robot/{camera.parent_link}/{camera.name}"
+        # What carries the ground.  A profile-declared terrain *is* the ground,
+        # so it replaces the plane under the same entity name and prim path; the
+        # scene dispatches on the config's type, and the terrain importer is also
+        # what decides where in the world the environments sit.
+        ground_entity = (
+            AssetBaseCfg(prim_path="/World/ground", spawn=sim_utils.GroundPlaneCfg())
+            if self._terrain_cfg is None
+            else self._terrain_cfg
+        )
 
         @configclass
         class IsaacG1BaseSceneCfg(InteractiveSceneCfg):
-            ground = AssetBaseCfg(prim_path="/World/ground", spawn=sim_utils.GroundPlaneCfg())
+            ground = ground_entity
             dome_light = AssetBaseCfg(
                 prim_path="/World/DomeLight",
                 spawn=sim_utils.DomeLightCfg(intensity=1400.0, color=(0.82, 0.86, 0.92)),
@@ -789,9 +815,49 @@ class SimulatorService:
         if bool(torch.any(stiffness != 0.0)) or bool(torch.any(damping != 0.0)):
             raise RuntimeError("passive actuator verification failed: non-zero drive remains")
 
+    def _env_origin(self) -> tuple[float, float, float]:
+        """Where this environment stands in the world.
+
+        Zero on the flat plane, whose single environment is at the origin. A
+        terrain puts the environment wherever its tile is, and everything the
+        profile declares in world coordinates -- the debug view, the recorded
+        validation view, the support band's anchor -- is declared relative to
+        the robot's start position, so it travels with that origin.
+        """
+        if self._scene is None:
+            return (0.0, 0.0, 0.0)
+        origin = self._scene.env_origins[0]
+        return (float(origin[0]), float(origin[1]), float(origin[2]))
+
     def _set_debug_camera(self) -> None:
-        if hasattr(self._sim, "set_camera_view"):
-            self._sim.set_camera_view(eye=(2.6, 2.4, 1.6), target=(0.0, 0.0, 0.65))
+        if not hasattr(self._sim, "set_camera_view"):
+            return
+        x, y, z = self._env_origin()
+        self._sim.set_camera_view(eye=(2.6 + x, 2.4 + y, 1.6 + z), target=(x, y, 0.65 + z))
+
+    def _align_validation_camera(self) -> None:
+        """Re-base the recorded validation view on the environment's origin.
+
+        The camera is declared against a robot standing at the world origin. A
+        terrain environment stands on its own tile, so the same view has to be
+        translated by that origin or a recording watches empty ground. Only the
+        position moves: the declared orientation already looks at the spawn
+        point from an offset this translation preserves exactly.
+        """
+        if self._terrain_cfg is None:
+            return
+        camera = self._scene.sensors.get("validation_camera")
+        # The camera only exists in the scene that carries a viewport or a
+        # recording, and a profile without this sensor is not an error.
+        if camera is None:
+            return
+        import torch
+
+        x, y, z = self._env_origin()
+        position = torch.tensor(
+            [2.6 + x, 2.4 + y, 1.6 + z], device=camera.device, dtype=torch.float32
+        )
+        camera.set_world_poses(positions=position.unsqueeze(0))
 
     # ----------------------------------------------------------------- support
 
@@ -884,7 +950,10 @@ class SimulatorService:
             return
 
         position = self._robot.data.body_pos_w[0, self._band_body_id]
-        point = torch.tensor(support.point_m, device=self._robot.device)
+        # The anchor is declared relative to the robot's start position, so it
+        # travels with the environment: a terrain does not stand at the origin.
+        origin = torch.tensor(self._env_origin(), device=self._robot.device)
+        point = torch.tensor(support.point_m, device=self._robot.device) + origin
         offset = point - position
         linear_velocity = self._robot.data.body_lin_vel_w[0, self._band_body_id]
         force = support.linear_stiffness * offset - support.linear_damping * linear_velocity
@@ -1724,6 +1793,7 @@ class SimulatorService:
             "profile_id": self.profile.profile_id,
             **self._accounting(),
             "controller": self._controller_status(),
+            "terrain": self._terrain_summary,
             "video": {
                 "path": str(self.record_video) if self.record_video is not None else None,
                 "frames": self._video_frames,

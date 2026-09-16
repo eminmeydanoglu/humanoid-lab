@@ -18,7 +18,8 @@ checkpoint; the stock script simply has no ONNX playback path
 
 This script keeps the stock control flow and adds:
   * the missing ONNX inference path (depth encoder -> 128-D latent -> actor),
-  * a scene that is actually watchable (robot-following camera, no 5 m walls),
+  * a scene that is actually watchable (walls off, camera under your control),
+  * a second window showing the head camera's depth image,
   * wall-clock pacing plus FPS/RTF reporting.
 
 Run it through ``./dev.sh instinct-parkour`` (see docs/instinct-parkour.md).
@@ -97,8 +98,22 @@ parser.add_argument(
     "--scene",
     choices=("play", "train"),
     default="play",
-    help="'play' (default) keeps the checkpoint's stairs/obstacles but drops the 5 m boundary walls and "
-    "puts the camera behind the robot, so the run is watchable. 'train' uses the raw task scene as-is.",
+    help="'play' (default) keeps the checkpoint's stairs/obstacles but drops the 5 m boundary walls "
+    "and shrinks the grid, so the run is watchable. 'train' uses the raw task scene as-is.",
+)
+parser.add_argument(
+    "--no_depth_window",
+    dest="depth_window",
+    action="store_false",
+    help="Do not open the extra window that shows the head camera's depth image.",
+)
+parser.add_argument(
+    "--camera",
+    choices=("free", "follow"),
+    default="free",
+    help="'free' (default) frames the robot at start-up and then leaves the viewport camera to its own "
+    "navigation, so you can orbit, pan and zoom as usual. 'follow' tracks the robot every frame -- which "
+    "also overwrites any navigation every frame. Press C in the window to switch between the two.",
 )
 # AppLauncher declares its own --device; --sim_device is this script's flag and
 # wins, because the physics/sensor device is what decides whether the run is
@@ -244,17 +259,122 @@ def make_watchable(env_cfg, num_envs: int) -> None:
         gen.num_rows = min(gen.num_rows, 4)
         gen.num_cols = min(gen.num_cols, 10)
         print(f"[INFO] scene: terrain grid -> {gen.num_rows}x{gen.num_cols}, boundary walls disabled")
-
-    env_cfg.viewer = ViewerCfg(
-        eye=[3.0, 0.0, 1.4],
-        lookat=[0.6, 0.0, 0.5],
-        origin_type="asset_root",
-        asset_name="robot",
-    )
-    print("[INFO] scene: viewer follows the robot")
     if num_envs > 1:
         # With the camera glued to env 0, extra envs only cost frame time.
         print(f"[INFO] scene: {num_envs} envs requested; the viewer shows env 0 only")
+
+
+def configure_viewer(env_cfg, mode: str) -> None:
+    """Frame the robot at start-up, then either track it or hand the camera back.
+
+    Isaac Lab's viewport camera controller re-poses the camera every frame while
+    it follows an asset root (``_update_tracking_callback``), so in that mode
+    any orbit, pan or zoom is overwritten before the next frame is drawn: the
+    camera looks locked.  ``follow`` keeps that behaviour, ``free`` starts from
+    the same framing and then leaves the camera alone, which is what makes the
+    viewport's own navigation work.
+    """
+    env_cfg.viewer = ViewerCfg(
+        eye=[3.0, 0.0, 1.4],
+        lookat=[0.6, 0.0, 0.5],
+        origin_type="asset_root" if mode == "follow" else "world",
+        asset_name="robot",
+    )
+    print(
+        "[INFO] scene: viewer follows the robot"
+        if mode == "follow"
+        else "[INFO] scene: viewer starts behind the robot and is then yours to move (press C to follow)"
+    )
+
+
+def depth_to_rgba(depth, near_m: float, far_m: float):
+    """One depth frame as an RGBA byte image, near bright.
+
+    The sensor ships depth in metres and the policy sees it clipped to a fixed
+    range, so the same clip is applied here: everything past ``far_m`` is the
+    darkest value on screen, exactly like it is the largest value the policy
+    receives.
+    """
+    frame = np.asarray(depth, dtype=np.float32)
+    while frame.ndim > 2:  # the sensor output carries a channel axis
+        frame = frame[..., 0]
+    clipped = np.clip((frame - near_m) / (far_m - near_m), 0.0, 1.0)
+    gray = ((1.0 - clipped) * 255.0).astype(np.uint8)
+    image = np.empty((*gray.shape, 4), dtype=np.uint8)
+    image[..., :3] = gray[..., None]
+    image[..., 3] = 255
+    return image
+
+
+class DepthWindow:
+    """The head camera's depth image, in a window of its own.
+
+    The depth comes from a ray-cast sensor rather than from a render product, so
+    there is no USD camera for a viewport window to attach to: the image shown
+    here is the sensor's own tensor, pushed through a byte provider.  The widget
+    scales the 64x36 frame up instead of resampling it, which keeps the update
+    cheap enough to sit in the control loop.
+    """
+
+    TITLE = "G1 Head Camera Depth"
+    #: The sensor refreshes at 50 Hz, the window does not need to.
+    EVERY_STEPS = 4
+    #: Display size of the widget; the image itself stays 64x36.
+    WIDGET_SCALE = 6
+    #: The range the policy's normalization uses: what is dark here is what the
+    #: policy treats as far.
+    RANGE_M = (0.1, 2.5)
+
+    def __init__(self, env):
+        self._env = env
+        self._provider = None
+        self._window = None
+        self._since_update = 0
+        self._failed = False
+
+    def update(self) -> None:
+        if self._failed:
+            return
+        self._since_update += 1
+        if self._since_update % self.EVERY_STEPS:
+            return
+        try:
+            self._push_frame()
+        except Exception as error:  # a small display must not end a driving run
+            self._failed = True
+            print(f"[INFO] depth window: switched off after {type(error).__name__}: {error}")
+
+    def _push_frame(self) -> None:
+        camera = self._env.unwrapped.scene["camera"]
+        if "distance_to_image_plane" not in camera.data.output:
+            return
+        frame = camera.data.output["distance_to_image_plane"][0]
+        if hasattr(frame, "detach"):  # the ray-cast camera hands back device tensors
+            frame = frame.detach().cpu().numpy()
+        image = depth_to_rgba(frame, *self.RANGE_M)
+        if self._provider is None:
+            self._open(image.shape[1], image.shape[0])
+        # A list of bytes is what this provider's API takes (see Isaac Sim's own
+        # heightmap importer); 64x36 keeps that conversion negligible.
+        self._provider.set_bytes_data(list(image.tobytes()), [image.shape[1], image.shape[0]])
+
+    def _open(self, width: int, height: int) -> None:
+        import omni.ui as ui
+
+        self._provider = ui.ByteImageProvider()
+        self._window = ui.Window(
+            f"{self.TITLE} ({self.RANGE_M[0]}-{self.RANGE_M[1]} m, near bright)",
+            width=width * self.WIDGET_SCALE,
+            height=height * self.WIDGET_SCALE,
+        )
+        with self._window.frame:
+            ui.ImageWithProvider(
+                self._provider,
+                width=width * self.WIDGET_SCALE,
+                height=height * self.WIDGET_SCALE,
+                fill_policy=ui.IwpFillPolicy.IWP_PRESERVE_ASPECT_FIT,
+            )
+        print(f"[INFO] depth window: {self.TITLE}, {width}x{height} sensor image, nearest pixel upscale")
 
 
 class OnnxParkourPolicy:
@@ -401,6 +521,8 @@ def main():
 
     if args_cli.scene == "play":
         make_watchable(env_cfg, env_cfg.scene.num_envs)
+    # The camera is the operator's, not the scene's: it applies to both scenes.
+    configure_viewer(env_cfg, args_cli.camera)
     make_fast(env_cfg, interactive=args_cli.scene == "play" and not args_cli.no_tuning)
 
     step_dt = float(env_cfg.decimation * env_cfg.sim.dt)
@@ -419,6 +541,11 @@ def main():
         env = multi_agent_to_single_agent(env)
     env = InstinctRlVecEnvWrapper(env)
 
+    # The camera's depth image, on screen while you drive.  It is the sensor's
+    # own frame, uncropped: the policy reads a cropped, noised and normalized
+    # slice of it, and this window is for seeing where that slice comes from.
+    depth_window = DepthWindow(env) if not args_cli.headless and args_cli.depth_window else None
+
     policy = OnnxParkourPolicy(run_dir=run_dir, env=env)
 
     # Keyboard command override: same bindings as the stock play.py, but the
@@ -430,9 +557,34 @@ def main():
     command_frames = int(np.prod(command_shape)) // 3
     print(f"[INFO] velocity_commands obs: slice {command_slice} shape {tuple(command_shape)} -> {command_frames} frames")
 
+    def toggle_camera() -> None:
+        """Give the viewport camera to the operator, or back to the tracker.
+
+        The camera controller holds its own copy of the viewer config, and its
+        per-frame callback re-poses the camera whenever that copy says
+        ``asset_root``.  Flipping the mode on that copy is therefore what stops
+        -- and resumes -- the tracking, and it leaves the camera exactly where it
+        is at the moment of the flip, so nothing jumps.
+        """
+        controller = getattr(env.unwrapped, "viewport_camera_controller", None)
+        if controller is None:
+            print("[INFO] camera: this run has no viewport camera to move")
+            return
+        follow = controller.cfg.origin_type != "asset_root"
+        controller.cfg.origin_type = "asset_root" if follow else "world"
+        print(
+            "[INFO] camera: following the robot (press C for free navigation)"
+            if follow
+            else "[INFO] camera: free -- the viewport's own navigation is yours (press C to follow)"
+        )
+
     def on_keyboard_input(event):
         pressed = event.type in (KeyboardEventType.KEY_PRESS, KeyboardEventType.KEY_REPEAT)
         if not pressed:
+            return
+        if event.input == carb.input.KeyboardInput.C:
+            # A camera toggle is not a command: it must not touch the clamps.
+            toggle_camera()
             return
         if event.input == carb.input.KeyboardInput.W:
             override_command[:, 0] += args_cli.keyboard_linvel_step
@@ -474,6 +626,17 @@ def main():
 
     print("\n[INFO] Controls: W forward | S back | A strafe left | D strafe right")
     print("[INFO]           F turn left | G turn right | X stop")
+    print("[INFO]           C toggle the camera between free and robot-follow")
+    print(
+        "[INFO] Depth   : head camera depth window is open (--no_depth_window turns it off)"
+        if depth_window is not None
+        else "[INFO] Depth   : depth window off"
+    )
+    print(
+        "[INFO] Camera  : free -- the viewport's own navigation moves it"
+        if args_cli.camera == "free"
+        else "[INFO] Camera  : following the robot (C hands it to you)"
+    )
     print(
         f"[INFO] Command envelope: vx [{args_cli.keyboard_linvel_min:+.2f}, {args_cli.keyboard_linvel_max:+.2f}] "
         f"| vy [{-args_cli.keyboard_latvel_max:+.2f}, {args_cli.keyboard_latvel_max:+.2f}] "
@@ -493,6 +656,9 @@ def main():
 
                 actions = policy(obs)
                 obs, _, _, _ = env.step(actions)
+
+            if depth_window is not None:
+                depth_window.update()
 
             timestep += 1
             sim_time += policy_step_dt
