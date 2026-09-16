@@ -38,4 +38,6 @@ işleri burada çalıştırılır; başka bir host'a SSH gerekmez.
   (komut, stdout, metrik, kanıt dosyası) desteklenir; doğrulanmayan kısım açıkça
   belirtilir.
 - Uygulama çalıştırma komutları: `./setup.sh`, `./dev.sh`, `./doctor.sh`,
-  `./scripts/smoke-test.sh`. GUI için `DISPLAY` çağıran terminalden gelir.
+  `./scripts/smoke-test.sh`. Görsel Isaac koşuları varsayılan olarak WebRTC ile
+  yayınlanır ve yerel pencere açmaz; yerel X11 penceresi için `--gui`, arayüzsüz
+  koşular için `--headless`.

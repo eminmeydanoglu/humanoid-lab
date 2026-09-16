@@ -61,16 +61,40 @@ so no upstream script is edited and nothing is duplicated.
 ./dev.sh isaac-g1 no_hands      # 29-DoF body only
 ```
 
+Interactive runs are WebRTC servers by default: Isaac Sim starts without a local
+window and its UI is streamed, so nothing appears on the host's physical screen.
+Watch the run with `./dev.sh webrtc-client` from any machine that reaches the
+host — see [Remote viewing (WebRTC)](#remote-viewing-webrtc).
+
 Flags:
 
 | Flag | Effect |
 | --- | --- |
-| `--headless` | no GUI and no X11 requirement |
+| `--gui` | opens the local X11 window instead of streaming; needs a display |
+| `--headless` | no UI, no livestream, no X11 requirement |
 | `--head-camera-window` | opens the 640x480 head camera in a second GPU viewport; costs render throughput |
 | `--duration SECONDS` | bounded run |
 | `--device {cpu,cuda}` | overrides the profile device; profiles default to CPU |
 | `--controller none` | disables the controller a profile declares, falling back to passive |
 | `--test {passive-fall\|controlled-hold\|controller-hold}` | one of the acceptance modes below |
+
+
+## Remote viewing (WebRTC)
+
+Isaac Sim's own WebRTC livestream is the supported way to watch a run: the
+application renders without a local window and serves its full UI to a client, so
+the host's physical screen stays free and no port has to be exposed to the
+internet when both machines share a Tailscale network. There is no browser
+client — NVIDIA ships a native viewer for Linux, Windows and macOS.
+
+| Side | What to do |
+| --- | --- |
+| Server | `./dev.sh isaac-g1 dex3` (streams by default), or `./dev.sh isaac-stream` for the empty Isaac Sim UI |
+| Address | the host's Tailscale IPv4, advertised automatically; override with `ISAAC_LIVESTREAM_ENDPOINT`, port `49100` |
+| Viewer | `./scripts/install-isaac-webrtc-client.sh` once per machine, then `./dev.sh webrtc-client`: enter the address and connect |
+
+The viewer needs no Isaac Sim installation and no GPU. One client connects at a
+time; the stream ends when the run ends.
 
 
 ## Isaac and SONIC in two terminals
@@ -94,7 +118,9 @@ motion, `R` resets, `O` is the emergency stop. `Enter` to switch to planner to t
 | --- | --- |
 | `./dev.sh` | interactive shell in the container, no environment pre-selected |
 | `./dev.sh isaac-g1-test-controller dex3` | G1 driven by the deterministic scripted test controller |
-| `./dev.sh isaac-demo <demo.py>` | an Isaac Lab demo from `/opt/src/isaaclab/scripts/demos` |
+| `./dev.sh isaac-demo <demo.py>` | an Isaac Lab demo from `/opt/src/isaaclab/scripts/demos`, streamed over WebRTC |
+| `./dev.sh isaac-stream` | the Isaac Sim UI with no scene, streamed over WebRTC |
+| `./dev.sh webrtc-client` | Isaac Sim WebRTC client, for watching a streaming host |
 | `./dev.sh doctor` | full host + container report, written to `$HUMANOID_DATA_ROOT/diagnostics/` |
 | `./dev.sh smoke` | in-container environment, asset and model checks |
 | `./dev.sh sync` | re-provisions the environment whose lock or pinned source changed |

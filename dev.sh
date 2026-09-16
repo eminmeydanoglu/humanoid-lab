@@ -17,6 +17,11 @@ fi
 
 DC() { docker compose --env-file .env "$@"; }
 
+# Filled by livestream_settings() when a command streams its UI instead of
+# opening a window on the host's physical screen.
+LIVESTREAM_ARGS=()
+LIVESTREAM_ENV=()
+
 require_x11_display() {
   local number="${DISPLAY#:}"
   number="${number%%.*}"
@@ -35,6 +40,59 @@ require_x11_display() {
   echo "error: X11 display $DISPLAY is unavailable; expected /tmp/.X11-unix/X$number" >&2
   echo "active sockets: ${sockets[*]:-none}" >&2
   exit 2
+}
+
+# Interactive Isaac runs are WebRTC servers: the application has no local window
+# and its full UI is streamed, so nothing appears on the host's physical screen.
+# ISAAC_LIVESTREAM_ENDPOINT overrides the advertised address; the default is the
+# host's Tailscale IPv4, which is what remote clients reach.
+livestream_settings() {
+  local endpoint="${ISAAC_LIVESTREAM_ENDPOINT:-}"
+  if [ -z "$endpoint" ] && command -v tailscale >/dev/null 2>&1; then
+    endpoint="$(tailscale ip -4 2>/dev/null | head -n1 || true)"
+  fi
+  ISAAC_LIVESTREAM_ENDPOINT="$endpoint"
+  LIVESTREAM_ARGS=()
+  LIVESTREAM_ENV=()
+  if [ -n "$endpoint" ]; then
+    LIVESTREAM_ARGS=(--livestream 1)
+    LIVESTREAM_ENV=(-e "PUBLIC_IP=$endpoint")
+  else
+    LIVESTREAM_ARGS=(--livestream 2)
+  fi
+}
+
+livestream_banner() { # $1 = command label
+  echo "[$1] WebRTC livestream, no local window: connect the Isaac Sim WebRTC client to" >&2
+  echo "[$1] ${ISAAC_LIVESTREAM_ENDPOINT:-this host}, port ${ISAAC_LIVESTREAM_PORT:-49100}" >&2
+}
+
+# Shared mode selection for the isaac-g1 entries: the default streams over
+# WebRTC, --gui keeps the direct X11 window, --headless runs with no UI at all.
+g1_mode_args() { # $1 = label; remaining arguments are the caller's flags
+  local label="$1"
+  local headless=0
+  local arg
+  shift
+  G1_GUI=0
+  for arg in "$@"; do
+    case "$arg" in
+      --gui) G1_GUI=1 ;;
+      --headless) headless=1 ;;
+    esac
+  done
+  if [ "$G1_GUI" -eq 1 ] && [ "$headless" -eq 1 ]; then
+    echo "error: --gui cannot be combined with --headless" >&2
+    exit 2
+  fi
+  G1_ARGS=()
+  if [ "$G1_GUI" -eq 1 ]; then
+    require_x11_display
+  elif [ "$headless" -eq 0 ]; then
+    livestream_settings
+    G1_ARGS=("${LIVESTREAM_ARGS[@]}")
+    livestream_banner "$label"
+  fi
 }
 
 up_once() {
@@ -117,8 +175,9 @@ isaac_demo() {
     if [ "$direct_gui" -eq 1 ]; then
       echo "[isaac-demo] experimental direct X11 GUI mode" >&2
     else
-      echo "[isaac-demo] container mode: adding --headless (use --gui for experimental local X11, or --livestream 1 or 2 for remote viewing)" >&2
-      demo_args+=(--headless)
+      livestream_settings
+      livestream_banner isaac-demo
+      demo_args+=("${LIVESTREAM_ARGS[@]}")
     fi
   fi
   up_once
@@ -135,7 +194,7 @@ isaac_demo() {
   }
   trap on_isaac_demo_signal INT TERM HUP
   # shellcheck disable=SC2016 # Variables in this string expand in the container.
-  DC exec -T -e DISPLAY="$DISPLAY" dev bash -lc '
+  DC exec -T -e DISPLAY="$DISPLAY" "${LIVESTREAM_ENV[@]}" dev bash -lc '
     source /opt/humanoid-lab/entrypoint.sh
     use-isaac-sonic
     # Keep Kit extension discovery scoped to Isaac Lab rather than the repo.
@@ -224,7 +283,7 @@ run_isaac_g1() { # $1 = profile path; remaining args belong to the runner
   # The Docker exec transport can report 1 when Kit needs the bounded os._exit
   # teardown, even though the process and the in-container wait both return 0.
   # The short-lived wrapper therefore records the authoritative child status.
-  docker exec -e DISPLAY="$DISPLAY" "$container_id" bash -lc '
+  docker exec -e DISPLAY="$DISPLAY" "${LIVESTREAM_ENV[@]}" "$container_id" bash -lc '
     source /opt/humanoid-lab/entrypoint.sh
     use-isaac-sonic
     # Avoid treating every repository or /tmp entry as a Kit extension.
@@ -269,6 +328,76 @@ run_isaac_g1() { # $1 = profile path; remaining args belong to the runner
   return "$rc"
 }
 
+cleanup_isaac_stream() { # $1 = container-side pidfile
+  local pidfile="$1"
+  local container_id
+  container_id="$(DC ps -q dev 2>/dev/null)" || return 0
+  [ -n "$container_id" ] || return 0
+  # shellcheck disable=SC2016 # Variables in this string expand in the container.
+  docker exec "$container_id" bash -lc '
+    pidfile=$1
+    [ -r "$pidfile" ] || exit 0
+    read -r pid <"$pidfile" || exit 0
+    case "$pid" in (*[!0-9]*|"") rm -f -- "$pidfile"; exit 0;; esac
+    if [ -r "/proc/$pid/cmdline" ] &&
+       tr "\0" " " <"/proc/$pid/cmdline" | grep -Fq "isaacsim.exp.full.streaming.kit"; then
+      # runheadless.sh starts the app in its own session, so this also stops
+      # the Kit children it spawned.
+      kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+      for _ in {1..20}; do
+        [ ! -d "/proc/$pid" ] && break
+        sleep 0.1
+      done
+      [ ! -d "/proc/$pid" ] || kill -KILL -- "-$pid" 2>/dev/null || true
+    fi
+    rm -f -- "$pidfile"
+  ' -- "$pidfile" >/dev/null 2>&1 || true
+}
+
+run_isaac_stream() {
+  # Full Isaac Sim UI without a local window: runheadless.sh starts the WebRTC
+  # streaming experience and serves it for a client to connect to.
+  local pidfile="/tmp/humanoid-lab-isaac-stream-$$-$RANDOM.pid"
+  local exec_pid=""
+  local rc
+  local -a kit_args=(--/app/livestream/port="${ISAAC_LIVESTREAM_PORT:-49100}")
+  [ -z "$ISAAC_LIVESTREAM_ENDPOINT" ] ||
+    kit_args+=(--/app/livestream/publicEndpointAddress="$ISAAC_LIVESTREAM_ENDPOINT")
+
+  on_isaac_stream_signal() {
+    cleanup_isaac_stream "$pidfile"
+    if [ -n "$exec_pid" ]; then
+      kill "$exec_pid" 2>/dev/null || true
+      wait "$exec_pid" 2>/dev/null || true
+    fi
+    exit 143
+  }
+  trap on_isaac_stream_signal INT TERM HUP
+  # shellcheck disable=SC2016 # Variables in this string expand in the container.
+  DC exec -T dev bash -lc '
+    pidfile=$1
+    shift
+    cd /isaac-sim
+    setsid ./runheadless.sh "$@" &
+    stream_pid=$!
+    printf "%s\n" "$stream_pid" >"$pidfile"
+    cleanup_stream() {
+      kill -- "-$stream_pid" 2>/dev/null || kill "$stream_pid" 2>/dev/null || true
+      rm -f -- "$pidfile"
+    }
+    trap "cleanup_stream; exit 143" INT TERM HUP
+    if wait "$stream_pid"; then rc=0; else rc=$?; fi
+    trap - INT TERM HUP
+    rm -f -- "$pidfile"
+    exit "$rc"
+  ' -- "$pidfile" "${kit_args[@]}" &
+  exec_pid=$!
+  if wait "$exec_pid"; then rc=0; else rc=$?; fi
+  trap - INT TERM HUP
+  cleanup_isaac_stream "$pidfile"
+  return "$rc"
+}
+
 case "${1:-}" in
   "")
     up_once
@@ -280,11 +409,10 @@ case "${1:-}" in
     isaac_demo "$2" "${@:3}"
     ;;
   isaac-stream)
-    [ "$#" -ge 2 ] || { echo "usage: $0 isaac-stream <demo.py> [Isaac Lab args]" >&2; exit 2; }
-    echo "error: Isaac Sim 5.1 WebRTC streaming is disabled on this host." >&2
-    echo "The official no-window streaming app crashes in librtx.scenedb.plugin.so before it opens a stable endpoint." >&2
-    echo "Use ./dev.sh isaac-demo $2 for headless simulation until the Isaac Sim/driver compatibility decision is applied." >&2
-    exit 1
+    livestream_settings
+    livestream_banner isaac-stream
+    up_once
+    run_isaac_stream
     ;;
   webrtc-client)
     client_path="${ISAAC_WEBRTC_CLIENT:-$HOME/Applications/IsaacSim/isaacsim-webrtc-streaming-client-1.1.5-linux-x64.AppImage}"
@@ -293,7 +421,9 @@ case "${1:-}" in
       echo "run: ./scripts/install-isaac-webrtc-client.sh" >&2
       exit 2
     }
-    exec "$client_path"
+    # The AppImage mounts itself below /tmp, so its Chromium SUID sandbox helper
+    # can never be root-owned; the trusted NVIDIA client runs without it.
+    exec "$client_path" --no-sandbox "${@:2}"
     ;;
   sonic-sim)  shell_env use-sonic-sim ;;
   groot)      shell_env use-groot ;;
@@ -304,73 +434,49 @@ case "${1:-}" in
       no_hands) profile_file=configs/profiles/isaac-g1-no_hands.json ;;
       inspire-ftp) profile_file=configs/profiles/isaac-g1-inspire-ftp.json ;;
       dex3) profile_file=configs/profiles/isaac-g1-dex3.json ;;
-      *) echo "usage: $0 isaac-g1 {no_hands|inspire-ftp|dex3} [--test passive-fall] [--headless] [--head-camera-window] [--duration SECONDS]" >&2; exit 2 ;;
+      *) echo "usage: $0 isaac-g1 {no_hands|inspire-ftp|dex3} [--test passive-fall] [--head-camera-window] [--duration SECONDS] [--gui|--headless]" >&2; exit 2 ;;
     esac
-    headless=0
-    for arg in "${@:3}"; do
-      [ "$arg" != "--headless" ] || headless=1
-    done
-    [ "$headless" -eq 1 ] || require_x11_display
+    g1_mode_args isaac-g1 "${@:3}"
     up_once
-    run_isaac_g1 "$profile_file" "${@:3}"
+    run_isaac_g1 "$profile_file" "${G1_ARGS[@]}" "${@:3}"
     ;;
   isaac-g1-test-controller)
-    [ "${2:-}" = "dex3" ] || { echo "usage: $0 isaac-g1-test-controller dex3 [--headless] [--head-camera-window] [--duration SECONDS]" >&2; exit 2; }
-    headless=0
-    for arg in "${@:3}"; do
-      [ "$arg" != "--headless" ] || headless=1
-    done
-    [ "$headless" -eq 1 ] || require_x11_display
+    [ "${2:-}" = "dex3" ] || { echo "usage: $0 isaac-g1-test-controller dex3 [--head-camera-window] [--duration SECONDS] [--gui|--headless]" >&2; exit 2; }
+    g1_mode_args isaac-g1-test-controller "${@:3}"
     up_once
     run_isaac_g1 configs/profiles/isaac-g1-scripted-hold-dex3.json \
-      --test controlled-hold "${@:3}"
+      --test controlled-hold "${G1_ARGS[@]}" "${@:3}"
     ;;
   isaac-g1-direct-reference)
-    [ "${2:-}" = "dex3" ] || { echo "usage: $0 isaac-g1-direct-reference dex3 --trajectory-reference PATH [--headless] [--duration SECONDS] [--record-video PATH]" >&2; exit 2; }
-    headless=0
-    for arg in "${@:3}"; do
-      [ "$arg" != "--headless" ] || headless=1
-    done
-    [ "$headless" -eq 1 ] || require_x11_display
+    [ "${2:-}" = "dex3" ] || { echo "usage: $0 isaac-g1-direct-reference dex3 --trajectory-reference PATH [--duration SECONDS] [--record-video PATH] [--gui|--headless]" >&2; exit 2; }
+    g1_mode_args isaac-g1-direct-reference "${@:3}"
     up_once
-    run_isaac_g1 configs/profiles/isaac-g1-direct-reference-dex3.json "${@:3}"
+    run_isaac_g1 configs/profiles/isaac-g1-direct-reference-dex3.json "${G1_ARGS[@]}" "${@:3}"
     ;;
   isaac-g1-sonic-fixed-base)
-    [ "${2:-}" = "dex3" ] || { echo "usage: $0 isaac-g1-sonic-fixed-base dex3 [--headless] [--duration SECONDS]" >&2; exit 2; }
-    headless=0
-    for arg in "${@:3}"; do
-      [ "$arg" != "--headless" ] || headless=1
-    done
-    [ "$headless" -eq 1 ] || require_x11_display
+    [ "${2:-}" = "dex3" ] || { echo "usage: $0 isaac-g1-sonic-fixed-base dex3 [--duration SECONDS] [--gui|--headless]" >&2; exit 2; }
+    g1_mode_args isaac-g1-sonic-fixed-base "${@:3}"
     up_once
-    run_isaac_g1 configs/profiles/isaac-g1-sonic-fixed-base-dex3.json "${@:3}"
+    run_isaac_g1 configs/profiles/isaac-g1-sonic-fixed-base-dex3.json "${G1_ARGS[@]}" "${@:3}"
     ;;
   isaac-g1-kinematic)
     # Frame-exact replay: no controller, no PD, no support band; every frame is
     # written straight into the simulation with write_joint_state_to_sim.
-    [ "${2:-}" = "dex3" ] || { echo "usage: $0 isaac-g1-kinematic dex3 --kinematic-reference PATH [--kinematic-label LABEL] [--headless] [--record-video PATH] [--tracking-output PATH] [--metrics-output PATH]" >&2; exit 2; }
-    headless=0
-    for arg in "${@:3}"; do
-      [ "$arg" != "--headless" ] || headless=1
-    done
-    [ "$headless" -eq 1 ] || require_x11_display
+    [ "${2:-}" = "dex3" ] || { echo "usage: $0 isaac-g1-kinematic dex3 --kinematic-reference PATH [--kinematic-label LABEL] [--record-video PATH] [--tracking-output PATH] [--metrics-output PATH] [--gui|--headless]" >&2; exit 2; }
+    g1_mode_args isaac-g1-kinematic "${@:3}"
     up_once
-    run_isaac_g1 configs/profiles/isaac-g1-kinematic-dex3.json "${@:3}"
+    run_isaac_g1 configs/profiles/isaac-g1-kinematic-dex3.json "${G1_ARGS[@]}" "${@:3}"
     ;;
   isaac-g1-sonic)
     profile="${2:-}"
     case "$profile" in
       dex3) profile_file=configs/profiles/isaac-g1-sonic-dex3.json ;;
       inspire-ftp) profile_file=configs/profiles/isaac-g1-sonic-inspire-ftp.json ;;
-      *) echo "usage: $0 isaac-g1-sonic {dex3|inspire-ftp} [--headless] [--head-camera-window] [--duration SECONDS] [--record-video PATH] [--controller none]" >&2; exit 2 ;;
+      *) echo "usage: $0 isaac-g1-sonic {dex3|inspire-ftp} [--head-camera-window] [--duration SECONDS] [--record-video PATH] [--controller none] [--gui|--headless]" >&2; exit 2 ;;
     esac
-    headless=0
-    for arg in "${@:3}"; do
-      [ "$arg" != "--headless" ] || headless=1
-    done
-    [ "$headless" -eq 1 ] || require_x11_display
+    g1_mode_args isaac-g1-sonic "${@:3}"
     up_once
-    run_isaac_g1 "$profile_file" "${@:3}"
+    run_isaac_g1 "$profile_file" "${G1_ARGS[@]}" "${@:3}"
     ;;
   sonic-controller)
     # The official SONIC deployment in this terminal, exactly as the upstream
