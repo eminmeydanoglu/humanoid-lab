@@ -1,0 +1,18 @@
+{
+  "tag": "cosmos",
+  "split": "all",
+  "model": "/home/aksoy-lab/code/humanoid-lab-main/data/models/cosmos_reason_backbone",
+  "items": 10002,
+  "scored": 10002,
+  "mean_ms": 346.0,
+  "mean_new_tokens": 2.0,
+  "truncated": 0,
+  "invalid": 0,
+  "letter_acc": 44.14,
+  "strict_acc": 44.31,
+  "letter_acc_known_gt": 44.25,
+  "load_s": 0.8,
+  "peak_vram_gb": 5.6,
+  "total_s": 3461.6,
+  "max_new_tokens": 32
+}

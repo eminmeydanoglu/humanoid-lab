@@ -1,0 +1,18 @@
+{
+  "tag": "er1",
+  "split": "all",
+  "model": "/home/aksoy-lab/code/humanoid-lab-main/data/models/unifolm-wla-1.0/UnifoLM-ER-1",
+  "items": 10002,
+  "scored": 10002,
+  "mean_ms": 382.1,
+  "mean_new_tokens": 2.46,
+  "truncated": 0,
+  "invalid": 0,
+  "letter_acc": 47.84,
+  "strict_acc": 48.01,
+  "letter_acc_known_gt": 47.96,
+  "load_s": 1.2,
+  "peak_vram_gb": 9.81,
+  "total_s": 3822.7,
+  "max_new_tokens": 32
+}

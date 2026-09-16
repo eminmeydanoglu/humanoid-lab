@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="tr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PhysBench: UnifoLM-ER-1 & Cosmos-Reason2-2B</title>
+<style>
+:root { --bg:#0b0f17; --panel:#121826; --panel2:#1a2233; --line:#243049; --txt:#e6edf7; --mut:#96a3bd;
+        --er1:#f59e0b; --cosmos:#22d3ee; --ref:#64748b; --ref2:#94a3b8; --ok:#34d399; --bad:#f87171; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--txt);
+        font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+header { padding:34px 26px 18px; border-bottom:1px solid var(--line);
+          background:linear-gradient(180deg,#101827 0%,var(--bg) 100%); }
+h1 { margin:0 0 6px; font-size:27px; letter-spacing:-.3px; }
+h2 { margin:38px 0 14px; font-size:19px; border-left:3px solid var(--cosmos); padding-left:10px; }
+h3 { margin:20px 0 8px; font-size:15px; color:var(--mut); font-weight:600; }
+h4 { margin:0 0 8px; font-size:14px; font-weight:600; }
+h4 .cnt { color:var(--mut); font-weight:400; font-size:12px; }
+main { max-width:1080px; margin:0 auto; padding:0 26px 70px; }
+.sub { color:var(--mut); }
+.wrap { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+.card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px 20px; }
+.card.er1 { border-top:3px solid var(--er1); }
+.card.cosmos { border-top:3px solid var(--cosmos); }
+.cardhead { color:var(--mut); font-size:13px; margin-bottom:6px; }
+.big { font-size:46px; font-weight:700; letter-spacing:-1px; }
+.big .pct { font-size:20px; color:var(--mut); margin-left:2px; }
+.mini { margin:10px 0 0; padding-left:18px; color:var(--mut); font-size:13.5px; }
+.mini b { color:var(--txt); }
+.cgroup { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin-bottom:12px; }
+.grid2 { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+.brow { display:flex; align-items:center; gap:10px; margin:5px 0; font-size:13px; }
+.blabel { width:150px; color:var(--mut); flex:none; }
+.btrack { position:relative; flex:1; height:16px; background:#0d131f; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+.bfill { display:block; height:100%; border-radius:8px 0 0 8px; }
+.bfill.er1 { background:linear-gradient(90deg,#b45309,#f59e0b); }
+.bfill.cosmos { background:linear-gradient(90deg,#0e7490,#22d3ee); }
+.bfill.ref { background:#3d4a63; }
+.bfill.ref2 { background:#5b6b86; }
+.bval { width:52px; text-align:right; font-variant-numeric:tabular-nums; }
+.tick { position:absolute; top:-1px; bottom:-1px; width:2px; background:rgba(255,255,255,.65); }
+table { width:100%; border-collapse:collapse; font-size:13.5px; background:var(--panel);
+         border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+.tscroll { overflow-x:auto; -webkit-overflow-scrolling:touch; border-radius:12px; }
+th,td { text-align:left; padding:8px 11px; border-bottom:1px solid var(--line); }
+th { background:var(--panel2); color:var(--mut); font-weight:600; }
+td { font-variant-numeric:tabular-nums; }
+.pos { color:var(--ok); } .neg { color:var(--bad); }
+.note { color:var(--mut); font-size:12.5px; margin:8px 0 0; }
+.box { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px 18px; }
+.box ul { margin:8px 0 0; padding-left:18px; }
+.box li { margin:5px 0; color:var(--mut); }
+.box li b { color:var(--txt); }
+code { background:#0d131f; border:1px solid var(--line); border-radius:5px; padding:1px 5px; font-size:12.5px; }
+footer { color:var(--mut); font-size:12.5px; text-align:center; padding:22px; border-top:1px solid var(--line); }
+@media (max-width:820px) { .wrap,.grid2 { grid-template-columns:1fr; } .blabel { width:105px; } }
+@media (max-width:560px) {
+  main { padding:0 14px 50px; }
+  header { padding:24px 16px 14px; }
+  h1 { font-size:22px; }
+  .big { font-size:38px; }
+  table { font-size:12px; }
+  th,td { padding:6px 7px; }
+  .blabel { width:84px; font-size:12px; }
+  .bval { width:44px; font-size:12px; }
+}
+</style></head><body>
+<header>
+  <h1>PhysBench: UnifoLM-ER-1 & Cosmos-Reason2-2B</h1>
+  <div class="sub">Resmî PhysBench test seti (10.002 öge) · iki robotik VLM · tek GPU (RTX 5090, aksoy) ·
+  2026-09-14</div>
+</header>
+<main>
+
+<h2>1 · Özet</h2>
+<div class="wrap">
+        <div class="card er1">
+          <div class="cardhead">UnifoLM-ER-1 (Qwen3-VL-4B tabanı)</div>
+          <div class="big">47.96<span class="pct">%</span></div>
+          <div class="sub">genel doğruluk (9,978 örnek, harf çıkarımı)</div>
+          <ul class="mini">
+            <li>Resmî string skoru: <b>47.96%</b></li>
+            <li>Geçersiz çıktı: <b>0.00%</b> (0)</li>
+            <li>Örnek başına: <b>382 ms</b> (izole pilot: <b>187 ms</b>) · üretilen token: <b>2.5</b></li>
+            <li>İşlem döngüsü: <b>63.7 dk</b> · VRAM zirvesi: <b>9.81 GB</b></li>
+            <li>Model boyutu: <b>4B</b></li>
+          </ul>
+        </div>
+        <div class="card cosmos">
+          <div class="cardhead">Cosmos-Reason2-2B (Qwen3-VL-2B tabanı)</div>
+          <div class="big">44.25<span class="pct">%</span></div>
+          <div class="sub">genel doğruluk (9,978 örnek, harf çıkarımı)</div>
+          <ul class="mini">
+            <li>Resmî string skoru: <b>44.25%</b></li>
+            <li>Geçersiz çıktı: <b>0.00%</b> (0)</li>
+            <li>Örnek başına: <b>346 ms</b> (izole pilot: <b>128 ms</b>) · üretilen token: <b>2.0</b></li>
+            <li>İşlem döngüsü: <b>57.7 dk</b> · VRAM zirvesi: <b>5.60 GB</b></li>
+            <li>Model boyutu: <b>2B</b></li>
+          </ul>
+        </div></div>
+<p class="note">"Genel doğruluk", resmî skorlamanın harf çıkarımıyla uygulanmış hâli; "resmî string skoru"
+modelin ham çıktısının doğrudan harfle başlaması koşulunu kullanır (PhysBench reposundaki
+<code>answer.startswith(gt)</code> kuralı). İkisi arasındaki fark, modellerin talimata ne kadar sıkı uyduğunu gösterir.
+Süreler işlem döngüsünün duvar saatidir; iki koşu bir süre <b>eşzamanlı</b> yürüdüğü için (aşağıdaki performans
+bölümüne bakın) tek başına koşan pilot ölçümleri temiz referanstır.</p>
+
+<h2>2 · Protokol</h2>
+<div class="box">
+<ul>
+  <li><b>Veri:</b> resmî <code>test.json</code> + <code>image.zip</code> + <code>video.zip</code> (HF: USC-PSI-Lab/PhysBench), GT için repodaki <code>test_answer.json</code>.</li>
+  <li><b>Medya:</b> her öge için soru metnindeki <code>&lt;video&gt;</code>/<code>&lt;image&gt;</code> yer tutucuları resmî koddaki gibi sırayla medyaya eşlendi;
+      videolar <b>tüm klip boyunca eşit aralıklı 8 kareye</b> indirildi (resmî varsayılan <code>test_frame=8</code>), tüm medya uzun kenar <b>≤ 640 px</b> JPEG'e normalize edildi.</li>
+  <li><b>Prompt:</b> videolu ögelerde resmî "kareler dizisi" açıklaması + soru + resmî bitiş talimatı
+      ("Answer with the option's letter from the given choices directly..."), ikisi için birebir aynı.</li>
+  <li><b>Üretim:</b> greedy (<code>do_sample=False</code>), en fazla 32 yeni token; düşünme/zincir-akıl-yürütme (CoT) istemi <b>verilmedi</b>.
+      Cosmos'un <code>&lt;think&gt;</code> formatı, PhysBench protokolü tek harf istediği için kapatıldı.</li>
+  <li><b>Donanım/yazılım:</b> transformers 5.5.3, torch 2.9.0+cu128, bf16, SDPA dikkat; tek GPU (RTX 5090, aksoy).
+      ER-1 tek başına başlatıldı, ~%12'de Cosmos eşzamanlı eklendi (VRAM %52'de kaldı); örnek başına süreler
+      eşzamanlı dönemde şiştiği için izole pilot ölçümleri de raporlanır. Doğruluk bu durumdan etkilenmez (greedy).</li>
+  <li><b>Hız düzeltmesi:</b> Qwen3-VL görsel yaması (<code>Conv3d(3,H,2,16,16)</code>, kernel=stride) matematiksel olarak eşdeğer
+      <code>F.linear</code> ile değiştirildi — 1.200 yama için 3,4 sn → 0,02 sn (≈170×), çıktıda doğrulandı (maks. fark 6,5e-4).</li>
+</ul>
+</div>
+
+<h2>3 · Kategori bazında doğruluk</h2>
+<div class="grid2"><div class="cgroup"><h4>property <span class="cnt">n=2,576</span></h4><div class="brow"><span class="blabel">ER-1</span><span class="btrack"><span class="bfill er1" style="width:52.8%"></span></span><span class="bval">52.83</span></div><div class="brow"><span class="blabel">Cosmos</span><span class="btrack"><span class="bfill cosmos" style="width:50.3%"></span></span><span class="bval">50.31</span></div><div class="brow"><span class="blabel">GPT-4o (referans)</span><span class="btrack"><span class="bfill ref" style="width:56.9%"></span></span><span class="bval">56.91</span></div><div class="brow"><span class="blabel">İnsan (referans)</span><span class="btrack"><span class="bfill ref2" style="width:97.1%"></span></span><span class="bval">97.10</span></div></div><div class="cgroup"><h4>relationships <span class="cnt">n=2,120</span></h4><div class="brow"><span class="blabel">ER-1</span><span class="btrack"><span class="bfill er1" style="width:63.0%"></span></span><span class="bval">63.02</span></div><div class="brow"><span class="blabel">Cosmos</span><span class="btrack"><span class="bfill cosmos" style="width:49.0%"></span></span><span class="bval">49.01</span></div><div class="brow"><span class="blabel">GPT-4o (referans)</span><span class="btrack"><span class="bfill ref" style="width:64.8%"></span></span><span class="bval">64.80</span></div><div class="brow"><span class="blabel">İnsan (referans)</span><span class="btrack"><span class="bfill ref2" style="width:95.7%"></span></span><span class="bval">95.67</span></div></div><div class="cgroup"><h4>scene <span class="cnt">n=2,283</span></h4><div class="brow"><span class="blabel">ER-1</span><span class="btrack"><span class="bfill er1" style="width:31.8%"></span></span><span class="bval">31.84</span></div><div class="brow"><span class="blabel">Cosmos</span><span class="btrack"><span class="bfill cosmos" style="width:36.6%"></span></span><span class="bval">36.57</span></div><div class="brow"><span class="blabel">GPT-4o (referans)</span><span class="btrack"><span class="bfill ref" style="width:30.1%"></span></span><span class="bval">30.15</span></div><div class="brow"><span class="blabel">İnsan (referans)</span><span class="btrack"><span class="bfill ref2" style="width:94.9%"></span></span><span class="bval">94.91</span></div></div><div class="cgroup"><h4>dynamics <span class="cnt">n=2,999</span></h4><div class="brow"><span class="blabel">ER-1</span><span class="btrack"><span class="bfill er1" style="width:45.4%"></span></span><span class="bval">45.38</span></div><div class="brow"><span class="blabel">Cosmos</span><span class="btrack"><span class="bfill cosmos" style="width:41.5%"></span></span><span class="bval">41.51</span></div><div class="brow"><span class="blabel">GPT-4o (referans)</span><span class="btrack"><span class="bfill ref" style="width:47.0%"></span></span><span class="bval">46.99</span></div><div class="brow"><span class="blabel">İnsan (referans)</span><span class="btrack"><span class="bfill ref2" style="width:95.7%"></span></span><span class="bval">95.68</span></div></div></div>
+<p class="note">Gri barlar resmî lider tablosundan referans (GPT-4o ve insan). Dikey çizgi %25 rastgele taban çizgisi değil,
+referans modelin değeridir.</p>
+
+<h2>4 · Yetenek türüne göre</h2>
+<div class="grid2"><div class="cgroup"><h4>identify <span class="cnt">n=1,143</span></h4><div class="brow"><span class="blabel">ER-1</span><span class="btrack"><span class="bfill er1" style="width:71.7%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">71.65</span></div><div class="brow"><span class="blabel">Cosmos</span><span class="btrack"><span class="bfill cosmos" style="width:66.8%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">66.75</span></div></div><div class="cgroup"><h4>comparison <span class="cnt">n=1,433</span></h4><div class="brow"><span class="blabel">ER-1</span><span class="btrack"><span class="bfill er1" style="width:37.8%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">37.82</span></div><div class="brow"><span class="blabel">Cosmos</span><span class="btrack"><span class="bfill cosmos" style="width:37.2%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">37.19</span></div></div><div class="cgroup"><h4>static <span class="cnt">n=1,905</span></h4><div class="brow"><span class="blabel">ER-1</span><span class="btrack"><span class="bfill er1" style="width:62.4%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">62.36</span></div><div class="brow"><span class="blabel">Cosmos</span><span class="btrack"><span class="bfill cosmos" style="width:47.7%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">47.66</span></div></div><div class="cgroup"><h4>dynamic <span class="cnt">n=215</span></h4><div class="brow"><span class="blabel">ER-1</span><span class="btrack"><span class="bfill er1" style="width:68.8%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">68.84</span></div><div class="brow"><span class="blabel">Cosmos</span><span class="btrack"><span class="bfill cosmos" style="width:60.9%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">60.93</span></div></div><div class="cgroup"><h4>perception <span class="cnt">n=968</span></h4><div class="brow"><span class="blabel">ER-1</span><span class="btrack"><span class="bfill er1" style="width:57.6%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">57.64</span></div><div class="brow"><span class="blabel">Cosmos</span><span class="btrack"><span class="bfill cosmos" style="width:53.5%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">53.51</span></div></div><div class="cgroup"><h4>prediction <span class="cnt">n=1,450</span></h4><div class="brow"><span class="blabel">ER-1</span><span class="btrack"><span class="bfill er1" style="width:44.1%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">44.14</span></div><div class="brow"><span class="blabel">Cosmos</span><span class="btrack"><span class="bfill cosmos" style="width:40.5%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">40.48</span></div></div><div class="cgroup"><h4>judgment <span class="cnt">n=777</span></h4><div class="brow"><span class="blabel">ER-1</span><span class="btrack"><span class="bfill er1" style="width:39.9%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">39.90</span></div><div class="brow"><span class="blabel">Cosmos</span><span class="btrack"><span class="bfill cosmos" style="width:37.1%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">37.07</span></div></div><div class="cgroup"><h4>reasoning <span class="cnt">n=2,087</span></h4><div class="brow"><span class="blabel">ER-1</span><span class="btrack"><span class="bfill er1" style="width:27.8%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">27.79</span></div><div class="brow"><span class="blabel">Cosmos</span><span class="btrack"><span class="bfill cosmos" style="width:32.9%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">32.92</span></div></div></div>
+<p class="note">Beyaz dikey çizgi %25 rastgele (şans) seviyesi.</p>
+
+<h2>5 · Mod kırılımı (tek görsel / video / çok görselli)</h2>
+<div class="grid2"><div class="cgroup"><h4>Tek görsel (image-only) <span class="cnt">n=2,073</span></h4><div class="brow"><span class="blabel">ER-1</span><span class="btrack"><span class="bfill er1" style="width:55.4%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">55.43</span></div><div class="brow"><span class="blabel">Cosmos</span><span class="btrack"><span class="bfill cosmos" style="width:52.1%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">52.15</span></div></div><div class="cgroup"><h4>Video (image&video) <span class="cnt">n=6,002</span></h4><div class="brow"><span class="blabel">ER-1</span><span class="btrack"><span class="bfill er1" style="width:45.0%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">45.02</span></div><div class="brow"><span class="blabel">Cosmos</span><span class="btrack"><span class="bfill cosmos" style="width:44.9%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">44.94</span></div></div><div class="cgroup"><h4>Çok görselli (general) <span class="cnt">n=1,903</span></h4><div class="brow"><span class="blabel">ER-1</span><span class="btrack"><span class="bfill er1" style="width:49.1%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">49.08</span></div><div class="brow"><span class="blabel">Cosmos</span><span class="btrack"><span class="bfill cosmos" style="width:33.5%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">33.47</span></div></div></div>
+<div class="tscroll"><table><thead><tr><th>Mod</th><th>n</th><th>ER-1 doğruluk %</th><th>ER-1 ms/örnek</th><th>Cosmos doğruluk %</th><th>Cosmos ms/örnek</th></tr></thead><tbody><tr><td>Tek görsel (image-only)</td><td>2,073</td><td>55.43</td><td>126</td><td>52.15</td><td>149</td></tr><tr><td>Video (image&video)</td><td>6,002</td><td>45.02</td><td>501</td><td>44.94</td><td>440</td></tr><tr><td>Çok görselli (general)</td><td>1,903</td><td>49.08</td><td>288</td><td>33.47</td><td>268</td></tr></tbody></table></div>
+<h3>Video uzunluğunun etkisi (yalnızca videolu ögeler)</h3>
+<div class="grid2"><div class="cgroup"><h4>≤8 kare (tüm klip görülür) <span class="cnt">n=44</span></h4><div class="brow"><span class="blabel">ER-1</span><span class="btrack"><span class="bfill er1" style="width:72.7%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">72.73</span></div><div class="brow"><span class="blabel">Cosmos</span><span class="btrack"><span class="bfill cosmos" style="width:34.1%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">34.09</span></div></div><div class="cgroup"><h4>9-32 kare <span class="cnt">n=2,184</span></h4><div class="brow"><span class="blabel">ER-1</span><span class="btrack"><span class="bfill er1" style="width:30.4%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">30.45</span></div><div class="brow"><span class="blabel">Cosmos</span><span class="btrack"><span class="bfill cosmos" style="width:35.1%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">35.07</span></div></div><div class="cgroup"><h4>33-128 kare <span class="cnt">n=830</span></h4><div class="brow"><span class="blabel">ER-1</span><span class="btrack"><span class="bfill er1" style="width:51.9%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">51.93</span></div><div class="brow"><span class="blabel">Cosmos</span><span class="btrack"><span class="bfill cosmos" style="width:49.9%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">49.88</span></div></div><div class="cgroup"><h4>129-512 kare <span class="cnt">n=2,663</span></h4><div class="brow"><span class="blabel">ER-1</span><span class="btrack"><span class="bfill er1" style="width:51.0%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">50.96</span></div><div class="brow"><span class="blabel">Cosmos</span><span class="btrack"><span class="bfill cosmos" style="width:48.3%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">48.25</span></div></div><div class="cgroup"><h4>>512 kare <span class="cnt">n=292</span></h4><div class="brow"><span class="blabel">ER-1</span><span class="btrack"><span class="bfill er1" style="width:77.1%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">77.05</span></div><div class="brow"><span class="blabel">Cosmos</span><span class="btrack"><span class="bfill cosmos" style="width:77.1%"><span class="tick" style="left:25.0%" title="referans 25.00"></span></span></span><span class="bval">77.05</span></div></div></div><div class="tscroll"><table><thead><tr><th>Video uzunluğu</th><th>n</th><th>ER-1 %</th><th>Cosmos %</th></tr></thead><tbody><tr><td>≤8 kare (tüm klip görülür)</td><td>44</td><td>72.73</td><td>34.09</td></tr><tr><td>9-32 kare</td><td>2,184</td><td>30.45</td><td>35.07</td></tr><tr><td>33-128 kare</td><td>830</td><td>51.93</td><td>49.88</td></tr><tr><td>129-512 kare</td><td>2,663</td><td>50.96</td><td>48.25</td></tr><tr><td>>512 kare</td><td>292</td><td>77.05</td><td>77.05</td></tr></tbody></table></div><p class="note">Resmî veri setindeki videoların medyanı 118 kare; model her videodan 8 kare görüyor, yani uzun kliplerde zamansal bilgi 8 kareye sıkıştırılıyor.</p>
+<h3>Val ve test dilimleri</h3>
+<div class="tscroll"><table><thead><tr><th>Dilim</th><th>n (ER-1)</th><th>ER-1 harf %</th><th>ER-1 resmî %</th><th>Cosmos harf %</th><th>Cosmos resmî %</th></tr></thead><tbody><tr><td>val</td><td>199</td><td>62.81</td><td>62.81</td><td>55.78</td><td>55.78</td></tr><tr><td>test</td><td>9,779</td><td>47.65</td><td>47.65</td><td>44.01</td><td>44.01</td></tr></tbody></table></div><p class="note">200 örneklik val dilimi resmî test setinin içindedir ve belirgin biçimde daha kolaydır; bu yüzden yalnızca val üzerinde koşan bir pilot yanıltıcı biçimde yüksek doğruluk gösterir.</p>
+
+<h2>6 · Alt sınıf tablosu</h2>
+<div class="tscroll"><table><thead><tr><th>Alt sınıf</th><th>n</th><th>ER-1 %</th><th>Cosmos %</th><th>fark</th></tr></thead><tbody><tr><td>number</td><td>575</td><td>64.35</td><td>58.26</td><td><span class="pos">+6.09</span></td></tr><tr><td>mass</td><td>293</td><td>50.17</td><td>38.23</td><td><span class="pos">+11.95</span></td></tr><tr><td>color</td><td>299</td><td>76.92</td><td>78.60</td><td><span class="neg">-1.67</span></td></tr><tr><td>attribute</td><td>1,409</td><td>43.58</td><td>43.58</td><td><span class="">+0.00</span></td></tr><tr><td>size</td><td>56</td><td>71.43</td><td>50.00</td><td><span class="pos">+21.43</span></td></tr><tr><td>location</td><td>286</td><td>71.33</td><td>70.98</td><td><span class="pos">+0.35</span></td></tr><tr><td>depth</td><td>275</td><td>86.55</td><td>80.73</td><td><span class="pos">+5.82</span></td></tr><tr><td>distance</td><td>57</td><td>80.70</td><td>68.42</td><td><span class="pos">+12.28</span></td></tr><tr><td>motion</td><td>1,446</td><td>55.88</td><td>37.83</td><td><span class="pos">+18.05</span></td></tr><tr><td>temperature</td><td>68</td><td>69.12</td><td>69.12</td><td><span class="">+0.00</span></td></tr><tr><td>viewpoint</td><td>1,061</td><td>22.43</td><td>34.78</td><td><span class="neg">-12.35</span></td></tr><tr><td>air</td><td>55</td><td>83.64</td><td>50.91</td><td><span class="pos">+32.73</span></td></tr><tr><td>light</td><td>1,099</td><td>36.03</td><td>35.58</td><td><span class="pos">+0.45</span></td></tr><tr><td>collision</td><td>662</td><td>39.43</td><td>42.45</td><td><span class="neg">-3.02</span></td></tr><tr><td>throwing</td><td>421</td><td>48.69</td><td>44.42</td><td><span class="pos">+4.28</span></td></tr><tr><td>manipulation</td><td>829</td><td>31.48</td><td>29.31</td><td><span class="pos">+2.17</span></td></tr><tr><td>fluid</td><td>646</td><td>46.28</td><td>37.00</td><td><span class="pos">+9.29</span></td></tr><tr><td>chemistry</td><td>74</td><td>66.22</td><td>68.92</td><td><span class="neg">-2.70</span></td></tr><tr><td>others</td><td>367</td><td>77.93</td><td>66.49</td><td><span class="pos">+11.44</span></td></tr></tbody></table></div><p class="note">Fark = ER-1 − Cosmos. Yeşil ER-1'in, kırmızı Cosmos'un önde olduğu alt sınıfları gösterir.</p>
+
+<h2>7 · Cevap dağılımı (yanlılık kontrolü)</h2>
+<div class="grid2"><div class="cgroup"><h4>Doğru cevap dağılımı (GT, n=9.978)</h4><div class="brow"><span class="blabel">A</span><span class="btrack"><span class="bfill ref" style="width:90.8%"></span></span><span class="bval">90.76</span></div><div class="brow"><span class="blabel">B</span><span class="btrack"><span class="bfill ref" style="width:100.0%"></span></span><span class="bval">100.00</span></div><div class="brow"><span class="blabel">C</span><span class="btrack"><span class="bfill ref" style="width:92.5%"></span></span><span class="bval">92.55</span></div><div class="brow"><span class="blabel">D</span><span class="btrack"><span class="bfill ref" style="width:72.5%"></span></span><span class="bval">72.54</span></div></div><div class="cgroup"><h4>ER-1 tahmin dağılımı (n=9,978)</h4><div class="brow"><span class="blabel">A</span><span class="btrack"><span class="bfill er1" style="width:24.7%"></span></span><span class="bval">24.74</span></div><div class="brow"><span class="blabel">B</span><span class="btrack"><span class="bfill er1" style="width:24.8%"></span></span><span class="bval">24.84</span></div><div class="brow"><span class="blabel">C</span><span class="btrack"><span class="bfill er1" style="width:27.4%"></span></span><span class="bval">27.43</span></div><div class="brow"><span class="blabel">D</span><span class="btrack"><span class="bfill er1" style="width:23.0%"></span></span><span class="bval">22.98</span></div><p class="note">Cevapsız/geçersiz: 0</p></div><div class="cgroup"><h4>Cosmos tahmin dağılımı (n=9,978)</h4><div class="brow"><span class="blabel">A</span><span class="btrack"><span class="bfill cosmos" style="width:23.9%"></span></span><span class="bval">23.94</span></div><div class="brow"><span class="blabel">B</span><span class="btrack"><span class="bfill cosmos" style="width:32.4%"></span></span><span class="bval">32.41</span></div><div class="brow"><span class="blabel">C</span><span class="btrack"><span class="bfill cosmos" style="width:29.3%"></span></span><span class="bval">29.25</span></div><div class="brow"><span class="blabel">D</span><span class="btrack"><span class="bfill cosmos" style="width:14.4%"></span></span><span class="bval">14.39</span></div><p class="note">Cevapsız/geçersiz: 0</p></div></div>
+
+<h2>8 · Performans ve altyapı</h2>
+<div class="tscroll"><table><thead><tr><th>Kalem</th><th>Değer</th></tr></thead><tbody><tr><td>kalıcı önbellek</td><td>10,002 öge · 58,599 medya dosyası · 3.27 GB</td></tr><tr><td>medya ölçeği</td><td>uzun kenar ≤ 640 px · video başına 8 kare</td></tr><tr><td>önbellek üretimi</td><td>9.0 dk · 14 paralel işçi</td></tr><tr><td>izole pilot (200 val ögesi)</td><td>ER-1 187 ms/öge · Cosmos 128 ms/öge · talimat uyumu %100</td></tr><tr><td>ER-1 · tam test</td><td>63.7 dk işlem döngüsü (yükleme 1.2 sn) · 382 ms/öge · izole hızın ~2 katı</td></tr><tr><td>Cosmos · tam test</td><td>57.7 dk işlem döngüsü (yükleme 0.8 sn) · 346 ms/öge · izole hızın ~2,7 katı</td></tr></tbody></table></div>
+<div class="cgroup" style="margin-top:12px"><h4>Video uzunluğu dağılımı (kare sayısı)</h4><div class="brow"><span class="blabel">1-8 kare</span><span class="btrack"><span class="bfill er1" style="width:0.7%"></span></span><span class="bval">0.73</span></div><div class="brow"><span class="blabel">9-32 kare</span><span class="btrack"><span class="bfill er1" style="width:36.3%"></span></span><span class="bval">36.30</span></div><div class="brow"><span class="blabel">33-128 kare</span><span class="btrack"><span class="bfill er1" style="width:13.8%"></span></span><span class="bval">13.79</span></div><div class="brow"><span class="blabel">129+ kare</span><span class="btrack"><span class="bfill er1" style="width:49.2%"></span></span><span class="bval">49.18</span></div>
+<p class="note">8 kareden kısa videolarda model tüm kareleri görür; uzun videolarda 8 kare örneklenir.</p></div>
+
+<h2>9 · Öne çıkanlar</h2>
+<div class="box"><ul><li>Genel: ER-1 (4B) %47,96 · Cosmos-Reason2-2B %44,25. İkisi de GPT-4o'nun (49,49) hemen altında; Cosmos, kendinden dört kat büyük InternVL2.5-8B'yi (43,88) geçti ve 2B sınıfındaki en yakın rakibi InternVL2.5-2B'yi (39,22) ~5 puan aştı. ER-1 ise 4B sınıfında InternVL2.5-4B'den (42,44) ~5,5 puan önde.</li><li>Talimat uyumu kusursuz: 9.978 temiz ögenin tamamında çıktı tek harfle başladı; geçersiz çıktı 0, 32 token sınırına takılan 0, ortalama üretim 2,0 token (Cosmos) / 2,5 token (ER-1). Bu yüzden 'harf' ve resmî 'answer.startswith(gt)' skorları birebir aynı çıktı — robotik ince ayar modelleri talimat disiplinini bozmamış.</li><li>Kategori profili liderlik tablosuyla aynı: 'scene' herkes için en zor (ER-1 %31,8 · Cosmos %36,6 · GPT-4o %30,15), 'relationships' en kolay (ER-1 %63,0 ≈ GPT-4o %64,8). ER-1 bu kategoride Cosmos'u 14 puan geçiyor.</li><li>Video ögeleri tek görselli ögelerden belirgin biçimde zor: ER-1 %45,0 vs %55,4, Cosmos %44,9 vs %52,2. Öge başına süre de videoda 3-4 kat: ER-1 501 ms, Cosmos 440 ms (tek görselde 126/149 ms). 8 kare, 10-30 saniyelik kliplerde bilgi darboğazı.</li><li>ER-1'in açık ara üstün olduğu yer hareket anlama: 'motion' alt sınıfında %55,9 vs Cosmos %37,8 (+18 puan); ayrıca 'mass' (+11,9), 'fluid' (+9,3), 'number' (+6,1). Unitree'nin gömülü-algı ince ayarı tam da burada işe yaramış görünüyor.</li><li>Cosmos'un ER-1'i geçtiği yerler: 'viewpoint' (%34,8 vs %22,4), 'scene' kategorisi (%36,6 vs %31,8) ve 'collision' (%42,4 vs %39,4). Yani Cosmos mekân/görüş-açısı sorularında, ER-1 hareket/fizik sorularında güçlü.</li><li>ER-1'in zayıf noktası çarpıcı: 'viewpoint' %22,4 — rastgele tabanın (%25) altında — ve 'reasoning' yeteneği %27,8. 4B gömülü model, bakış açısı dönüşümü ve soyut çıkarım gerektiren ögelerde neredeyse şans düzeyinde.</li><li>Cevap-harfi yanlılığı: Cosmos tahminlerinin %32,4'ünü B veriyor (GT'de B %28,1) ve D'yi %14,4 kullanıyor (GT'de D %20,4) — belirgin B yanlılığı. ER-1 dengeli (A %24,7 / B %24,8 / C %27,4 / D %23,0). Cosmos'un açığının bir kısmı bu kalibrasyon sorunundan geliyor.</li><li>İki model birbirinden bağımsız hata yapıyor: yalnızca %48,8 ögede aynı harfi verdiler; anlaştıklarında ikisi de %59,6 doğru. 'En az biri doğru' oranı %63,1 — basit bir birleştirme (ensemble) bile tek modelin önüne geçiyor.</li><li>Val dilimi yanıltıcı: 199 val ögesinde ER-1 %62,8 iken 9.779 test ögesinde %47,7 (Cosmos: %55,8 → %44,0). Yalnızca val üzerinde koşan bir değerlendirme sonucu ~15 puan şişirir; bu yüzden pilot koşunun yüksek görünen skorları nihai değildir.</li><li>Video uzunluğu ile doğruluk monoton değil — 9-32 kare kovası en zayıf (ER-1 %30,4). Bunun nedeni uzunluk değil içerik karışımı: bu kovanın %88'i 'light' ve 'viewpoint', yani veri setinin en zor iki alt sınıfı. Uzun klipler (512+ kare) ise kimya/fizik deneyleri olduğu için ikisinde de %77 ile en yüksek doğruluğa sahip.</li><li>Donanım notu ve paralel koşu denemesi: VRAM'in yalnızca %33'ü kullanılıyordu, bu yüzden iki model eşzamanlı koşuldu (VRAM %52'de kaldı). Ancak toplam verim 10,0 öge/s oldu; sıralı izole hızların toplamı 13,2 öge/s. Yani bu iş yükünde paralel koşu kazanç sağlamıyor: darboğaz GPU değil, öge başına CPU tarafındaki kare kodlama/prompt hazırlama ve süreç başına 75 iş parçacığının çekirdekleri aşırı abonelemesi.</li></ul></div>
+
+<h2>10 · Sınırlamalar</h2>
+<div class="box"><ul>
+  <li>Kare seçimi tüm klibi tarayacak şekilde eşit aralıklı yapıldı; resmî açık-kaynak kod ise videonun
+      <i>ilk</i> 8 karesini alır. 8 kareden kısa videolarda (veri setinin çoğunluğu) iki yaklaşım aynıdır.</li>
+  <li>Çözünürlük ≤640 px'e indirildi; GPT-4o protokolü 512 px kullanır, yani bu bütçe lider tablosundaki API modellerinden daha cömerttir.</li>
+  <li>Tek çalıştırma (greedy, tek seed). Sıcaklık örneklemesiyle sonuçlar ±1-2 puan oynayabilir.</li>
+  <li>Tam koşuların büyük bölümü <b>eşzamanlı</b> yürütüldü (VRAM %52'de kaldı); eşzamanlı dönemde örnek başına
+      süreler şişti. Eşzamanlı koşunun toplam verimi 10,0 öge/s iken sıralı izole hızların toplamı 13,2 öge/s —
+      yani bu iş yükünde paralel koşu kazanç sağlamıyor, çünkü darboğaz GPU değil öge başına CPU ön-işleme.</li>
+  <li>Temiz 4-seçenekli GT'si olan ögeler skorlandı; 22 bozuk etiketli öge dışlandı.</li>
+  <li>Baz modeller (Qwen3-VL-4B/2B-Instruct) koşulmadı; robotik ince-ayarın etkisi lider tablosundaki
+      ölçek eşleriyle (InternVL2.5-1B/2B/4B) karşılaştırılarak yorumlandı.</li>
+</ul></div>
+
+<h2>11 · Resmî lider tablosu (bağlam)</h2>
+<div class="tscroll"><table><thead><tr><th>Model</th><th>ALL %</th></tr></thead><tbody><tr><td>İnsan (human)</td><td>95.87</td></tr><tr><td>o1</td><td>55.11</td></tr><tr><td>InternVL2.5-38B</td><td>51.94</td></tr><tr><td>GPT-4o</td><td>49.49</td></tr><tr><td>Gemini-1.5-pro</td><td>49.11</td></tr><tr><td>InternVL2.5-8B</td><td>43.88</td></tr><tr><td>InternVL2.5-4B</td><td>42.44</td></tr><tr><td>InternVL2.5-2B</td><td>39.22</td></tr><tr><td>InternVL2.5-1B</td><td>36.15</td></tr><tr><td>mPLUG-Owl3-1B (en düşük)</td><td>31.68</td></tr></tbody></table></div><p class="note">Kaynak: PhysBench reposu README ve physbench.github.io (test seti).</p>
+
+</main>
+<footer>Üretildi: 2026-09-14 19:37 · harness: run_eval.py · skorlama: resmî print_test_score.py</footer>
+</body></html>

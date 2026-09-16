@@ -1,0 +1,30 @@
+{
+  "n": 9978,
+  "agreement": 4867,
+  "agreement_pct": 48.78,
+  "er1_acc": 47.96,
+  "cosmos_acc": 44.25,
+  "both_correct": 2902,
+  "both_correct_pct": 29.08,
+  "either_correct_pct": 63.12,
+  "acc_on_agreement_a": 59.63,
+  "acc_on_agreement_b": 59.63,
+  "letter_pairs": {
+    "BA": 405,
+    "BB": 1484,
+    "CC": 1492,
+    "AB": 668,
+    "AA": 1140,
+    "DA": 430,
+    "DD": 769,
+    "BD": 184,
+    "DB": 519,
+    "BC": 409,
+    "CD": 261,
+    "AD": 226,
+    "CB": 566,
+    "AC": 445,
+    "DC": 579,
+    "CA": 425
+  }
+}
