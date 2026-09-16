@@ -113,6 +113,7 @@ class ProductionPathTest(unittest.TestCase):
                     self.assertEqual(manifest["action_dim"], expected_dim)
                     with np.load(target / "action_tokens.npz") as payload:
                         self.assertEqual(payload["motion_token"].shape, (4, 64))
+                        np.testing.assert_array_equal(payload["training_valid_mask"], [False, False, False, False])
                         self.assertEqual("action" in payload.files, available)
 
 

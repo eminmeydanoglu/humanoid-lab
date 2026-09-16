@@ -344,6 +344,7 @@ def pilot_card(run_dir: Path, *, relative_base: str, relative_to: Path, media_ro
     direct_metrics = read_json(run_dir / "direct_metrics.json")
     sonic_metrics = read_json(run_dir / "sonic_metrics.json")
     sonic_latent_metrics = read_json(run_dir / "sonic_latent_metrics.json")
+    fidelity = read_json(run_dir / "sonic_fidelity.json")
     reference_path = run_dir / "reference.npz"
     reference = np.load(reference_path)["joint_pos"] if reference_path.is_file() else None
 
@@ -374,6 +375,19 @@ def pilot_card(run_dir: Path, *, relative_base: str, relative_to: Path, media_ro
         verdicts.append(("encoder finite", "PASS" if encoder["finite"] else "FAIL"))
         verdicts.append(("encoder repeatable", "PASS" if encoder["repeatability"]["bitwise_identical"] else "FAIL"))
     sections.append("<p>" + " ".join(f"{html.escape(name)} {badge(value)}" for name, value in verdicts) + "</p>")
+    sections.append(
+        "<h3>Primary latent fidelity: A reference → B SONIC command → C measured robot</h3>"
+        + (f"<p>{badge(fidelity['result'])} · full replay: {fidelity['coverage']['full_motion']} · "
+           f"last frame {fidelity['coverage']['last_observed_frame'] + 1}/{fidelity['coverage']['expected_frames']} · "
+           f"SONIC received {(fidelity.get('transport') or {}).get('received_unique_frames', '—')}/"
+           f"{fidelity['coverage']['expected_frames']}</p>"
+           + verdict_table("A/B/C fidelity gates", fidelity["decisions"])
+           + "<div class='plots'>"
+           + "".join(f"<img src='{prefix}{name}'>" for name in ("sonic_left_wrist_world_abc.png", "sonic_left_wrist_abc.png", "sonic_left_arm_abc.png", "sonic_left_hand_abc.png")
+                     if (run_dir / name).is_file())
+           + "</div>"
+           if fidelity else "<p class='missing-box'>UNVERIFIED · timed A/B/C replay has not been run</p>")
+    )
 
     if qc.get("decisions"):
         sections.append(verdict_table("Pilot QC thresholds", qc["decisions"]))
@@ -426,8 +440,8 @@ def pilot_card(run_dir: Path, *, relative_base: str, relative_to: Path, media_ro
     if whole_body:
         main_slots = (
             ("1. Kaynak ego/head kamera", "source.mp4"),
-            ("2. Kaydedilmiş state (kinematik)", "recorded_state_kinematic.mp4"),
-            ("3. Encoder action (kinematik)", "encoder_action_kinematic.mp4"),
+            ("2. Üretilen tüm-beden referansı (A)", "completed_reference_kinematic.mp4"),
+            ("3. SONIC latent replay (B/C)", "sonic_latent_motion.mp4"),
         )
         debug_slots = (
             ("A. Sabit taban doğrudan joint oracle (PD)", "direct_fixed.mp4"),
@@ -469,10 +483,7 @@ def pilot_card(run_dir: Path, *, relative_base: str, relative_to: Path, media_ro
     # with the same data-sync-group joins the shared timeline automatically.
     sections.append("<div class='videos'>" + main_video_html + "</div>")
     if whole_body:
-        sections.append(
-            "<p class='assume'>Ana grup: kaynak kamera + kaydedilmiş state kinematik + encoder action kinematik "
-            "(aynı sync grubu; ortak slider üçünü birlikte sarar).</p>"
-        )
+        sections.append("<p class='assume'>A/B/C metrikleri üstte; kaynak state ve action kinematik kayıtları ayrı tanılardır.</p>")
     else:
         sections.append(
             "<p class='assume'>Ana grup: kaynak kamera + kayıtta olmayan bacak/bel/root kanalları sabit standing ile "
@@ -648,7 +659,8 @@ def pilot_card(run_dir: Path, *, relative_base: str, relative_to: Path, media_ro
         "run_dir": str(run_dir),
         "qc_result": qc.get("episode_result", qc["result"]),
         "direct_result": None if direct_analysis is None else direct_analysis["result"],
-        "sonic_result": None if sonic_analysis is None else sonic_analysis["result"],
+        "sonic_result": fidelity["result"] if fidelity else ("UNVERIFIED" if sonic_analysis else None),
+        "fidelity_metrics": fidelity,
         "direct_metrics": direct_analysis,
         "wrist_diagnostic": wrist_diagnostic,
         "sonic_metrics": sonic_analysis,
@@ -962,16 +974,15 @@ def main() -> int:
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<title>SONIC pilot review</title><style>" + STYLE + "</style></head><body>"
         "<h1>SONIC v1.1 pilot review</h1>"
-        "<p class='assume'>Her kart tek bir pilot episode'u gösterir. Whole-body pilotların ana karşılaştırması "
-        "kaynak ego kamera, kaydedilmiş state'in frame-exact kinematik replay'i ve encoder'a verilen action "
-        "trajectory'sinin frame-exact kinematik replay'idir; PD ve serbest SONIC yalnız controller debugging "
-        "bölümündedir. Unitree kartı kaynak kamera, standing ile tamamlanmış direct replay ve serbest SONIC'i "
-        "gösterir. Eski başarısız koşular yeni kanıtla karıştırılmaz.</p>"
+        "<p class='assume'>Her kart tek bir pilot episode'u gösterir. Ana karşılaştırma kaynak kamera, "
+        "oluşturulan tüm-beden referansı (A) ve offline latent ile sürülen SONIC robotudur. Birincil test "
+        "A referans → B SONIC komutu → C ölçülen robot hareketidir; yalnız komut takibi yeterli sayılmaz. "
+        "Eksik veya kesilmiş latent replay UNVERIFIED/FAIL olarak görünür.</p>"
         "<p class='assume'>Kart içindeki videolar ortak play/pause ve zaman çizelgesi ile senkron sürülür; "
         "süresi kısa olan video seçilen zamana clamp edilir. Native kontroller tek tek oynatmak için durur. "
         "Seek için sayfayı byte-range destekleyen bir sunucudan açın: <code>./dev.sh sonic-review-serve</code> "
         "(<code>python3 -m http.server</code> <code>Accept-Ranges</code> göndermez ve videolar seek edilemez).</p>"
-        "<table class='metrics'><thead><tr><th>pilot</th><th>QC</th><th>direct oracle</th><th>free SONIC</th>"
+        "<table class='metrics'><thead><tr><th>pilot</th><th>QC</th><th>direct oracle</th><th>A/B/C fidelity</th>"
         f"<th>run dir</th></tr></thead><tbody>{summary_rows}</tbody></table>"
         + "".join(item["card"] for item in results)
         + f"<script>{SCRIPT}</script>"
@@ -988,6 +999,7 @@ def main() -> int:
                     "qc": item["qc_result"],
                     "direct": item["direct_result"],
                     "sonic": item["sonic_result"],
+                    "fidelity_metrics": item["fidelity_metrics"],
                     "wrist_diagnostic": item.get("wrist_diagnostic"),
                     "direct_metrics": None
                     if item["direct_metrics"] is None

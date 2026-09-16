@@ -66,9 +66,10 @@ def load_tracking(path: Path) -> dict[str, Any]:
 
     root_quaternion = stack("root_quaternion_wxyz")
     up_z = 1.0 - 2.0 * (root_quaternion[:, 1] ** 2 + root_quaternion[:, 2] ** 2)
-    return {
+    result = {
         "path": str(path),
         "sim_s": stack("sim_s"),
+        "wall_time_ns": stack("wall_time_ns").astype(np.int64) if "wall_time_ns" in table.column_names else np.empty(0, dtype=np.int64),
         "tick": stack("tick"),
         "support_active": np.asarray([bool(row["support_active"]) for row in rows]),
         "body_target": stack("body_target"),
@@ -78,10 +79,21 @@ def load_tracking(path: Path) -> dict[str, Any]:
         "right_hand_target": stack_hand("right", "target"),
         "right_hand_measured": stack_hand("right", "measured"),
         "root_position": stack("root_position"),
+        "root_quaternion_wxyz": root_quaternion,
         "root_up_z": np.clip(up_z, -1.0, 1.0),
         "body_joint_names": BODY_JOINT_ORDER,
         "rows": len(rows),
     }
+    for name in ("body_velocity_target", "body_feedforward_torque", "body_kp", "body_kd",
+                 "body_applied_torque", "body_measured_velocity"):
+        if name in table.column_names:
+            result[name] = stack(name)
+    for side in ("left", "right"):
+        for name in ("velocity_target", "feedforward_torque", "kp", "kd", "applied_torque", "measured_velocity"):
+            field = f"{side}_hand_{name}"
+            if field in table.column_names:
+                result[field] = stack_hand(side, name)
+    return result
 
 
 def free_window(tracking: dict[str, Any]) -> np.ndarray:

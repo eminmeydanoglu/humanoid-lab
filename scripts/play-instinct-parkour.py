@@ -151,6 +151,11 @@ args_cli = parser.parse_args()
 # sensor is never rendered and the policy would be fed a dead depth buffer.
 args_cli.enable_cameras = True
 
+# Whether this run draws the application's UI at all -- locally or streamed to a
+# WebRTC client.  AppLauncher forces `headless` on a livestreaming run, so the
+# answer has to be taken before the launcher rewrites the flag.
+ui_displayed = not args_cli.headless
+
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
@@ -544,7 +549,7 @@ def main():
     # The camera's depth image, on screen while you drive.  It is the sensor's
     # own frame, uncropped: the policy reads a cropped, noised and normalized
     # slice of it, and this window is for seeing where that slice comes from.
-    depth_window = DepthWindow(env) if not args_cli.headless and args_cli.depth_window else None
+    depth_window = DepthWindow(env) if ui_displayed and args_cli.depth_window else None
 
     policy = OnnxParkourPolicy(run_dir=run_dir, env=env)
 

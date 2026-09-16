@@ -27,6 +27,7 @@ import argparse
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -52,8 +53,52 @@ DEFAULT_ENCODER_PYTHON = Path("/opt/venvs/sonic-sim/bin/python")
 ENCODE_SCRIPT = ROOT / "scripts/encode-sonic-episode.py"
 
 
+def already_converted(processed_root: Path, kind: str, dataset: str, index: int) -> Path | None:
+    """Latest existing output of this episode when it already has both artifacts.
+
+    Bulk conversion is long enough that it has to be resumable, and a re-run must
+    not silently pile up duplicate timestamped copies of the same episode.  An
+    episode counts as done only when both encoder artifacts are present, the same
+    rule the batch uses to count a conversion.
+    """
+    name = f"{kind}_{Path(dataset).name}_ep{index:03d}"
+    root = Path(processed_root) / "pilots" / name
+    if not root.is_dir():
+        return None
+    for candidate in sorted((path for path in root.iterdir() if path.is_dir()), reverse=True):
+        if all((candidate / artifact).is_file() for artifact in ENCODER_ARTIFACTS):
+            return candidate
+    return None
+
+
 class EncodeError(RuntimeError):
     """The encoder step did not produce its artifacts."""
+
+
+class QcRejected(RuntimeError):
+    """One episode failed its own numeric QC and must not enter the corpus."""
+
+
+def require_episode_qc(manifest: dict[str, object]) -> dict[str, object]:
+    """Refuse an episode whose QC verdict is FAIL, with the failing metrics named.
+
+    ``prepare_pilot`` already computes per-episode QC and stores the verdict in
+    ``run_manifest.json["qc"]``.  Until this check existed the bulk path wrote
+    tokens for a FAILed episode and counted it as converted, so a broken
+    trajectory (non-finite value, a joint outside its modelled range, a garbage
+    derivative) could enter the processed corpus while the pilot workflow
+    advertised QC as a gate.  A FAIL is now fatal for that episode.
+    """
+    qc = manifest.get("qc") or {}
+    verdict = str(qc.get("episode_result", "UNKNOWN"))
+    if verdict == "FAIL":
+        failed = [
+            f"{item['metric']}={item['value']} > {item['limit']}"
+            for item in qc.get("decisions", [])
+            if item.get("result") == "FAIL"
+        ]
+        raise QcRejected(f"QC verdict is FAIL for this episode: " + ("; ".join(failed) or "no decision recorded"))
+    return {"qc_verdict": verdict, "qc_threshold_result": str(qc.get("threshold_result", "UNKNOWN"))}
 
 
 def encode_episode(
@@ -97,12 +142,24 @@ def parse_range(value: str) -> tuple[int, int]:
     return start, stop
 
 
+def dataset_episode_count(dataset: Path) -> int:
+    """Declared episode count of a raw LeRobot dataset."""
+    info = json.loads((Path(dataset) / "meta/info.json").read_text(encoding="utf-8"))
+    count = int(info["total_episodes"])
+    if count <= 0:
+        raise ValueError(f"{dataset} declares no episodes")
+    return count
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pilot", choices=PILOT_KINDS, action="append", required=True,
                         help="source kind to convert; repeat for more than one")
-    parser.add_argument("--episodes", type=parse_range, required=True,
+    parser.add_argument("--episodes", type=parse_range,
                         help="explicit episode range START:STOP (bulk conversion is never implicit)")
+    parser.add_argument("--all-episodes", action="store_true",
+                        help="convert every declared episode of every selected dataset "
+                             "(overrides --episodes; each dataset uses its own episode count)")
     parser.add_argument("--config", type=Path, default=ROOT / "configs/datasets/sonic/pilots.json")
     parser.add_argument("--limits", type=Path, default=ROOT / "configs/datasets/sonic/g1_joint_limits.json")
     parser.add_argument("--raw-root", type=Path, default=DEFAULT_RAW_ROOT)
@@ -111,10 +168,17 @@ def main() -> int:
     parser.add_argument("--expected-sha256", help="encoder checksum every episode must match")
     parser.add_argument("--encoder-python", type=Path, default=DEFAULT_ENCODER_PYTHON)
     parser.add_argument("--assume-unitree-mujoco-body-order", action="store_true")
+    parser.add_argument("--dataset", action="append",
+                        help="restrict a kind to one of its declared bulk datasets; repeatable")
+    parser.add_argument("--no-video", action="store_true",
+                        help="skip cutting the source camera clip (much faster, smaller output)")
+    parser.add_argument("--force", action="store_true",
+                        help="re-convert episodes that already have both encoder artifacts")
     args = parser.parse_args()
 
     assert_processed_destination(args.raw_root, args.processed_root)
     blockers: list[str] = []
+    plan: list[tuple[str, list[str]]] = []
     for kind in args.pilot:
         spec = PilotSpec.from_config(args.config, kind, raw_root=args.raw_root)
         if spec.bulk_conversion_status != "eligible":
@@ -129,6 +193,16 @@ def main() -> int:
         status = review_status(pilot_dir)
         if status not in ACCEPTED_STATUSES:
             blockers.append(f"{kind}: pilot review status is {status!r} ({pilot_dir / 'human_review.json'})")
+            continue
+        declared = PilotSpec.bulk_datasets(args.config, kind)
+        if args.dataset:
+            chosen = [name for name in declared if name in set(args.dataset)]
+            unknown = sorted(set(args.dataset) - set(declared))
+            if unknown:
+                blockers.append(f"{kind}: --dataset {unknown} not declared by this kind")
+                continue
+            declared = chosen
+        plan.append((kind, declared))
     if blockers:
         print("bulk conversion blocked:", file=sys.stderr)
         for blocker in blockers:
@@ -140,42 +214,77 @@ def main() -> int:
         )
         return 2
 
-    start, stop = args.episodes
+    if not args.episodes and not args.all_episodes:
+        parser.error("one of --episodes START:STOP or --all-episodes is required")
     standing = deployment_standing_pose()
     converted: list[dict[str, object]] = []
+    skipped: list[dict[str, object]] = []
     failures: list[str] = []
-    for kind in args.pilot:
-        for index in range(start, stop):
-            spec = PilotSpec.from_config(
-                args.config,
-                kind,
-                raw_root=args.raw_root,
-                episode_index=index,
-                assume_unitree_mujoco_body_order=args.assume_unitree_mujoco_body_order,
-            )
-            try:
-                manifest = prepare_pilot(
-                    spec,
+    for kind, datasets in plan:
+        for dataset in datasets:
+            if args.all_episodes:
+                start, stop = 0, dataset_episode_count(Path(args.raw_root) / dataset)
+            else:
+                start, stop = args.episodes
+            for index in range(start, stop):
+                existing = already_converted(args.processed_root, kind, dataset, index)
+                if existing is not None and not args.force:
+                    skipped.append({"pilot": f"{kind}_{Path(dataset).name}_ep{index:03d}",
+                                    "dir": str(existing)})
+                    continue
+                spec = PilotSpec.from_config(
+                    args.config,
+                    kind,
                     raw_root=args.raw_root,
-                    processed_root=args.processed_root,
-                    limits_path=args.limits,
-                    standing=standing,
-                    layout_path=args.model_dir / "observation_config.yaml",
+                    episode_index=index,
+                    assume_unitree_mujoco_body_order=args.assume_unitree_mujoco_body_order,
                 )
-                # The manifest owns the output location; never guess it from the CLI.
-                pilot_dir = Path(manifest["processed_dir"])
-                encoder = encode_episode(
-                    pilot_dir,
-                    model_dir=args.model_dir,
-                    expected_sha256=args.expected_sha256,
-                    encoder_python=args.encoder_python,
+                # Picking a different bulk dataset must also move the output
+                # directory: pilot_name is derived from the dataset, so replacing
+                # only ``dataset`` would file one collection's episodes under
+                # another collection's name.
+                spec = replace(
+                    spec,
+                    dataset=Path(args.raw_root) / dataset,
+                    pilot_name=f"{kind}_{Path(dataset).name}_ep{index:03d}",
                 )
-                converted.append({"pilot": spec.pilot_name, "dir": str(pilot_dir), **encoder})
-            except Exception as error:  # noqa: BLE001 - one bad episode must not stop the batch
-                failures.append(f"{spec.pilot_name}: {type(error).__name__}: {error}")
+                try:
+                    manifest = prepare_pilot(
+                        spec,
+                        raw_root=args.raw_root,
+                        processed_root=args.processed_root,
+                        limits_path=args.limits,
+                        standing=standing,
+                        layout_path=args.model_dir / "observation_config.yaml",
+                        with_video=not args.no_video,
+                    )
+                    # The manifest owns the output location; never guess it from the CLI.
+                    pilot_dir = Path(manifest["processed_dir"])
+                    # QC is a gate, not a report: a FAILed episode never gets tokens.
+                    qc = require_episode_qc(manifest)
+                    encoder = encode_episode(
+                        pilot_dir,
+                        model_dir=args.model_dir,
+                        expected_sha256=args.expected_sha256,
+                        encoder_python=args.encoder_python,
+                    )
+                    converted.append({
+                        "pilot": spec.pilot_name,
+                        "kind": kind,
+                        "dataset": dataset,
+                        "episode_index": index,
+                        "dir": str(pilot_dir),
+                        **qc,
+                        **encoder,
+                    })
+                except Exception as error:  # noqa: BLE001 - one bad episode must not stop the batch
+                    failures.append(f"{spec.pilot_name} [{dataset} ep{index}]: {type(error).__name__}: {error}")
     summary = {
         "converted": len(converted),
+        "skipped_already_converted": len(skipped),
+        "failures_count": len(failures),
         "episodes": converted,
+        "skipped": skipped,
         "failures": failures,
         "encoder_artifacts_required": list(ENCODER_ARTIFACTS),
     }

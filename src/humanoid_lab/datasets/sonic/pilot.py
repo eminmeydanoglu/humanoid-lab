@@ -31,6 +31,8 @@ from .quality import (
     derivative_metrics,
     evaluate_thresholds,
     finite_report,
+    hand_range_decision,
+    hand_range_report,
     load_joint_limits,
     overall_result,
     permutation_round_trip,
@@ -43,6 +45,37 @@ from .schema import PROCESSED_FPS, CanonicalEpisodeBuild
 PILOT_SCHEMA_VERSION = 1
 PILOT_KINDS = ("unitree", "fruits", "apple")
 BODY_JOINT_NAMES = SONIC_REFERENCE_JOINT_ORDER
+
+#: Source-specific hand range policy against the pinned Dex3 model.
+#:
+#: The Unitree Dex3 collection reaches 2.0944 rad (= 2*pi/3 = 120 deg) on the
+#: index/middle distal joints and 0.192 rad past zero on the proximal ones, in
+#: both ``action`` and measured ``observation.state``.  The pinned
+#: ``g1_29dof_with_hand`` model (and all three shipped URDFs, plus the pinning
+#: deployment's own ``MAX_LIMITS_*``/``MIN_LIMITS_*`` tables in ``dex3_hands.hpp``)
+#: stop at 1.7453 rad (100 deg).  120 deg is the older Dex3 revision's documented
+#: stroke, so these are real recorded values on wider-stroke hardware, not a wrong
+#: permutation: an exhaustive search over all 5040 column permutations per hand
+#: finds the canonical order already optimal, and the measured state violates in
+#: the same channels as the commanded action.
+#:
+#: Measured over a 551-episode sample covering all 13 official collections, the
+#: excess is strongly bimodal and never in between: either exactly 0.3491 rad
+#: (= 2.0944 - 1.7453, the revision stroke difference) or ~0.0010 rad (a resting
+#: pose sitting a hair past the modelled zero).  The tolerance is therefore the
+#: discriminator, and the channel count is only a sanity bound: a whole-hand
+#: revision plausibly moves every joint, so all 14 channels may deviate, but none
+#: may deviate by more than the documented stroke difference.
+#:
+#: AppleToPlate's hands come from measured ``observation.state``.  Its left hand is
+#: inside the modelled range throughout; the right hand rests about 0.053 rad below
+#: the model's zero and barely moves, a real resting offset rather than a mapping
+#: error.
+HAND_RANGE_POLICY: dict[str, dict[str, float]] = {
+    "unitree": {"allowed_channels": 14, "excess_tolerance_rad": 0.35},
+    "apple": {"allowed_channels": 2, "excess_tolerance_rad": 0.06},
+    "fruits": {"allowed_channels": 0, "excess_tolerance_rad": 0.0},
+}
 
 
 def utc_timestamp() -> str:
@@ -74,6 +107,7 @@ class PilotSpec:
     assume_unitree_mujoco_body_order: bool = False
     bulk_conversion_status: str = "eligible"
     bulk_conversion_reason: str = ""
+    hands_from_state: bool = False
 
     @classmethod
     def from_config(
@@ -98,7 +132,59 @@ class PilotSpec:
             assume_unitree_mujoco_body_order=assume_unitree_mujoco_body_order,
             bulk_conversion_status=str(entry.get("bulk_conversion_status", "eligible")),
             bulk_conversion_reason=str(entry.get("bulk_conversion_reason", "")),
+            hands_from_state=bool(entry.get("hands_from_state", False)),
         )
+
+    @classmethod
+    def bulk_from_config(
+        cls,
+        config: Path,
+        kind: str,
+        *,
+        raw_root: Path,
+        dataset: str | None = None,
+        assume_unitree_mujoco_body_order: bool = False,
+    ) -> "PilotSpec":
+        """Resolve the bulk-conversion source of ``kind``.
+
+        A kind may convert more than the single pilot dataset: ``bulk_datasets``
+        lists every raw dataset the kind covers, while ``dataset`` stays the pilot
+        episode's source.  ``dataset`` selects one entry explicitly; without it
+        the first (or only) bulk dataset is used.  Gates and hand policy are
+        inherited from the kind entry, so a kind marked ``excluded`` cannot be
+        converted through any of its datasets.
+        """
+        document = json.loads(Path(config).read_text(encoding="utf-8"))
+        if kind not in document:
+            raise ValueError(f"{config} does not define pilot {kind!r}; known: {sorted(document)}")
+        entry = document[kind]
+        names = [str(name) for name in entry.get("bulk_datasets") or [entry["dataset"]]]
+        if dataset is not None:
+            if dataset not in names:
+                raise ValueError(
+                    f"{kind} does not declare bulk dataset {dataset!r}; declared: {names}"
+                )
+            chosen = dataset
+        else:
+            chosen = names[0]
+        return cls(
+            kind=kind,
+            dataset=Path(raw_root) / chosen,
+            episode_index=0,
+            pilot_name=f"{kind}_{Path(chosen).name}_ep000",
+            assume_unitree_mujoco_body_order=assume_unitree_mujoco_body_order,
+            bulk_conversion_status=str(entry.get("bulk_conversion_status", "eligible")),
+            bulk_conversion_reason=str(entry.get("bulk_conversion_reason", "")),
+            hands_from_state=bool(entry.get("hands_from_state", False)),
+        )
+
+    @classmethod
+    def bulk_datasets(cls, config: Path, kind: str) -> list[str]:
+        document = json.loads(Path(config).read_text(encoding="utf-8"))
+        if kind not in document:
+            raise ValueError(f"{config} does not define pilot {kind!r}; known: {sorted(document)}")
+        entry = document[kind]
+        return [str(name) for name in entry.get("bulk_datasets") or [entry["dataset"]]]
 
 
 def map_source_episode(spec: PilotSpec, standing: StandingPose) -> CanonicalEpisodeBuild:
@@ -113,6 +199,7 @@ def map_source_episode(spec: PilotSpec, standing: StandingPose) -> CanonicalEpis
             spec.episode_index,
             standing=standing,
             assume_unitree_mujoco_body_order=spec.assume_unitree_mujoco_body_order,
+            hands_from_state=spec.hands_from_state,
         )
     raise ValueError(f"unknown pilot kind {spec.kind!r}; known: {PILOT_KINDS}")
 
@@ -385,6 +472,14 @@ def evaluate_episode_qc(
     if synthetic is not None:
         values["synthetic.max_abs_error_rad"] = synthetic["max_abs_error_rad"]
     decisions = evaluate_thresholds(values, DEFAULT_THRESHOLDS)
+    # The body range check above never looks at the hands, so a hand trajectory
+    # could sit arbitrarily far outside the modelled Dex3 range unnoticed.
+    hands = hand_range_report(episode.left_hand_joints, episode.right_hand_joints, limits)
+    hand_decision = None
+    if build.final_action_allowed():
+        policy = HAND_RANGE_POLICY.get(spec.kind, {"allowed_channels": 0, "excess_tolerance_rad": 0.0})
+        hand_decision = hand_range_decision(hands, **policy)
+        decisions.append(hand_decision)
     round_trips: dict[str, Any] = {}
     for part, item in (build.provenance.get("name_check") or {}).items():
         if isinstance(item, dict) and item.get("mode") == "name_round_trip":
@@ -409,6 +504,7 @@ def evaluate_episode_qc(
         ),
         "finite": finite,
         "joint_range": ranges,
+        "hand_range": {**hands, "decision": hand_decision},
         "derivatives": derivatives,
         "future_clamp": clamp,
         "source_echo": resampling,
@@ -527,11 +623,23 @@ def load_manifest(pilot_dir: Path) -> dict[str, Any]:
 
 
 def latest_pilot_dir(processed_root: Path, pilot_name: str) -> Path:
+    """Newest run of a pilot that actually carries a review file.
+
+    Ordering by timestamp alone is fragile: any later run that died before
+    ``human_review.json`` was written (an aborted bulk episode, a crash) becomes
+    "the latest" and shadows the real pilot, which turns the review gate into a
+    confusing "status is 'missing'" refusal.  Only runs that produced a review
+    file are candidates; if none has one, fall back to the newest run so the
+    error still names a real directory.
+    """
     root = Path(processed_root) / "pilots" / pilot_name
+    if not root.is_dir():
+        raise FileNotFoundError(f"no pilot outputs under {root}")
     candidates = sorted(path for path in root.iterdir() if path.is_dir())
     if not candidates:
         raise FileNotFoundError(f"no pilot outputs under {root}")
-    return candidates[-1]
+    reviewed = [path for path in candidates if (path / "human_review.json").is_file()]
+    return (reviewed or candidates)[-1]
 
 
 def review_status(pilot_dir: Path) -> str:

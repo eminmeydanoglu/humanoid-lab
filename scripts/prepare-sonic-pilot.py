@@ -12,6 +12,7 @@ import argparse
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +37,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pilot", choices=PILOT_KINDS, required=True)
     parser.add_argument("--episode", type=int, help="override the episode index from the pilot config")
+    parser.add_argument("--dataset", help="Unitree allowlisted collection override for distributed QC")
     parser.add_argument("--config", type=Path, default=ROOT / "configs/datasets/sonic/pilots.json")
     parser.add_argument("--limits", type=Path, default=ROOT / "configs/datasets/sonic/g1_joint_limits.json")
     parser.add_argument("--raw-root", type=Path, default=DEFAULT_RAW_ROOT)
@@ -66,6 +68,15 @@ def main() -> int:
         episode_index=args.episode,
         assume_unitree_mujoco_body_order=args.assume_unitree_mujoco_body_order,
     )
+    if args.dataset:
+        if args.pilot != "unitree":
+            parser.error("--dataset is only supported for the Unitree QC pilot")
+        declared = PilotSpec.bulk_datasets(args.config, "unitree")
+        if args.dataset not in declared and f"unitree-g1-dex3/{args.dataset}" not in declared:
+            parser.error(f"Unitree dataset is not allowlisted: {args.dataset}")
+        relative = args.dataset if "/" in args.dataset else f"unitree-g1-dex3/{args.dataset}"
+        spec = replace(spec, dataset=args.raw_root / relative,
+                       pilot_name=f"unitree_{Path(args.dataset).name}_ep{spec.episode_index:03d}")
     try:
         manifest = prepare_pilot(
             spec,

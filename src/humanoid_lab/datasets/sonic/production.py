@@ -122,6 +122,12 @@ def encode_prepared_episode(
         "motion_token": tokens,
         "frame_index": np.arange(len(tokens), dtype=np.int64),
         "timestamp": timestamps,
+        # A G1 token describes a reference window starting at this row.  The
+        # upstream runtime clamps out-of-range future samples to the last
+        # motion frame, but those tail tokens are poor VLA supervision: their
+        # intent gradually changes into an artificial hold.  Keep them for
+        # exact SONIC replay, and explicitly mask them out for training.
+        "training_valid_mask": clamp == 0.0,
     }
     if action is not None:
         arrays.update({"left_hand_joints": left, "right_hand_joints": right, "action": action})
@@ -157,6 +163,12 @@ def encode_prepared_episode(
         "finite": bool(np.isfinite(tokens).all() and (action is None or np.isfinite(action).all())),
         "repeatability": {"probes": probes, "bitwise_identical": bool(repeatable)},
         "future_clamp_fraction": {"mean": float(clamp.mean()), "max": float(clamp.max())},
+        "training_labels": {
+            "semantics": "observation_t -> encode(reference window starting at t)",
+            "valid_rule": "future_clamp_fraction == 0; clamped tail is replay-only",
+            "valid_frames": int(np.count_nonzero(clamp == 0.0)),
+            "excluded_tail_frames": int(np.count_nonzero(clamp != 0.0)),
+        },
         "token_norm": {
             "p50": float(np.percentile(norms, 50)),
             "p99": float(np.percentile(norms, 99)),

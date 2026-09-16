@@ -14,7 +14,7 @@ cd "$(dirname "$0")/.."
 
 PILOT_DIR="${1:?usage: run-sonic-pilot-sim.sh <pilot_dir> [--duration SECONDS] [--no-direct] [--no-kinematic]}"
 shift
-DURATION=60
+DURATION=0
 RUN_DIRECT=1
 RUN_KINEMATIC=1
 while [ "$#" -gt 0 ]; do
@@ -28,6 +28,44 @@ done
 [ -d "$PILOT_DIR" ] || { echo "error: pilot directory not found: $PILOT_DIR" >&2; exit 2; }
 [ -f "$PILOT_DIR/reference.npz" ] || { echo "error: $PILOT_DIR/reference.npz missing" >&2; exit 2; }
 [ -f "$PILOT_DIR/action_tokens.npz" ] || { echo "error: $PILOT_DIR/action_tokens.npz missing" >&2; exit 2; }
+[ -f "$PILOT_DIR/encoder_manifest.json" ] || { echo "error: $PILOT_DIR/encoder_manifest.json missing" >&2; exit 2; }
+
+# A 64D vector has meaning only inside one encoder/decoder family. Refuse to
+# replay tokens when the controller's v1.1 bundle differs from the encoder and
+# observation config recorded at conversion time.
+SONIC_BUNDLE="$PWD/data/models/sonic/sonic_v1_1"
+python3 - "$PILOT_DIR/encoder_manifest.json" "$SONIC_BUNDLE" <<'PY'
+import hashlib, json, pathlib, sys
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+bundle = pathlib.Path(sys.argv[2])
+def digest(name):
+    return hashlib.sha256((bundle / name).read_bytes()).hexdigest()
+expected = {
+    "model_encoder.onnx": manifest["encoder"]["sha256"],
+    "observation_config.yaml": manifest["observation_config_sha256"],
+    "model_decoder.onnx": "34bae8570d4a4421a5391a5c2befd745d4a02d182ec539e5f9da44c091c67509",
+}
+for name, wanted in expected.items():
+    actual = digest(name)
+    if actual != wanted:
+        raise SystemExit(f"SONIC v1.1 bundle mismatch: {name} {actual} != {wanted}")
+print("[pilot-sim] SONIC v1.1 encoder/config/decoder family verified")
+PY
+
+# --duration belongs to the whole simulator process, including model startup.
+# A short fixed 60 s budget cut the 822-frame Dex3 replay at frame 481.  Give
+# startup its own budget and size the run to the episode; caller duration is a
+# minimum, never permission to produce an incomplete review artifact.
+episode_frames="$(python3 - "$PILOT_DIR/run_manifest.json" <<'PY'
+import json, sys
+print(int(json.load(open(sys.argv[1], encoding="utf-8"))["frames"]))
+PY
+)"
+minimum_duration="$((90 + 2 * ((episode_frames + 49) / 50)))"
+if [ "$DURATION" -lt "$minimum_duration" ]; then
+  DURATION="$minimum_duration"
+fi
+echo "[pilot-sim] wall-time duration budget: ${DURATION}s (${episode_frames} token frames)"
 
 # dev.sh expects container paths; the caller passes the host path it sees.
 container_path() {
@@ -83,6 +121,7 @@ echo "[pilot-sim] starting Isaac G1 with offline-latent SONIC control"
 ./dev.sh isaac-g1-sonic dex3 --headless \
   --record-video "$PILOT_CONTAINER/sonic_latent_free.mp4" \
   --tracking-output "$PILOT_CONTAINER/sonic_latent_tracking.parquet" \
+  --replay-clock-output "$PILOT_CONTAINER/sonic_sim_clock.txt" \
   --metrics-output "$PILOT_CONTAINER/sonic_latent_metrics.json" \
   --duration "$DURATION" >"$LOG_DIR/$NAME-sonic-latent.log" 2>&1 &
 sim_pid=$!
@@ -120,7 +159,9 @@ replay_status=0
 docker exec humanoid-lab-dev bash -lc '
   source /opt/humanoid-lab/entrypoint.sh && use-sonic-sim &&
   cd /workspace/humanoid-lab && PYTHONPATH=src exec python3 scripts/replay-sonic-latent.py \
-    "'"$PILOT_CONTAINER"'/action_tokens.npz" --endpoint tcp://*:5556' || replay_status=$?
+    "'"$PILOT_CONTAINER"'/action_tokens.npz" --endpoint tcp://*:5556 \
+    --timeline-output "'"$PILOT_CONTAINER"'/sonic_latent_stream.npz" \
+    --sim-clock "'"$PILOT_CONTAINER"'/sonic_sim_clock.txt"' || replay_status=$?
 if [ "$replay_status" -ne 0 ]; then
   echo "[pilot-sim] latent replay failed with exit $replay_status" >&2
   kill "$sim_pid" 2>/dev/null || true
@@ -128,26 +169,47 @@ if [ "$replay_status" -ne 0 ]; then
   exit "$replay_status"
 fi
 
+delivery_status=0
+python3 scripts/check-sonic-token-delivery.py \
+  --log "$LOG_DIR/$NAME-controller.log" \
+  --expected-frames "$episode_frames" \
+  --output "$PILOT_HOST/sonic_transport_coverage.json" || delivery_status=$?
+
 if ! wait "$sim_pid"; then
   echo "[pilot-sim] warning: free SONIC run exited non-zero (kept as evidence)"
+fi
+if [ "$delivery_status" -ne 0 ]; then
+  echo "[pilot-sim] error: controller did not receive every latent frame" >&2
+  exit "$delivery_status"
 fi
 
 # The simulator video includes model startup and the supported IDLE takeover.
 # Keep that full artifact, and create a review clip beginning at support release
 # so time zero aligns with the source/reference motion rather than startup.
-if [ -f "$PILOT_HOST/sonic_latent_metrics.json" ] && [ -f "$PILOT_HOST/sonic_latent_free.mp4" ]; then
-  release_s="$(python3 - "$PILOT_HOST/sonic_latent_metrics.json" <<'PY'
-import json, sys
-payload = json.load(open(sys.argv[1], encoding="utf-8"))
-tick = payload.get("controller", {}).get("support", {}).get("release_tick")
-print("" if tick is None else float(tick) * 0.005)
-PY
-)"
-  source_duration="$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$PILOT_HOST/source.mp4")"
-  if [ -n "$release_s" ] && [ -n "$source_duration" ]; then
-    ffmpeg -hide_banner -loglevel error -y -ss "$release_s" -i "$PILOT_HOST/sonic_latent_free.mp4" \
-      -t "$source_duration" -an -c:v libx264 -pix_fmt yuv420p -g 25 -keyint_min 25 \
-      -sc_threshold 0 -movflags +faststart "$PILOT_HOST/sonic_latent_motion.mp4"
+docker exec humanoid-lab-dev bash -lc '
+  source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic &&
+  cd /workspace/humanoid-lab && PYTHONPATH=src exec python3 scripts/evaluate-sonic-latent-replay.py \
+    "'"$PILOT_CONTAINER"'"'
+if [ "$(jq -r '.coverage.full_motion' "$PILOT_HOST/sonic_fidelity.json")" != true ]; then
+  echo "[pilot-sim] error: incomplete latent replay; refusing to make a review clip" >&2
+  exit 1
+fi
+if [ -f "$PILOT_HOST/sonic_latent_free.mp4" ]; then
+  clip_start="$(jq -r '.coverage.clip_start_sim_s' "$PILOT_HOST/sonic_fidelity.json")"
+  clip_end="$(jq -r '.coverage.clip_end_sim_s' "$PILOT_HOST/sonic_fidelity.json")"
+  clip_duration="$(awk -v a="$clip_start" -v b="$clip_end" 'BEGIN {print b-a}')"
+  ffmpeg -hide_banner -loglevel error -y -ss "$clip_start" -i "$PILOT_HOST/sonic_latent_free.mp4" \
+    -t "$clip_duration" -an -c:v libx264 -pix_fmt yuv420p -g 25 -keyint_min 25 \
+    -sc_threshold 0 -movflags +faststart "$PILOT_HOST/sonic_latent_motion.mp4"
+  recorded_duration="$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$PILOT_HOST/sonic_latent_motion.mp4")"
+  if ! awk -v got="$recorded_duration" -v expected="$clip_duration" 'BEGIN {exit !(got + 0.12 >= expected)}'; then
+    echo "[pilot-sim] error: review clip is short (${recorded_duration}s vs ${clip_duration}s expected)" >&2
+    exit 1
   fi
 fi
+python3 scripts/write-sonic-pilot-page.py --pilot-dir "$PILOT_HOST" --output "$PILOT_HOST/review.html"
 echo "[pilot-sim] done: $PILOT_HOST"
+if [ "$(jq -r '.result' "$PILOT_HOST/sonic_fidelity.json")" != PASS ]; then
+  echo "[pilot-sim] A/B/C fidelity gate FAILED; recordings and metrics are retained for review" >&2
+  exit 1
+fi

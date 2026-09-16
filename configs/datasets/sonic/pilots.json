@@ -2,7 +2,23 @@
   "unitree": {
     "dataset": "unitree-g1-dex3/G1_Dex3_ObjectPlacement_Dataset",
     "episode": 74,
-    "note": "arm-only collection: lower body is synthetic static standing, arms are recorded absolute actions"
+    "note": "arm-only collection: lower body is synthetic static standing, arms are recorded absolute actions",
+    "bulk_datasets": [
+      "unitree-g1-dex3/G1_Dex3_BlockStacking_Dataset",
+      "unitree-g1-dex3/G1_Dex3_CameraPackaging_Dataset",
+      "unitree-g1-dex3/G1_Dex3_GraspSquare_Dataset",
+      "unitree-g1-dex3/G1_Dex3_ObjectPlacement_Dataset",
+      "unitree-g1-dex3/G1_Dex3_PickApple_Dataset",
+      "unitree-g1-dex3/G1_Dex3_PickBottle_Dataset",
+      "unitree-g1-dex3/G1_Dex3_PickCharger_Dataset",
+      "unitree-g1-dex3/G1_Dex3_PickDoll_Dataset",
+      "unitree-g1-dex3/G1_Dex3_PickGum_Dataset",
+      "unitree-g1-dex3/G1_Dex3_PickSnack_Dataset",
+      "unitree-g1-dex3/G1_Dex3_PickTissue_Dataset",
+      "unitree-g1-dex3/G1_Dex3_Pouring_Dataset",
+      "unitree-g1-dex3/G1_Dex3_ToastedBread_Dataset"
+    ],
+    "note_bulk": "all 13 official G1 Dex3 collections; 3152 episodes total"
   },
   "fruits": {
     "dataset": "nvidia-g1-fruits-1k/g1-pick-apple",
@@ -14,6 +30,9 @@
   "apple": {
     "dataset": "nvidia-gr00t-n1.7-apple-to-plate",
     "episode": 179,
-    "note": "body-latent pilot under review; recorded state is clean, normalized hand action remains unresolved"
+    "note": "whole-body 64D pilot; measured observation.state hands are diagnostic only, not action labels",
+    "hands_from_state": false,
+    "bulk_conversion_status": "excluded",
+    "bulk_conversion_reason": "Body labels come from action_t but the only radian hand values are observation.state_t. Their command mapping and action-to-state latency are unverified, so a mixed 78D label is not valid VLA supervision."
   }
 }

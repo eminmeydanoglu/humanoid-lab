@@ -257,11 +257,16 @@ class DepthWindowTests(unittest.TestCase):
         self.assertIn('dest="depth_window"', block)
         self.assertIn('action="store_false"', block)
 
-    def test_it_only_opens_with_a_gui(self):
+    def test_it_only_opens_with_a_displayed_ui(self):
         creation = [line for line in self.src.splitlines() if "DepthWindow(env)" in line]
         self.assertEqual(len(creation), 1, "the depth window is created in more than one place")
-        self.assertIn("args_cli.headless", creation[0])
+        self.assertIn("ui_displayed", creation[0])
         self.assertIn("args_cli.depth_window", creation[0])
+        # A streamed run is headless on the host yet still draws the UI, so the
+        # answer is taken before AppLauncher rewrites the flag.
+        self.assertIn("ui_displayed = not args_cli.headless", self.src)
+        before_launcher = self.src.split("app_launcher = AppLauncher(", 1)[0]
+        self.assertIn("ui_displayed = not args_cli.headless", before_launcher)
 
     def test_it_shows_the_sensor_frame_through_the_provider_kit_ships_with(self):
         self.assertIn('camera.data.output["distance_to_image_plane"]', self.src)

@@ -21,6 +21,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--record-video", type=Path, help="record a fixed external validation camera to MP4")
     parser.add_argument("--metrics-output", type=Path, help="write the final run summary as JSON")
     parser.add_argument("--tracking-output", type=Path, help="write 50 Hz body/hand command tracking as Parquet")
+    parser.add_argument("--replay-clock-output", type=Path, help="publish simulation time for a paced offline latent replay")
     parser.add_argument("--trajectory-reference", type=Path,
                         help="canonical NPZ used by the fixed-base direct trajectory provider")
     parser.add_argument("--kinematic-reference", type=Path,
@@ -44,6 +45,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args(argv)
     args.enable_cameras = True
+    # Whether this run draws the application's UI at all -- in a local window or
+    # streamed to a WebRTC client.  AppLauncher forces `headless` on a
+    # livestreaming run, so the answer has to be taken from the caller's flags
+    # before the launcher rewrites them.
+    args.ui_displayed = not args.headless
     # AppLauncher owns --device; only an explicit flag overrides the profile default.
     raw = list(sys.argv[1:] if argv is None else argv)
     args.device_explicit = any(item == "--device" or item.startswith("--device=") for item in raw)
@@ -73,7 +79,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             profile,
             simulation_app,
             duration=args.duration,
-            show_ui=not args.headless,
+            show_ui=args.ui_displayed,
             show_head_camera=args.head_camera_window,
             test_mode=args.test,
             controller_provider=args.controller,
@@ -81,6 +87,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             trajectory_reference=args.trajectory_reference,
             kinematic_reference=args.kinematic_reference,
             kinematic_label=args.kinematic_label,
+            replay_clock_output=args.replay_clock_output,
         )
         summary = service.run()
         if args.tracking_output:

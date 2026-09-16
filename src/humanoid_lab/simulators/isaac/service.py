@@ -78,6 +78,7 @@ class SimulatorService:
         trajectory_reference: Any | None = None,
         kinematic_reference: Any | None = None,
         kinematic_label: str | None = None,
+        replay_clock_output: Path | None = None,
     ) -> None:
         self.profile = profile
         self.app = simulation_app
@@ -90,6 +91,7 @@ class SimulatorService:
         self.trajectory_reference = trajectory_reference
         self.kinematic_reference = kinematic_reference
         self.kinematic_label = kinematic_label or "kinematic"
+        self.replay_clock_output = replay_clock_output
         self.state = TimelineState.STARTING
         self.tick = 0
         self.episode_id = 0
@@ -494,6 +496,9 @@ class SimulatorService:
         row: dict[str, Any] = {
             "tick": self.tick,
             "sim_s": self.tick * self.profile.physics_dt,
+            # Shared clock with the latent publisher.  Simulation time alone
+            # cannot align a wall-clock token stream when Isaac runs below 1x.
+            "wall_time_ns": time.time_ns(),
             "support_active": False,
             "body_target": list(kinematic["body_target_dds"][frame]),
             "body_measured": body_measured,
@@ -1360,11 +1365,23 @@ class SimulatorService:
         row: dict[str, Any] = {
             "tick": self.tick,
             "sim_s": self.tick * self.profile.physics_dt,
+            "wall_time_ns": time.time_ns(),
             "support_active": self._support_active and self._support_release_tick is None,
             "body_target": list(command.body.q),
+            "body_velocity_target": list(command.body.dq),
+            "body_feedforward_torque": list(command.body.tau),
+            "body_kp": list(command.body.kp),
+            "body_kd": list(command.body.kd),
+            "body_applied_torque": [
+                float(value) for value in self._effort_target[0, list(self._body_layout.indices)].tolist()
+            ],
             "body_measured": [
                 float(value)
                 for value in self._robot.data.joint_pos[0].index_select(0, self._body_index).tolist()
+            ],
+            "body_measured_velocity": [
+                float(value)
+                for value in self._robot.data.joint_vel[0].index_select(0, self._body_index).tolist()
             ],
             "root_position": [float(value) for value in self._robot.data.root_pos_w[0].tolist()],
             "root_quaternion_wxyz": [
@@ -1377,7 +1394,17 @@ class SimulatorService:
         }
         for side, hand_command in (("left", command.left_hand), ("right", command.right_hand)):
             row[f"{side}_hand_target"] = list(hand_command.q) if hand_command is not None else None
+            row[f"{side}_hand_velocity_target"] = list(hand_command.dq) if hand_command is not None else None
+            row[f"{side}_hand_feedforward_torque"] = list(hand_command.tau) if hand_command is not None else None
+            row[f"{side}_hand_kp"] = list(hand_command.kp) if hand_command is not None else None
+            row[f"{side}_hand_kd"] = list(hand_command.kd) if hand_command is not None else None
+            layout = self._hand_layouts[side]
+            row[f"{side}_hand_applied_torque"] = (
+                [float(value) for value in self._effort_target[0, list(layout.indices)].tolist()]
+                if hand_command is not None and layout is not None else None
+            )
             row[f"{side}_hand_measured"] = list(self._hand_positions(side))
+            row[f"{side}_hand_measured_velocity"] = list(self._hand_velocities(side))
         self._tracking_rows.append(row)
 
     def tracking_rows(self) -> list[dict[str, Any]]:
@@ -1597,6 +1624,9 @@ class SimulatorService:
         self._flush_effort()
         self._sim.step(render=False)
         self.tick += 1
+        if self.replay_clock_output is not None and self.tick % 4 == 0:
+            self.replay_clock_output.parent.mkdir(parents=True, exist_ok=True)
+            self.replay_clock_output.write_text(f"{self.tick * self.profile.physics_dt:.6f}\n", encoding="ascii")
         render_interval = (
             self._kinematic["ticks_per_frame"] if self._kinematic is not None else self.profile.render_interval
         )
