@@ -320,6 +320,9 @@ run_unitree_sim() { # remaining args belong to sim_main.py
   docker exec -e DISPLAY="$DISPLAY" "$container_id" bash -lc '
     source /opt/humanoid-lab/entrypoint.sh
     use-unitree-sim
+    # sim_main.py logs its loop statistics with plain print(); keep stdout
+    # unbuffered so they stream instead of being lost when the run is stopped.
+    export PYTHONUNBUFFERED=1
     cd /opt/src/unitree-sim
     pidfile=$1
     statusfile=$2
