@@ -18,6 +18,10 @@
       "unitree-g1-dex3/G1_Dex3_Pouring_Dataset",
       "unitree-g1-dex3/G1_Dex3_ToastedBread_Dataset"
     ],
+    "bulk_excluded_episodes": {
+      "unitree-g1-dex3/G1_Dex3_ObjectPlacement_Dataset": [0]
+    },
+    "bulk_exclusion_reason": "ObjectPlacement ep 0 is the corpus minimum at 49 frames (1.6 s at 30 Hz) and fails conversion with `ValueError: need at least one array to stack`; excluded so the corpus-wide sweep completes. Re-include only together with a root-cause fix.",
     "note_bulk": "all 13 official G1 Dex3 collections; 3152 episodes total"
   },
   "fruits": {

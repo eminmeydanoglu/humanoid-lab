@@ -84,12 +84,38 @@ def parse_range(text: str) -> tuple[int, int]:
     return start, stop
 
 
+def select_episodes(total_episodes: int, *, episodes: tuple[int, int] | None, all_episodes: bool,
+                    exclude: list[int]) -> tuple[list[int], list[int]]:
+    """Return the ordered episode selection and the exclusions it honours.
+
+    An exclusion outside the collection is a configuration error, not a silent
+    no-op, so a misspelled index cannot pass as "the corpus is complete".
+    """
+    if all_episodes:
+        base = list(range(total_episodes))
+    else:
+        start, stop = episodes
+        if stop > total_episodes:
+            raise SystemExit(f"episode range ends at {stop}, dataset has {total_episodes}")
+        base = list(range(start, stop))
+    excluded = sorted({int(index) for index in exclude})
+    outside = [index for index in excluded if not 0 <= index < total_episodes]
+    if outside:
+        raise SystemExit(f"excluded episodes outside 0..{total_episodes - 1}: {outside}")
+    inside = set(base)
+    excluded_in_selection = [index for index in excluded if index in inside]
+    dropped = set(excluded_in_selection)
+    return [index for index in base if index not in dropped], excluded_in_selection
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True, help="Unitree collection directory name")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--episodes", type=parse_range)
     group.add_argument("--all-episodes", action="store_true")
+    parser.add_argument("--exclude-episode", type=int, action="append", default=[], metavar="INDEX",
+                        help="drop this source episode from the selection; recorded in the summary")
     parser.add_argument("--raw-root", type=Path, default=Path("/data/datasets/first_tur_ham/unitree-g1-dex3"))
     parser.add_argument("--output-root", type=Path, default=Path("/data/datasets/unitree-sonic-v1.1-78d"))
     parser.add_argument("--model-dir", type=Path, default=Path("/data/models/sonic-isaac/sonic_v1_1"))
@@ -106,13 +132,12 @@ def main() -> int:
     args.output_root.mkdir(parents=True, exist_ok=True)
     metadata = validate_metadata(dataset)
     total_episodes = int(metadata["total_episodes"])
-    if args.all_episodes:
-        selection = range(total_episodes)
-    else:
-        start, stop = args.episodes
-        if stop > total_episodes:
-            raise SystemExit(f"episode range ends at {stop}, dataset has {total_episodes}")
-        selection = range(start, stop)
+    selection, excluded_episodes = select_episodes(
+        total_episodes, episodes=args.episodes, all_episodes=args.all_episodes,
+        exclude=args.exclude_episode,
+    )
+    if not selection:
+        raise SystemExit("no episodes selected after exclusions")
     if args.qc_mode:
         if args.all_episodes or len(selection) > 5:
             raise SystemExit("--qc-mode requires an explicit selection of at most five episodes")
@@ -225,8 +250,8 @@ def main() -> int:
                "failed": len(failures), "total_frames": total_frames, "valid_training_frames": total_valid,
                "excluded_tail_frames": total_frames - total_valid, "output_bytes": total_bytes, "elapsed_s": elapsed,
                "throughput_frames_s": total_frames / elapsed if elapsed else None, "episodes": converted,
-               "skipped_episodes": skipped, "failures": failures, "converter": converter,
-               "encoder_sha256": runner.info.sha256, "observation_config_sha256": config_sha}
+               "skipped_episodes": skipped, "failures": failures, "excluded_episodes": excluded_episodes,
+               "converter": converter, "encoder_sha256": runner.info.sha256, "observation_config_sha256": config_sha}
     summary_path = args.summary or args.output_root / args.dataset / "conversion_summary.json"
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")

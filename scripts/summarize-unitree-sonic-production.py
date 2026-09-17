@@ -15,10 +15,12 @@ report = {key: sum(float(item[key]) for item in summaries) for key in keys}
 for key in keys[:-2]:
     report[key] = int(report[key])
 report["collections"] = len(summaries)
+report["episodes_on_disk"] = report["converted"] + report["skipped"]
+report["excluded_episodes"] = sum(len(item.get("excluded_episodes") or []) for item in summaries)
 report["throughput_frames_s"] = report["total_frames"] / report["elapsed_s"] if report["elapsed_s"] else None
 report["encoder_sha256"] = summaries[0]["encoder_sha256"]
 report["observation_config_sha256"] = summaries[0]["observation_config_sha256"]
-report["status"] = "PASS" if report["failed"] == 0 else "FAIL"
+report["status"] = "PASS" if report["failed"] == 0 and report["episodes_on_disk"] > 0 else "FAIL"
 path = args.output_root / "conversion_summary.json"
 path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
 print(json.dumps(report, indent=2))
