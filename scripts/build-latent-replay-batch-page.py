@@ -113,12 +113,17 @@ def main() -> int:
     parser.add_argument("--batch-root", type=Path, required=True)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--title", default="SONIC latent → simülasyon toplu kontrol")
+    parser.add_argument("--only-complete", action="store_true",
+                        help="leave out runs whose replay has not produced its clip and fidelity report yet")
     args = parser.parse_args()
 
     batch_root = args.batch_root.resolve()
     output = (args.output or batch_root / "index.html").resolve()
     batch = read_json(batch_root / "batch_manifest.json")
     run_dirs = sorted(path for path in batch_root.glob("*/episode_*") if path.is_dir())
+    if args.only_complete:
+        run_dirs = [path for path in run_dirs
+                    if (path / "sonic_fidelity.json").is_file() and (path / "sonic_latent_motion.mp4").is_file()]
     if not run_dirs:
         raise SystemExit(f"no episode directories under {batch_root}")
 
