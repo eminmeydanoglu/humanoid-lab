@@ -144,10 +144,12 @@ Unitree left Dex3 action, and `action[:, 71:78]` the verified right action.
 the chunk is valid; no clamped-tail target can enter indirectly.
 
 The sweep honours the `unitree.bulk_excluded_episodes` map in
-`configs/datasets/sonic/pilots.json`: those episodes are dropped from the
-selection and recorded per collection as `excluded_episodes`. A collection that
-still fails no longer aborts the sweep — every collection is attempted, the
-aggregate summary is written, and the run exits non-zero at the end.
+`configs/datasets/sonic/pilots.json` (collection name → `episodes` + `reason`):
+those episodes are dropped from the selection and recorded per collection as
+`excluded_episodes`, and a key that names no declared collection stops the sweep
+before anything is converted. A collection that still fails no longer aborts the
+sweep — every collection is attempted, the aggregate summary is written, and the
+run exits non-zero at the end.
 
 The converter is sequential by collection to keep ONNX/GPU memory deterministic.
 Within each collection it reuses one encoder session, caches LeRobot episode

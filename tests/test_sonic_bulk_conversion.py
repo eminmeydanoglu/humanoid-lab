@@ -48,10 +48,11 @@ class DeclaredExclusionsTest(unittest.TestCase):
         entry = json.loads(CONFIG.read_text())["unitree"]
         declared = set(entry["bulk_datasets"])
         excluded = entry.get("bulk_excluded_episodes", {})
-        for name, episodes in excluded.items():
+        for name, item in excluded.items():
             with self.subTest(dataset=name):
                 self.assertIn(name, declared)
+                self.assertIsInstance(item, dict)
+                episodes = item.get("episodes")
                 self.assertTrue(episodes, "an empty exclusion list is noise; drop the key instead")
                 self.assertTrue(all(isinstance(index, int) and index >= 0 for index in episodes))
-        if excluded:
-            self.assertTrue(str(entry.get("bulk_exclusion_reason", "")).strip())
+                self.assertTrue(str(item.get("reason", "")).strip())

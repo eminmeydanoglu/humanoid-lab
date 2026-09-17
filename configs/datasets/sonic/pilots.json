@@ -19,9 +19,15 @@
       "unitree-g1-dex3/G1_Dex3_ToastedBread_Dataset"
     ],
     "bulk_excluded_episodes": {
-      "unitree-g1-dex3/G1_Dex3_ObjectPlacement_Dataset": [0]
+      "unitree-g1-dex3/G1_Dex3_ObjectPlacement_Dataset": {
+        "episodes": [0],
+        "reason": "ep 0 is the corpus minimum at 49 frames (1.6 s at 30 Hz) and fails conversion with `ValueError: need at least one array to stack`; excluded so the corpus-wide sweep completes. Re-include only together with a root-cause fix."
+      },
+      "unitree-g1-dex3/G1_Dex3_ToastedBread_Dataset": {
+        "episodes": [396],
+        "reason": "the upstream episode metadata row carries the global offsets 335446..336051 and names data/file_index 0 while the episode's 605 rows are the first 605 rows of file-001, and every other row uses file-relative offsets; the declared location is unreachable, so the loader refuses the episode. Re-include together with a loader that locates rows by episode_index."
+      }
     },
-    "bulk_exclusion_reason": "ObjectPlacement ep 0 is the corpus minimum at 49 frames (1.6 s at 30 Hz) and fails conversion with `ValueError: need at least one array to stack`; excluded so the corpus-wide sweep completes. Re-include only together with a root-cause fix.",
     "note_bulk": "all 13 official G1 Dex3 collections; 3152 episodes total"
   },
   "fruits": {
