@@ -402,6 +402,14 @@ case "${1:-}" in
     up_once
     run_unitree_sim "${@:2}"
     ;;
+  unitree-cam)
+    # Plain-HTTP MJPEG viewer for the live Isaac Sim cameras: reads the shared
+    # memory the running sim writes and re-serves it, so any browser can watch
+    # without WebRTC/ICE/TLS. Needs a running ./dev.sh unitree-sim instance.
+    up_once
+    DC exec -d dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-unitree-sim && exec python /workspace/humanoid-lab/scripts/unitree-cam-viewer.py --port 8099'
+    echo "unitree camera viewer: http://<host>:8099/  (host Tailscale IP: $(hostname -I | awk '{print $2}'))"
+    ;;
   isaac-g1)
     profile="${2:-}"
     case "$profile" in
@@ -593,7 +601,7 @@ case "${1:-}" in
     exit 2
     ;;
   *)
-    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|unitree-sim [sim_main args]|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-direct-reference dex3|isaac-g1-sonic-fixed-base dex3|isaac-g1-sonic {dex3|inspire-ftp}|sonic-controller|sonic-dataset-validate|doctor|smoke|groot-finetune-smoke|psi0-smoke|sync|fetch-models|fetch-unitree-sim-assets|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
+    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|unitree-sim [sim_main args]|unitree-cam|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-direct-reference dex3|isaac-g1-sonic-fixed-base dex3|isaac-g1-sonic {dex3|inspire-ftp}|sonic-controller|sonic-dataset-validate|doctor|smoke|groot-finetune-smoke|psi0-smoke|sync|fetch-models|fetch-unitree-sim-assets|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
     exit 2
     ;;
 esac
