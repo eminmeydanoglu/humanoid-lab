@@ -75,6 +75,7 @@ class SimulatorService:
         controller_provider: str | None = None,
         record_video: Any | None = None,
         trajectory_reference: Any | None = None,
+        camera_zmq_port: int | None = None,
     ) -> None:
         self.profile = profile
         self.app = simulation_app
@@ -85,6 +86,8 @@ class SimulatorService:
         self.controller_provider = controller_provider
         self.record_video = record_video
         self.trajectory_reference = trajectory_reference
+        self.camera_zmq_port = camera_zmq_port
+        self._camera_publisher: Any | None = None
         self.state = TimelineState.STARTING
         self.tick = 0
         self.episode_id = 0
@@ -204,6 +207,11 @@ class SimulatorService:
         )
         print('{"event":"isaac_g1_start","stage":"interactive_scene"}', flush=True)
         self._scene = InteractiveScene(self._make_scene_cfg())
+        if self.camera_zmq_port is not None:
+            from .camera_stream import SonicCameraPublisher
+
+            self._camera_publisher = SonicCameraPublisher(self.camera_zmq_port)
+            print(f"[isaac-g1] SONIC ego_view camera: tcp://*:{self.camera_zmq_port}", flush=True)
         # Mirror DirectRLEnv: rendering is only needed for a GUI or an RTX sensor.
         self._is_rendering = self._sim.has_gui() or self._sim.has_rtx_sensors()
         print('{"event":"isaac_g1_start","stage":"free_base"}', flush=True)
@@ -373,7 +381,7 @@ class SimulatorService:
 
     def _make_scene_cfg(self) -> Any:
         import isaaclab.sim as sim_utils
-        from isaaclab.assets import ArticulationCfg, AssetBaseCfg
+        from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
         from isaaclab.scene import InteractiveSceneCfg
         from isaaclab.sensors import CameraCfg
         from isaaclab.utils import configclass
@@ -397,14 +405,67 @@ class SimulatorService:
         robot_cfg.spawn.rigid_props.disable_gravity = robot_spec.fixed_base
         robot_cfg = robot_cfg.replace(
             prim_path="{ENV_REGEX_NS}/Robot",
-            init_state=robot_cfg.init_state.replace(pos=robot_spec.initial_position_m),
+            init_state=robot_cfg.init_state.replace(
+                pos=robot_spec.initial_position_m,
+                rot=robot_spec.initial_rotation_wxyz,
+            ),
         )
         camera = self.profile.camera
         camera_path = f"{{ENV_REGEX_NS}}/Robot/{camera.parent_link}/{camera.name}"
+        world_spec = self.profile.world
 
         @configclass
         class IsaacG1BaseSceneCfg(InteractiveSceneCfg):
-            ground = AssetBaseCfg(prim_path="/World/ground", spawn=sim_utils.GroundPlaneCfg())
+            ground = (
+                AssetBaseCfg(prim_path="/World/ground", spawn=sim_utils.GroundPlaneCfg())
+                if world_spec is None or world_spec.ground_plane
+                else None
+            )
+            if world_spec is not None:
+                environment = AssetBaseCfg(
+                    prim_path="{ENV_REGEX_NS}/Room",
+                    init_state=AssetBaseCfg.InitialStateCfg(
+                        pos=world_spec.environment_position_m,
+                        rot=world_spec.environment_rotation_wxyz,
+                    ),
+                    spawn=sim_utils.UsdFileCfg(usd_path=world_spec.environment_usd),
+                )
+                packing_table = AssetBaseCfg(
+                    prim_path="{ENV_REGEX_NS}/PackingTable",
+                    init_state=AssetBaseCfg.InitialStateCfg(
+                        pos=world_spec.table_position_m,
+                        rot=world_spec.table_rotation_wxyz,
+                    ),
+                    spawn=sim_utils.UsdFileCfg(
+                        usd_path=world_spec.table_usd,
+                        rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+                    ),
+                )
+                if world_spec.bottle_position_m is not None:
+                    bottle = RigidObjectCfg(
+                        prim_path="{ENV_REGEX_NS}/Bottle",
+                        init_state=RigidObjectCfg.InitialStateCfg(
+                            pos=world_spec.bottle_position_m,
+                            rot=(1.0, 0.0, 0.0, 0.0),
+                        ),
+                        spawn=sim_utils.CylinderCfg(
+                            radius=world_spec.bottle_radius_m,
+                            height=world_spec.bottle_height_m,
+                            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+                            mass_props=sim_utils.MassPropertiesCfg(mass=world_spec.bottle_mass_kg),
+                            collision_props=sim_utils.CollisionPropertiesCfg(),
+                            visual_material=sim_utils.PreviewSurfaceCfg(
+                                diffuse_color=(0.04, 0.18, 0.42), metallic=0.15, roughness=0.25
+                            ),
+                            physics_material=sim_utils.RigidBodyMaterialCfg(
+                                friction_combine_mode="max",
+                                restitution_combine_mode="min",
+                                static_friction=1.5,
+                                dynamic_friction=1.5,
+                                restitution=0.0,
+                            ),
+                        ),
+                    )
             dome_light = AssetBaseCfg(
                 prim_path="/World/DomeLight",
                 spawn=sim_utils.DomeLightCfg(intensity=1400.0, color=(0.82, 0.86, 0.92)),
@@ -452,7 +513,9 @@ class SimulatorService:
 
         scene_cfg = (
             IsaacG1CameraSceneCfg
-            if self.test_mode is not None or self.show_head_camera or self.record_video is not None
+            if self.test_mode is not None or self.show_head_camera
+            or self.record_video is not None
+            or self.camera_zmq_port is not None
             else IsaacG1BaseSceneCfg
         )
         return scene_cfg(num_envs=1, env_spacing=2.5, replicate_physics=False)
@@ -1256,6 +1319,10 @@ class SimulatorService:
         self._perf_step_seconds += time.perf_counter() - step_started
         if rendered and self.test_mode is not None:
             self._consume_head_camera_frame()
+        if rendered and self._camera_publisher is not None:
+            image = self._head_camera_rgb()
+            if image is not None:
+                self._camera_publisher.publish(image, time.time())
         if rendered and self.record_video is not None:
             self._record_video_frame()
         if self.test_mode is not None:
@@ -1357,6 +1424,8 @@ class SimulatorService:
             self.stop()
             if self._controller is not None:
                 self._controller.close()
+            if self._camera_publisher is not None:
+                self._camera_publisher.close()
             self._finish_video_recording()
         self._transition(TimelineState.STOPPED)
         summary = (

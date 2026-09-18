@@ -17,6 +17,9 @@ fi
 
 DC() { docker compose --env-file .env "$@"; }
 
+LIVESTREAM_ARGS=()
+LIVESTREAM_ENV=()
+
 require_x11_display() {
   local number="${DISPLAY#:}"
   number="${number%%.*}"
@@ -35,6 +38,39 @@ require_x11_display() {
   echo "error: X11 display $DISPLAY is unavailable; expected /tmp/.X11-unix/X$number" >&2
   echo "active sockets: ${sockets[*]:-none}" >&2
   exit 2
+}
+
+livestream_settings() {
+  local endpoint="${ISAAC_LIVESTREAM_ENDPOINT:-}"
+  if [ -z "$endpoint" ] && command -v tailscale >/dev/null 2>&1; then
+    endpoint="$(tailscale ip -4 2>/dev/null | head -n1 || true)"
+  fi
+  ISAAC_LIVESTREAM_ENDPOINT="$endpoint"
+  LIVESTREAM_ARGS=(--livestream 1)
+  LIVESTREAM_ENV=()
+  [ -z "$endpoint" ] || LIVESTREAM_ENV=(-e "PUBLIC_IP=$endpoint")
+}
+
+g1_mode_args() {
+  local gui=0 headless=0 arg
+  G1_ARGS=()
+  for arg in "$@"; do
+    case "$arg" in
+      --gui) gui=1 ;;
+      --headless) headless=1 ;;
+    esac
+  done
+  if [ "$gui" -eq 1 ] && [ "$headless" -eq 1 ]; then
+    echo "error: --gui cannot be combined with --headless" >&2
+    exit 2
+  fi
+  if [ "$gui" -eq 0 ] && [ "$headless" -eq 0 ]; then
+    livestream_settings
+    G1_ARGS=("${LIVESTREAM_ARGS[@]}")
+    echo "[isaac-g1] WebRTC livestream endpoint=${ISAAC_LIVESTREAM_ENDPOINT:-host} port=${ISAAC_LIVESTREAM_PORT:-49100}"
+  elif [ "$gui" -eq 1 ]; then
+    require_x11_display
+  fi
 }
 
 up_once() {
@@ -224,7 +260,7 @@ run_isaac_g1() { # $1 = profile path; remaining args belong to the runner
   # The Docker exec transport can report 1 when Kit needs the bounded os._exit
   # teardown, even though the process and the in-container wait both return 0.
   # The short-lived wrapper therefore records the authoritative child status.
-  docker exec -e DISPLAY="$DISPLAY" "$container_id" bash -lc '
+  docker exec -e DISPLAY="$DISPLAY" "${LIVESTREAM_ENV[@]}" "$container_id" bash -lc '
     source /opt/humanoid-lab/entrypoint.sh
     use-isaac-sonic
     # Avoid treating every repository or /tmp entry as a Kit extension.
@@ -385,11 +421,17 @@ case "${1:-}" in
       echo "run: ./scripts/install-isaac-webrtc-client.sh" >&2
       exit 2
     }
-    exec "$client_path"
+    [ -n "${DISPLAY:-}" ] || require_x11_display
+    exec "$client_path" --no-sandbox "${@:2}"
     ;;
   sonic-sim)  shell_env use-sonic-sim ;;
   groot)      shell_env use-groot ;;
   psi0)       shell_env use-psi0 ;;
+  sonic-camera-viewer)
+    up_once
+    DC exec -d dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-groot && export PYTHONPATH=/workspace/humanoid-lab/scripts:/opt/src/sonic:${PYTHONPATH:-} && exec python /workspace/humanoid-lab/scripts/sonic-camera-http.py --camera-host localhost --camera-port 5555 --http-port 8099'
+    echo "SONIC camera viewer: http://<msi_tail-host>:8099/"
+    ;;
   unitree-sim)
     # unitree_sim_isaaclab's sim_main.py runs from its project root and, without
     # --headless/--no_render, opens a GUI window (needs X11). Any other flags are
@@ -401,6 +443,19 @@ case "${1:-}" in
     [ "$headless" -eq 1 ] || require_x11_display
     up_once
     run_unitree_sim "${@:2}"
+    ;;
+  unitree-pickplace-redblock)
+    # Official Unitree PickPlace world; keep the SONIC/G1 runner untouched.
+    headless=0
+    for arg in "${@:2}"; do
+      case "$arg" in --headless|--no_render) headless=1 ;; esac
+    done
+    [ "$headless" -eq 1 ] || require_x11_display
+    up_once
+    run_unitree_sim \
+      --task Isaac-PickPlace-RedBlock-G129-Dex3-Joint \
+      --enable_dex3_dds --robot_type g129 --device cuda --enable_cameras \
+      "${@:2}"
     ;;
   unitree-cam)
     # Plain-HTTP MJPEG viewer for the live Isaac Sim cameras: reads the shared
@@ -472,10 +527,30 @@ case "${1:-}" in
     up_once
     run_isaac_g1 "$profile_file" "${@:3}"
     ;;
+  isaac-g1-sonic-table)
+    headless=0
+    for arg in "${@:2}"; do
+      [ "$arg" != "--headless" ] || headless=1
+    done
+    [ "$headless" -eq 1 ] || require_x11_display
+    up_once
+    run_isaac_g1 configs/profiles/isaac-g1-sonic-table-dex3.json "${@:2}"
+    ;;
+  isaac-g1-sonic-bottle)
+    g1_mode_args "${@:2}"
+    up_once
+    run_isaac_g1 configs/profiles/isaac-g1-sonic-bottle-dex3.json "${G1_ARGS[@]}" "${@:2}"
+    ;;
+  isaac-g1-sonic-redblock)
+    g1_mode_args "${@:2}"
+    up_once
+    run_isaac_g1 configs/profiles/isaac-g1-sonic-redblock-dex3.json "${G1_ARGS[@]}" "${@:2}"
+    ;;
   sonic-controller)
     # The official SONIC deployment in this terminal, exactly as the upstream
     # documentation runs it: raw keyboard on this TTY, planner loaded, `]` to
-    # start. This launcher owns the Isaac-targeted controller role: a new
+    # start. Isaac uses output type `all` so the binary sends both its ZMQ
+    # telemetry and the DDS low-command stream consumed by Isaac Lab. This launcher owns the Isaac-targeted controller role: a new
     # invocation replaces an older controller started through this same path,
     # without touching unmarked SONIC/MuJoCo deployments.
     # The deployment owns this terminal's stdin; every variable below expands
@@ -538,7 +613,35 @@ case "${1:-}" in
         --obs-config "$SONIC_MODELS_DIR/sonic_v1_1/observation_config.yaml" \
         --encoder-file "$SONIC_MODELS_DIR/sonic_v1_1/model_encoder.onnx" \
         --planner-file "$SONIC_PLANNER" \
-        --input-type "$1" --output-type zmq --disable-crc-check' sonic-controller "$sonic_input_type"
+        --input-type "$1" --output-type "${SONIC_OUTPUT_TYPE:-all}" --disable-crc-check' sonic-controller "$sonic_input_type"
+    ;;
+  sonic-stand)
+    # Terminal 1: SONIC owns the simulator-facing DDS loop and keeps the G1
+    # in its standing pose.  With zmq_manager it also accepts VLA actions on
+    # tcp://localhost:5556 when the second terminal is started.
+    up_once
+    exec "$0" sonic-controller zmq_manager
+    ;;
+  sonic-vla)
+    # Terminal 2: Isaac-GR00T VLA client.  It reads the SONIC camera/state
+    # streams and publishes latent actions to the already-running SONIC deploy.
+    # The PolicyServer/checkpoint is intentionally external and configurable.
+    up_once
+    DC exec dev bash -lc '
+      source /opt/humanoid-lab/entrypoint.sh
+      use-groot
+      export PYTHONPATH=/opt/src/sonic:/workspace/humanoid-lab/src${PYTHONPATH:+:$PYTHONPATH}
+      cd /opt/src/sonic
+      exec python gear_sonic/scripts/run_vla_inference.py "$@"
+    ' sonic-vla "${@:2}"
+    ;;
+  sonic-stand-stop)
+    up_once
+    DC exec -T dev bash -lc 'pkill -TERM -f "[g]1_deploy_onnx_ref.*--input-type zmq_manager" 2>/dev/null || true'
+    ;;
+  sonic-vla-stop)
+    up_once
+    DC exec -T dev bash -lc 'pkill -TERM -f "[r]un_vla_inference.py" 2>/dev/null || true'
     ;;
   doctor)
     ./doctor.sh
@@ -601,7 +704,7 @@ case "${1:-}" in
     exit 2
     ;;
   *)
-    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|unitree-sim [sim_main args]|unitree-cam|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-direct-reference dex3|isaac-g1-sonic-fixed-base dex3|isaac-g1-sonic {dex3|inspire-ftp}|sonic-controller|sonic-dataset-validate|doctor|smoke|groot-finetune-smoke|psi0-smoke|sync|fetch-models|fetch-unitree-sim-assets|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
+    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|sonic-camera-viewer|unitree-sim [sim_main args]|unitree-pickplace-redblock|unitree-cam|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-direct-reference dex3|isaac-g1-sonic-fixed-base dex3|isaac-g1-sonic {dex3|inspire-ftp}|isaac-g1-sonic-table|isaac-g1-sonic-bottle|isaac-g1-sonic-redblock|sonic-controller|sonic-stand|sonic-stand-stop|sonic-vla|sonic-vla-stop|sonic-dataset-validate|doctor|smoke|groot-finetune-smoke|psi0-smoke|sync|fetch-models|fetch-unitree-sim-assets|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
     exit 2
     ;;
 esac

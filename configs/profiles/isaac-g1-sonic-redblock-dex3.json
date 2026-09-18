@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "profile_id": "isaac-g1-29dof-dex3-sonic-unitree-redblock",
+  "robot": {
+    "name": "g1-29dof-dex3",
+    "body_dofs": 29,
+    "asset_kind": "usd",
+    "asset_reference": "/data/models/sonic-assets/g1_29dof_with_hand_rev_1_0.usd",
+    "asset_provenance": "pinned SONIC gear_sonic G1 rev 1.0 Dex3 asset (sha256 a7a2bab7), materialized into the data root",
+    "initial_position_m": [
+      -4.2,
+      -3.7,
+      0.792563
+    ],
+    "initial_rotation_wxyz": [0.70710678, 0.0, 0.0, -0.70710678],
+    "hand": {
+      "kind": "dex3",
+      "dofs": 14,
+      "behavior": "passive",
+      "joint_name_patterns": [
+        "_hand_thumb_",
+        "_hand_middle_",
+        "_hand_index_"
+      ]
+    }
+  },
+  "camera": {
+    "name": "head_camera",
+    "parent_link": "torso_link",
+    "resolution": [
+      640,
+      480
+    ],
+    "focal_length_mm": 15.1159925892,
+    "horizontal_aperture_mm": 20.955,
+    "position_m": [
+      0.0576235,
+      0.01753,
+      0.41987
+    ],
+    "rotation_wxyz": [
+      0.9149596678,
+      0.0,
+      0.4035452964,
+      0.0
+    ]
+  },
+  "world": {
+    "environment_usd": "/data/models/unitree-sim-assets/assets/objects/small_warehouse/small_warehouse_digital_twin.usd",
+    "environment_position_m": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "environment_rotation_wxyz": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "table_usd": "/data/models/unitree-sim-assets/assets/objects/table_with_yellowbox.usd",
+    "table_position_m": [
+      -4.3,
+      -4.2,
+      -0.2
+    ],
+    "table_rotation_wxyz": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "bottle": {
+      "position_m": [
+        -4.25,
+        -4.03,
+        0.84
+      ],
+      "radius_m": 0.03,
+      "height_m": 0.06,
+      "mass_kg": 1.0
+    },
+    "ground_plane": false
+  },
+  "controller": {
+    "provider": "sonic_dds",
+    "domain_id": 42,
+    "interface": "lo",
+    "torso_link": "torso_link",
+    "command_ttl_s": 0.25,
+    "hand_fallback": "passive",
+    "support_link": "pelvis",
+    "mass_alignment": "sonic_mujoco",
+    "joint_dynamics_alignment": "sonic_mujoco"
+  },
+  "simulation": {
+    "physics_dt": 0.005
+  },
+  "initial_pose": "sonic_standing",
+  "support": {
+    "kind": "pelvis_band",
+    "release": "controller_hold_then_motion",
+    "max_seconds": 120.0,
+    "point_m": [
+      -4.2,
+      -3.7,
+      1.0
+    ],
+    "linear_stiffness": 10000.0,
+    "linear_damping": 1000.0,
+    "angular_stiffness": 0.0,
+    "angular_damping": 10.0
+  }
+}

@@ -154,7 +154,10 @@ class SonicConstantTests(unittest.TestCase):
         """The deployment parses its planner version from the path, so the run
         command is the one place that must carry a version token."""
         dev_sh = (REPO / "dev.sh").read_text()
-        block = dev_sh[dev_sh.index("sonic-controller)") : dev_sh.index("  doctor)")]
+        # Stop with the arm's own `;;`; the arms that follow legitimately call
+        # pkill in their stop helpers.
+        start = dev_sh.index("sonic-controller)")
+        block = dev_sh[start : dev_sh.index("\n    ;;\n", start)]
         self.assertIn("V2/planner_sonic.onnx", block)
         self.assertIn("--planner-file", block)
         for flag in sonic.SIMULATION_ONLY_FLAGS:
@@ -199,6 +202,27 @@ class ProfileTests(unittest.TestCase):
         assert profile.controller is not None
         self.assertEqual(profile.controller["mass_alignment"], "sonic_mujoco")
         self.assertEqual(profile.controller["joint_dynamics_alignment"], "sonic_mujoco")
+
+    def test_table_world_profile_mounts_unitree_assets_without_changing_base_profile(self) -> None:
+        base = RunProfile.load(PROFILES / "isaac-g1-sonic-dex3.json")
+        table = RunProfile.load(PROFILES / "isaac-g1-sonic-table-dex3.json")
+        self.assertIsNone(base.world)
+        self.assertIsNotNone(table.world)
+        assert table.world is not None
+        self.assertTrue(table.world.environment_usd.startswith("/data/models/unitree-sim-assets/"))
+        self.assertTrue(table.world.table_usd.endswith("/PackingTable/PackingTable.usd"))
+        self.assertFalse(table.world.ground_plane)
+        self.assertEqual(table.robot, base.robot)
+        self.assertEqual(table.controller, base.controller)
+
+    def test_bottle_world_matches_unitree_pick_place_object(self) -> None:
+        profile = RunProfile.load(PROFILES / "isaac-g1-sonic-bottle-dex3.json")
+        self.assertIsNotNone(profile.world)
+        assert profile.world is not None
+        self.assertEqual(profile.world.bottle_position_m, (0.60, 0.20, 0.84))
+        self.assertAlmostEqual(profile.world.bottle_radius_m, 0.018)
+        self.assertAlmostEqual(profile.world.bottle_height_m, 0.35)
+        self.assertAlmostEqual(profile.world.bottle_mass_kg, 0.4)
 
     def test_support_timeout_waits_for_the_first_controller_command(self) -> None:
         service = (REPO / "src/humanoid_lab/simulators/isaac/service.py").read_text()

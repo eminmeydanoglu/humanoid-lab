@@ -79,6 +79,75 @@ class CameraSpec:
 
 
 @dataclass(frozen=True)
+class WorldSpec:
+    """Optional static world assets mounted from the persistent data root."""
+
+    environment_usd: str
+    table_usd: str
+    environment_position_m: tuple[float, float, float]
+    environment_rotation_wxyz: tuple[float, float, float, float]
+    table_position_m: tuple[float, float, float]
+    table_rotation_wxyz: tuple[float, float, float, float]
+    ground_plane: bool
+    bottle_position_m: tuple[float, float, float] | None
+    bottle_radius_m: float
+    bottle_height_m: float
+    bottle_mass_kg: float
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "WorldSpec":
+        environment_usd = str(data["environment_usd"])
+        table_usd = str(data["table_usd"])
+        if not environment_usd.startswith("/") or not table_usd.startswith("/"):
+            raise ContractError("world USD paths must be absolute container paths")
+        environment_rotation = _tuple(
+            data.get("environment_rotation_wxyz", (1.0, 0.0, 0.0, 0.0)),
+            4,
+            "world.environment_rotation_wxyz",
+        )
+        table_rotation = _tuple(
+            data.get("table_rotation_wxyz", (1.0, 0.0, 0.0, 0.0)),
+            4,
+            "world.table_rotation_wxyz",
+        )
+        for name, rotation in (
+            ("environment_rotation_wxyz", environment_rotation),
+            ("table_rotation_wxyz", table_rotation),
+        ):
+            if abs(sum(value * value for value in rotation) - 1.0) > 1e-5:
+                raise ContractError(f"world.{name} must be normalized")
+        bottle = data.get("bottle")
+        bottle_position = None
+        bottle_radius = 0.018
+        bottle_height = 0.35
+        bottle_mass = 0.4
+        if bottle is not None:
+            bottle_position = _tuple(bottle["position_m"], 3, "world.bottle.position_m")
+            bottle_radius = float(bottle.get("radius_m", bottle_radius))
+            bottle_height = float(bottle.get("height_m", bottle_height))
+            bottle_mass = float(bottle.get("mass_kg", bottle_mass))
+            if min(bottle_radius, bottle_height, bottle_mass) <= 0.0:
+                raise ContractError("world bottle dimensions and mass must be positive")
+        return cls(
+            environment_usd=environment_usd,
+            table_usd=table_usd,
+            environment_position_m=_tuple(
+                data.get("environment_position_m", (0.0, 0.0, 0.0)),
+                3,
+                "world.environment_position_m",
+            ),
+            environment_rotation_wxyz=environment_rotation,
+            table_position_m=_tuple(data["table_position_m"], 3, "world.table_position_m"),
+            table_rotation_wxyz=table_rotation,
+            ground_plane=bool(data.get("ground_plane", False)),
+            bottle_position_m=bottle_position,
+            bottle_radius_m=bottle_radius,
+            bottle_height_m=bottle_height,
+            bottle_mass_kg=bottle_mass,
+        )
+
+
+@dataclass(frozen=True)
 class HandSpec:
     kind: str
     dofs: int
@@ -105,6 +174,7 @@ class RobotSpec:
     asset_reference: str
     asset_provenance: str
     initial_position_m: tuple[float, float, float]
+    initial_rotation_wxyz: tuple[float, float, float, float]
     hand: HandSpec
     fixed_base: bool = False
 
@@ -123,6 +193,7 @@ class RobotSpec:
             asset_reference=str(data["asset_reference"]),
             asset_provenance=str(data["asset_provenance"]),
             initial_position_m=_tuple(data["initial_position_m"], 3, "initial_position_m"),
+            initial_rotation_wxyz=_tuple(data.get("initial_rotation_wxyz", (1.0, 0.0, 0.0, 0.0)), 4, "initial_rotation_wxyz"),
             hand=HandSpec.from_dict(data["hand"]),
             fixed_base=bool(data.get("fixed_base", False)),
         )
@@ -190,6 +261,7 @@ class RunProfile:
     controller: Mapping[str, Any] | None = None
     initial_pose: str | None = None
     support: SupportSpec | None = None
+    world: WorldSpec | None = None
 
     @classmethod
     def load(cls, path: Path) -> "RunProfile":
@@ -228,6 +300,7 @@ class RunProfile:
             controller=controller,
             initial_pose=str(initial_pose) if initial_pose is not None else None,
             support=SupportSpec.from_dict(support) if support is not None else None,
+            world=WorldSpec.from_dict(data["world"]) if data.get("world") is not None else None,
         )
 
     @property
@@ -278,6 +351,21 @@ class RunProfile:
                 "position_m": list(self.camera.position_m),
                 "rotation_wxyz": list(self.camera.rotation_wxyz),
             },
+            "world": (
+                {
+                    "environment_usd": self.world.environment_usd,
+                    "table_usd": self.world.table_usd,
+                    "environment_position_m": list(self.world.environment_position_m),
+                    "environment_rotation_wxyz": list(
+                        self.world.environment_rotation_wxyz
+                    ),
+                    "table_position_m": list(self.world.table_position_m),
+                    "table_rotation_wxyz": list(self.world.table_rotation_wxyz),
+                    "ground_plane": self.world.ground_plane,
+                }
+                if self.world is not None
+                else None
+            ),
             "simulation": {
                 "physics_dt": self.physics_dt,
                 "device": self.device,

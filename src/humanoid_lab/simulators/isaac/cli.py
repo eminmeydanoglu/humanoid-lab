@@ -19,6 +19,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--profile", type=Path, required=True)
     parser.add_argument("--duration", type=float)
     parser.add_argument("--record-video", type=Path, help="record a fixed external validation camera to MP4")
+    parser.add_argument("--camera-zmq-port", type=int, help="publish head RGB as SONIC ego_view over ZMQ")
     parser.add_argument("--metrics-output", type=Path, help="write the final run summary as JSON")
     parser.add_argument("--tracking-output", type=Path, help="write 50 Hz body/hand command tracking as Parquet")
     parser.add_argument("--trajectory-reference", type=Path,
@@ -74,6 +75,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             controller_provider=args.controller,
             record_video=args.record_video,
             trajectory_reference=args.trajectory_reference,
+            camera_zmq_port=args.camera_zmq_port,
         )
         summary = service.run()
         if args.tracking_output:
