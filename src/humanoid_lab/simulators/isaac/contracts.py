@@ -78,6 +78,155 @@ class CameraSpec:
         )
 
 
+#: The three dynamic cube colors the block-stacking scene contract requires.
+SCENE_CUBE_COLORS = ("red", "yellow", "blue")
+SCENE_TARGET_KINDS = ("tape",)
+
+
+@dataclass(frozen=True)
+class TableSpec:
+    """One Unitree table asset with an explicitly declared worktop height.
+
+    The surface height is a required field rather than a default: placing cubes
+    relative to a guessed height is exactly the silent failure this contract
+    exists to prevent.  Its provenance records how the value was derived.
+    """
+
+    asset_reference: str
+    asset_provenance: str
+    position_m: tuple[float, float, float]
+    rotation_wxyz: tuple[float, float, float, float]
+    surface_height_m: float
+    surface_height_provenance: str
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "TableSpec":
+        asset_reference = str(data["asset_reference"])
+        if not asset_reference.startswith("/"):
+            raise ContractError("table asset_reference must be an absolute container path")
+        rotation = _tuple(data.get("rotation_wxyz", (1.0, 0.0, 0.0, 0.0)), 4, "table.rotation_wxyz")
+        if abs(sum(value * value for value in rotation) - 1.0) > 1e-5:
+            raise ContractError("table.rotation_wxyz must be normalized")
+        surface_height = float(data["surface_height_m"])
+        if not math.isfinite(surface_height) or surface_height <= 0.0:
+            raise ContractError("table.surface_height_m must be positive and finite")
+        provenance = str(data.get("surface_height_provenance", "")).strip()
+        if not provenance:
+            raise ContractError("table.surface_height_provenance must state how the height was derived")
+        return cls(
+            asset_reference=asset_reference,
+            asset_provenance=str(data["asset_provenance"]),
+            position_m=_tuple(data["position_m"], 3, "table.position_m"),
+            rotation_wxyz=rotation,
+            surface_height_m=surface_height,
+            surface_height_provenance=provenance,
+        )
+
+
+@dataclass(frozen=True)
+class CubeSpec:
+    """One dynamic cube resting on the declared table surface."""
+
+    color: str
+    size_m: tuple[float, float, float]
+    mass_kg: float
+    position_m: tuple[float, float, float]
+    rotation_wxyz: tuple[float, float, float, float]
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any], surface_height_m: float) -> "CubeSpec":
+        color = str(data["color"])
+        if color not in SCENE_CUBE_COLORS:
+            raise ContractError(f"cube.color must be one of {SCENE_CUBE_COLORS}")
+        size = _tuple(data["size_m"], 3, "cube.size_m")
+        if not all(value > 0.0 for value in size):
+            raise ContractError("cube.size_m must be positive")
+        mass = float(data["mass_kg"])
+        if not math.isfinite(mass) or mass <= 0.0:
+            raise ContractError("cube.mass_kg must be positive and finite")
+        position = _tuple(data["position_m"], 3, "cube.position_m")
+        rotation = _tuple(data.get("rotation_wxyz", (1.0, 0.0, 0.0, 0.0)), 4, "cube.rotation_wxyz")
+        if abs(sum(value * value for value in rotation) - 1.0) > 1e-5:
+            raise ContractError("cube.rotation_wxyz must be normalized")
+        expected_z = surface_height_m + size[2] / 2.0
+        if abs(position[2] - expected_z) > 1e-3:
+            raise ContractError(
+                f"{color} cube rests at z={position[2]} but the declared table surface "
+                f"{surface_height_m} puts a {size[2]} m cube center at {expected_z}"
+            )
+        return cls(color=color, size_m=size, mass_kg=mass, position_m=position, rotation_wxyz=rotation)
+
+
+@dataclass(frozen=True)
+class TargetSpec:
+    """A flat black tape marker on the declared table surface."""
+
+    kind: str
+    color: str
+    size_m: tuple[float, float, float]
+    position_m: tuple[float, float, float]
+    rotation_wxyz: tuple[float, float, float, float]
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any], surface_height_m: float) -> "TargetSpec":
+        kind = str(data["kind"])
+        if kind not in SCENE_TARGET_KINDS:
+            raise ContractError(f"target.kind must be one of {SCENE_TARGET_KINDS}")
+        color = str(data["color"])
+        if color != "black":
+            raise ContractError("target.color must be black")
+        size = _tuple(data["size_m"], 3, "target.size_m")
+        if not all(value > 0.0 for value in size):
+            raise ContractError("target.size_m must be positive")
+        position = _tuple(data["position_m"], 3, "target.position_m")
+        rotation = _tuple(data.get("rotation_wxyz", (1.0, 0.0, 0.0, 0.0)), 4, "target.rotation_wxyz")
+        if abs(sum(value * value for value in rotation) - 1.0) > 1e-5:
+            raise ContractError("target.rotation_wxyz must be normalized")
+        expected_z = surface_height_m + size[2] / 2.0
+        if abs(position[2] - expected_z) > 1e-3:
+            raise ContractError(
+                f"target rests at z={position[2]} but the declared table surface "
+                f"{surface_height_m} puts a {size[2]} m marker center at {expected_z}"
+            )
+        return cls(kind=kind, color=color, size_m=size, position_m=position, rotation_wxyz=rotation)
+
+
+@dataclass(frozen=True)
+class SceneSpec:
+    """Optional declarative scene: one Unitree table, cubes, a tape target.
+
+    The scene is data only.  It enables the camera service but never adds a
+    controller or an RL loop: how the scene is driven stays a profile choice.
+    """
+
+    table: TableSpec
+    cubes: tuple[CubeSpec, ...]
+    target: TargetSpec
+    camera_enabled: bool
+    ground_plane: bool
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "SceneSpec":
+        table = TableSpec.from_dict(data["table"])
+        raw_cubes = data["cubes"]
+        if not isinstance(raw_cubes, list) or len(raw_cubes) != len(SCENE_CUBE_COLORS):
+            raise ContractError(f"scene.cubes must list exactly {len(SCENE_CUBE_COLORS)} cubes")
+        cubes = tuple(CubeSpec.from_dict(entry, table.surface_height_m) for entry in raw_cubes)
+        colors = [cube.color for cube in cubes]
+        if sorted(colors) != sorted(SCENE_CUBE_COLORS):
+            raise ContractError(f"scene.cubes colors must be exactly {SCENE_CUBE_COLORS}")
+        if len(set(colors)) != len(colors):
+            raise ContractError("scene.cubes colors must be unique")
+        target = TargetSpec.from_dict(data["target"], table.surface_height_m)
+        return cls(
+            table=table,
+            cubes=cubes,
+            target=target,
+            camera_enabled=bool(data.get("camera_enabled", False)),
+            ground_plane=bool(data.get("ground_plane", True)),
+        )
+
+
 @dataclass(frozen=True)
 class HandSpec:
     kind: str
@@ -197,6 +346,7 @@ class RunProfile:
     controller: Mapping[str, Any] | None = None
     initial_pose: str | None = None
     support: SupportSpec | None = None
+    scene: SceneSpec | None = None
 
     @classmethod
     def load(cls, path: Path) -> "RunProfile":
@@ -235,7 +385,13 @@ class RunProfile:
             controller=controller,
             initial_pose=str(initial_pose) if initial_pose is not None else None,
             support=SupportSpec.from_dict(support) if support is not None else None,
+            scene=SceneSpec.from_dict(data["scene"]) if data.get("scene") is not None else None,
         )
+
+    @property
+    def camera_service_enabled(self) -> bool:
+        """Whether the profile asks for the head-camera service to run."""
+        return self.scene is not None and self.scene.camera_enabled
 
     @property
     def command_ttl_s(self) -> float:
@@ -295,6 +451,31 @@ class RunProfile:
             "initial_pose": self.initial_pose,
             "support": (
                 {"kind": self.support.kind, "release": self.support.release} if self.support else None
+            ),
+            "scene": (
+                {
+                    "camera_enabled": self.scene.camera_enabled,
+                    "ground_plane": self.scene.ground_plane,
+                    "table": {
+                        "asset_reference": self.scene.table.asset_reference,
+                        "position_m": list(self.scene.table.position_m),
+                        "rotation_wxyz": list(self.scene.table.rotation_wxyz),
+                        "surface_height_m": self.scene.table.surface_height_m,
+                        "surface_height_provenance": self.scene.table.surface_height_provenance,
+                    },
+                    "cubes": [
+                        {"color": cube.color, "size_m": list(cube.size_m), "position_m": list(cube.position_m)}
+                        for cube in self.scene.cubes
+                    ],
+                    "target": {
+                        "kind": self.scene.target.kind,
+                        "color": self.scene.target.color,
+                        "size_m": list(self.scene.target.size_m),
+                        "position_m": list(self.scene.target.position_m),
+                    },
+                }
+                if self.scene is not None
+                else None
             ),
         }
 

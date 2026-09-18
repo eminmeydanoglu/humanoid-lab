@@ -139,18 +139,6 @@ class IsaacG1SourceInvariantTests(unittest.TestCase):
         self.assertNotIn("self._timeline.pause()", request_body)
         self.assertNotIn("reset_episode", request_body)
         self.assertIn("self.reset_episode(resume=True)", source)
-        reset_branch = source[
-            source.index("                if self._pending_ui_reset:") :
-            source.index("                if self._timeline.is_playing():")
-        ]
-        self.assertLess(
-            reset_branch.index("self.reset_episode(resume=True)"),
-            reset_branch.index("self._step_physics()"),
-        )
-        self.assertLess(
-            reset_branch.index("self._step_physics()"),
-            reset_branch.index("self.pause()"),
-        )
     def test_acceptance_modes_are_explicit_and_measured(self) -> None:
         cli = (ROOT / "src/humanoid_lab/simulators/isaac/cli.py").read_text()
         service = (ROOT / "src/humanoid_lab/simulators/isaac/service.py").read_text()
@@ -221,19 +209,56 @@ class IsaacG1SourceInvariantTests(unittest.TestCase):
         ]
         self.assertIn('"rejected_commands": self._rejected_commands', status_body)
 
-    def test_reset_is_refused_while_a_controller_is_driving(self) -> None:
-        """A reset teleports the articulation while the controller still holds
-        state from the previous episode; mixing the two is not allowed."""
+    def test_reset_is_accepted_while_a_controller_is_driving_and_keeps_episodes_apart(self) -> None:
+        """The client stops its stream and then resets, so the request lands
+        inside the command TTL window while the controller is still the last
+        writer.  Refusing it there lost the reset; the request is queued, and
+        the episode bump is what keeps the two episodes apart."""
         source = SERVICE.read_text()
         body = source[
             source.index("    def _request_reset_from_ui") : source.index("    def _open_ui")
         ]
-        self.assertIn("if self._control_mode == CONTROLLED:", body)
-        self.assertIn("isaac_g1_ui_reset_refused", body)
-        # Only the non-controlled path may queue work for the loop.
-        refused, _, rest = body.partition('"isaac_g1_ui_reset_refused"')
-        self.assertIn("return", rest.split("self._pending_ui_reset = True")[0])
-        self.assertIn("self._pending_ui_reset = True", rest)
+        self.assertNotIn("isaac_g1_ui_reset_refused", body)
+        self.assertNotIn("return False", body)
+        self.assertIn("self._pending_ui_reset = True", body)
+        self.assertIn("return True", body)
+        # The safety boundary is the episode id, not a refusal.
+        reset_body = source[
+            source.index("    def reset_episode") : source.index("    def _write_initial_state_to_sim")
+        ]
+        self.assertIn("self.episode_id += 1", reset_body)
+        # Stale commands are dropped by the episode check, and the robot is
+        # passive until the controller sends new ones under the new id.
+        self.assertIn("self._control_mode = PASSIVE", reset_body)
+        self.assertLess(
+            reset_body.index("self.episode_id += 1"),
+            reset_body.index("self._control_mode = PASSIVE"),
+        )
+        # The declared start-up support goes back up so a reset robot that no
+        # controller has claimed yet is held instead of falling.
+        self.assertIn("self._start_support()", reset_body)
+        control_body = source[
+            source.index("    def _apply_control") : source.index("    def _apply_body_command")
+        ]
+        self.assertIn("command.episode_id == self.episode_id", control_body)
+
+    def test_a_reset_keeps_physics_running(self) -> None:
+        source = SERVICE.read_text()
+        run_body = source[source.index("    def run(self)") : source.index("    def _accounting")]
+        reset_branch = run_body[
+            run_body.index("                if self._pending_ui_reset:") :
+            run_body.index("                if self._timeline.is_playing():")
+        ]
+        self.assertIn("self.reset_episode(resume=True)", reset_branch)
+        self.assertLess(
+            reset_branch.index("self.reset_episode(resume=True)"),
+            reset_branch.index("self._step_physics()"),
+        )
+        # A paused timeline never advances again by itself and nothing in the
+        # service restarts it, so the reset must not pause.
+        self.assertNotIn("self.pause()", reset_branch)
+        self.assertIn('"event": "isaac_g1_reset"', reset_branch)
+        self.assertIn('"timeline": self.state.value', reset_branch)
 
     def test_a_new_episode_invalidates_old_commands(self) -> None:
         source = (ROOT / "src/humanoid_lab/controllers/sonic_dds.py").read_text()
@@ -260,6 +285,131 @@ class IsaacG1SourceInvariantTests(unittest.TestCase):
         self.assertIn("enable_dlssg=self.show_ui", source)
         self.assertIn("enable_dl_denoiser=True", source)
         self.assertIn("update_period=self.profile.camera_update_period", source)
+
+class IsaacG1BlockStackingSceneTests(unittest.TestCase):
+    """The optional scene schema plus the head-camera service wiring."""
+
+    SONIC = ROOT / "configs/profiles/isaac-g1-sonic-dex3.json"
+    BLOCKS = ROOT / "configs/profiles/isaac-g1-sonic-blockstacking-dex3.json"
+
+    def test_sonic_dex3_controller_and_camera_are_unchanged(self) -> None:
+        profile = RunProfile.load(self.SONIC)
+        self.assertEqual((profile.camera.width, profile.camera.height), (640, 480))
+        assert profile.controller is not None
+        self.assertEqual(profile.controller["provider"], "sonic_dds")
+        self.assertEqual(profile.controller["mass_alignment"], "sonic_mujoco")
+        self.assertEqual(profile.controller["joint_dynamics_alignment"], "sonic_mujoco")
+        # The scene schema is optional: an existing profile declares neither a
+        # scene nor a camera service, so nothing about it changed.
+        self.assertIsNone(profile.scene)
+        self.assertFalse(profile.camera_service_enabled)
+
+    def test_block_stacking_scene_declares_table_cubes_and_black_target(self) -> None:
+        profile = RunProfile.load(self.BLOCKS)
+        self.assertEqual((profile.camera.width, profile.camera.height), (640, 480))
+        # The scene schema adds no controller of its own: the profile keeps the
+        # existing SONIC body controller and start-up support, unchanged.
+        assert profile.controller is not None
+        self.assertEqual(profile.controller["provider"], "sonic_dds")
+        self.assertEqual(profile.controller["mass_alignment"], "sonic_mujoco")
+        self.assertEqual(profile.controller["joint_dynamics_alignment"], "sonic_mujoco")
+        self.assertIsNotNone(profile.support)
+        scene = profile.scene
+        assert scene is not None
+        self.assertTrue(scene.camera_enabled)
+        self.assertTrue(profile.camera_service_enabled)
+
+        table = scene.table
+        self.assertTrue(table.asset_reference.startswith("/data/models/unitree-sim-assets/"))
+        # Variant 2: the PackingTable and PackingTable_1 copies carry a
+        # container_h20 whose top reaches 1.0829 m, above the 0.9941 m worktop,
+        # which is the space the cubes and the target need (measured with
+        # usd-core BBoxCache on the shipped USDs).
+        self.assertTrue(table.asset_reference.endswith("/PackingTable_2/PackingTable.usd"))
+        # The one measured number: the settled palm height of the SONIC Y
+        # standing stance (see the profile's surface_height_provenance).
+        self.assertAlmostEqual(table.surface_height_m, 0.6706, places=4)
+        self.assertTrue(table.surface_height_provenance)
+        # The table is placed so the measured 0.994051 m worktop offset lands on
+        # the declared surface height.
+        self.assertAlmostEqual(
+            table.position_m[2] + 0.9940513, table.surface_height_m, places=5
+        )
+
+        self.assertEqual(len(scene.cubes), 3)
+        self.assertEqual([cube.color for cube in scene.cubes], ["red", "yellow", "blue"])
+        for cube in scene.cubes:
+            self.assertGreater(cube.mass_kg, 0.0)
+            self.assertAlmostEqual(
+                cube.position_m[2], table.surface_height_m + cube.size_m[2] / 2.0, places=4
+            )
+
+        self.assertEqual(scene.target.kind, "tape")
+        self.assertEqual(scene.target.color, "black")
+        self.assertAlmostEqual(
+            scene.target.position_m[2], table.surface_height_m + scene.target.size_m[2] / 2.0, places=4
+        )
+
+    def test_rejects_a_scene_with_the_wrong_cube_colors(self) -> None:
+        source = json.loads(self.BLOCKS.read_text())
+        source["scene"]["cubes"][0]["color"] = "green"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bad.json"
+            path.write_text(json.dumps(source))
+            with self.assertRaisesRegex(ContractError, "cube.color"):
+                RunProfile.load(path)
+
+    def test_rejects_a_cube_that_does_not_rest_on_the_declared_surface(self) -> None:
+        source = json.loads(self.BLOCKS.read_text())
+        source["scene"]["cubes"][0]["position_m"][2] = 0.9
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bad.json"
+            path.write_text(json.dumps(source))
+            with self.assertRaisesRegex(ContractError, "declared table surface"):
+                RunProfile.load(path)
+
+    def test_camera_service_is_independent_of_test_window_and_video(self) -> None:
+        source = SERVICE.read_text()
+        # The camera scene is created whenever the service is enabled, not only
+        # for a test, the head-camera window, or video recording.
+        self.assertIn("or self.camera_service", source)
+        self.assertIn("def _start_camera_service", source)
+        self.assertIn("self._publish_camera_frame()", source)
+        self.assertIn("endpoint.publish_frame(image", source)
+        # A reset drops the retained frame so a stale pose cannot be served.
+        self.assertIn("self._head_camera.invalidate(episode_id=self.episode_id)", source)
+        # The reset request is queued by the control thread and consumed at the
+        # simulation-loop boundary, never applied from the service thread.
+        self.assertIn("def _request_reset_from_service", source)
+        self.assertIn("on_reset=self._request_reset_from_service", source)
+
+    def test_camera_service_module_never_touches_the_simulation(self) -> None:
+        module = (ROOT / "src/humanoid_lab/simulators/isaac/camera_service.py").read_text()
+        for forbidden in ("import isaac", "from isaaclab", "omni.", "pxr", "self._sim", "self._robot"):
+            self.assertNotIn(forbidden, module)
+        # The endpoint accepts exactly get_frame and returns three frames.
+        self.assertIn('GET_FRAME_REQUEST = b"get_frame"', module)
+        self.assertIn("DEFAULT_CAMERA_ENDPOINT = \"tcp://*:5558\"", module)
+
+    def test_the_live_scene_probe_reports_the_worktop_and_the_cubes(self) -> None:
+        """The declared surface height is a derived number; the probe is what
+        turns it into a reading an operator can check against the running
+        stage instead of trusting the profile."""
+        source = SERVICE.read_text()
+        self.assertIn("def _asset_top_height_m", source)
+        self.assertIn("def _scene_probe", source)
+        for field in (
+            "live_worktop_height_m",
+            "live_worktop_minus_declared_m",
+            "live_target_top_z_m",
+            "live_target_minus_declared_m",
+            "cubes",
+        ):
+            self.assertIn(field, source)
+        # Emitted with the palm reading and carried into the run summary.
+        self.assertIn('"scene": self._scene_probe()', source)
+        self.assertIn('"scene_probe": self._scene_probe()', source)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -40,6 +40,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="open a second GPU viewport for the head camera (costs render throughput)",
     )
+    parser.add_argument(
+        "--camera-endpoint",
+        default=None,
+        help="ZMQ REP endpoint serving the head-camera frame, default tcp://*:5558. "
+        "5550-5557 are already taken (GR00T 5550, SONIC ego_view 5555, action 5556, state 5557), "
+        "so the camera service uses 5558 and the reset control 5559; passing this flag also "
+        "enables the camera service even when the profile does not.",
+    )
+    parser.add_argument(
+        "--control-endpoint",
+        default=None,
+        help="ZMQ REP endpoint for headless reset and status, default tcp://*:5559",
+    )
+    parser.add_argument(
+        "--no-camera-service",
+        action="store_true",
+        help="keep the camera and reset endpoints closed even when the profile enables them",
+    )
     from isaaclab.app import AppLauncher
 
     AppLauncher.add_app_launcher_args(parser)
@@ -66,10 +84,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     simulation_app = launcher.app
     exit_code = 2
     try:
+        from .camera_service import DEFAULT_CAMERA_ENDPOINT, DEFAULT_CONTROL_ENDPOINT
         from .service import SimulatorService
 
         # The profile owns the physics device; --device only wins when passed explicitly.
         profile = RunProfile.load(args.profile).with_device(device_override)
+        camera_service = (
+            profile.camera_service_enabled or args.camera_endpoint is not None
+        ) and not args.no_camera_service
         service = SimulatorService(
             profile,
             simulation_app,
@@ -83,6 +105,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             kinematic_reference=args.kinematic_reference,
             kinematic_label=args.kinematic_label,
             replay_clock_output=args.replay_clock_output,
+            camera_service=camera_service,
+            camera_endpoint=args.camera_endpoint or DEFAULT_CAMERA_ENDPOINT,
+            control_endpoint=args.control_endpoint or DEFAULT_CONTROL_ENDPOINT,
         )
         summary = service.run()
         if args.tracking_output:

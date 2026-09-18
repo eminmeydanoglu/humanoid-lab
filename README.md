@@ -111,6 +111,52 @@ Keys in the SONIC terminal: `]` starts control, `T` plays the reference motion, 
 motion, `R` resets, `O` is the emergency stop. `Enter` to switch to planner to teleop.
 
 
+## Psi0 policy in the loop (BlockStacking)
+
+One command starts the whole evaluation: the Isaac BlockStacking scene, the
+official SONIC Y controller and the bridge/UI (which owns the Psi0 policy
+server it serves).
+
+```bash
+./dev.sh psi0-isaac-eval --checkpoint-dir <run-directory> --checkpoint-step 40000
+```
+
+`<run-directory>` is a Psi0 training output (`run_config.json`, `argv.txt`,
+`checkpoints/ckpt_<step>`); host paths under the data root and the in-container
+spellings (`/outputs/...`, `/data/...`) are both accepted. The command validates
+the checkpoint, the action port (`:5556`) and the served `/info` contract before
+anything is served, and stops with the reason instead of guessing.
+
+The SONIC controller keeps this terminal, started in its pose-streaming mode so
+it can consume the policy's Protocol v4 messages: press `Enter` to enable the
+pose stream, then `]` to start control. Open `http://localhost:8015/` for
+Start/Stop/Reset, the checkpoint selector and the head-camera preview, and watch
+the simulation through the printed WebRTC endpoint. `Ctrl-C` in the terminal, or
+a dead background process, ends the whole session.
+
+The UI's **Policy checkpoint** panel offers exactly two allowlisted choices:
+
+* `Fine-tuned (40k)` — the run given on the command line;
+* `Base` — that run's training-start checkpoint: the warm start its own
+  `run_config.json` names (`model.model_name_or_path`), materialized on first
+  launch into a servable run dir under `<experiment root>/base/<warm start>`.
+  The released warm start ships HuggingFace-style `model.safetensors` plus a
+  separate `action_header.safetensors`; the materializer merges them into the
+  deploy loader's key layout and disables `model.state_null_token`, a parameter
+  the warm start does not contain and that inference never reads. Its provenance
+  (source files, upstream revision, key counts) is written next to it as
+  `BASE_ARTIFACT.json`.
+
+Selecting an option stops the session, restarts the policy server on `:8014`
+with the selected run dir/step, and only marks it ready after `/info` matches
+the run dir, step, action/state width, transforms and dataset. A failed switch
+is fail-closed: the previous checkpoint is started again and the session goes to
+`ERROR` with the reason. If the base artifact cannot be derived, the `Base`
+option is shown unavailable with the reason — no other checkpoint is
+substituted. The API takes an allowlisted option id only; paths are not
+accepted.
+
+
 ## If you need
 
 
@@ -128,6 +174,7 @@ motion, `R` resets, `O` is the emergency stop. `Enter` to switch to planner to t
 | `./dev.sh fetch-psi0-ckpt` | downloads the pinned Psi0 SONIC warm start into PSI_HOME | |
 | `./dev.sh groot-finetune-smoke [pipeline\|pretrained\|eval]` | optional GR00T N1.7 fine-tuning smoke (two optimizer steps, then open-loop eval) |
 | `./dev.sh psi0-smoke` | Psi0 environment smoke: interpreter, torch build, upstream imports, config schema, warm-start checkpoint |
+| `./dev.sh psi0-isaac-eval --checkpoint-dir RUN_DIR --checkpoint-step STEP` | one-command Psi0-in-the-loop BlockStacking evaluation: Isaac scene, SONIC Y, policy server, bridge/UI |
 | `./dev.sh hf-login` | Hugging Face login for gated repositories |
 | `./dev.sh stop` | stops the container, keeps the data root |
 | `./dev.sh rebuild` | rebuilds the image with the same lock, recreates the container |

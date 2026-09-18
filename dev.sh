@@ -415,6 +415,486 @@ run_isaac_stream() {
   return "$rc"
 }
 
+# The official SONIC deployment, exactly as the upstream documentation runs it:
+# raw keyboard on this TTY, planner loaded, `]` to start.  This launcher owns the
+# Isaac-targeted controller role: a new invocation replaces an older controller
+# started through this same path, without touching unmarked SONIC/MuJoCo
+# deployments.  The deployment owns this terminal's stdin; every variable below
+# expands inside the container.
+run_sonic_controller() { # $1 = input type (keyboard|zmq|zmq_manager)
+  local sonic_input_type="$1"
+  case "$sonic_input_type" in
+    keyboard|zmq|zmq_manager) ;;
+    *) echo "usage: $0 sonic-controller [keyboard|zmq|zmq_manager]" >&2; return 2 ;;
+  esac
+  # shellcheck disable=SC2016
+  DC exec dev bash -lc '
+    source /opt/humanoid-lab/entrypoint.sh
+    cd /data/models/sonic-deploy
+    export LD_LIBRARY_PATH=/data/models/sonic-deploy/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+    export SONIC_MODELS_DIR=/data/models/sonic
+    export SONIC_REFERENCE_DIR=/data/models/sonic-isaac/reference/example
+    export SONIC_PLANNER=/data/models/sonic-isaac/planner/target_vel/V2/planner_sonic.onnx
+    case "$SONIC_PLANNER" in
+      *V0*|*V1*|*V2*) ;;
+      *) echo "error: the deployment reads its planner version token from the path;" >&2
+         echo "       planner version token (V0/V1/V2) missing in: $SONIC_PLANNER" >&2
+         exit 2 ;;
+    esac
+    controller_pidfile=/tmp/humanoid-lab-sonic-controller-isaac.pid
+    takeover_lock=/tmp/humanoid-lab-sonic-controller-isaac.takeover.lock
+    controller_target=isaac
+
+    is_isaac_controller() {
+      candidate=$1
+      case "$candidate" in (*[!0-9]*|"") return 1;; esac
+      [ -r "/proc/$candidate/environ" ] || return 1
+      [ -r "/proc/$candidate/cmdline" ] || return 1
+      tr "\0" "\n" <"/proc/$candidate/environ" |
+        grep -Fxq "HUMANOID_LAB_CONTROLLER_TARGET=$controller_target" || return 1
+      tr "\0" " " <"/proc/$candidate/cmdline" |
+        grep -Fq "g1_deploy_onnx_ref" || return 1
+    }
+
+    # Serialize only the short replacement transaction. The lock is released
+    # before exec so a later invocation can enter, stop this PID, and take over.
+    exec 8>"$takeover_lock"
+    flock 8
+    if [ -r "$controller_pidfile" ]; then
+      read -r previous_pid <"$controller_pidfile" || previous_pid=
+      if is_isaac_controller "$previous_pid" && [ "$previous_pid" != "$$" ]; then
+        echo "[sonic-controller] replacing previous Isaac controller pid=$previous_pid" >&2
+        kill -TERM "$previous_pid" 2>/dev/null || true
+        for _ in {1..50}; do
+          [ ! -d "/proc/$previous_pid" ] && break
+          sleep 0.1
+        done
+        [ ! -d "/proc/$previous_pid" ] || kill -KILL "$previous_pid" 2>/dev/null || true
+      fi
+    fi
+    export HUMANOID_LAB_CONTROLLER_TARGET="$controller_target"
+    printf "%s\n" "$$" >"$controller_pidfile"
+    flock -u 8
+    exec 8>&-
+    exec ./g1_deploy_onnx_ref lo \
+      "$SONIC_MODELS_DIR/sonic_v1_1/model_decoder.onnx" \
+      "$SONIC_REFERENCE_DIR" \
+      --obs-config "$SONIC_MODELS_DIR/sonic_v1_1/observation_config.yaml" \
+      --encoder-file "$SONIC_MODELS_DIR/sonic_v1_1/model_encoder.onnx" \
+      --planner-file "$SONIC_PLANNER" \
+      --input-type "$1" --output-type zmq --disable-crc-check' sonic-controller "$sonic_input_type"
+}
+
+# ---------------------------------------------------------------------------
+# psi0-isaac-eval
+#
+# One command that brings up a Psi0-in-the-loop evaluation: the
+# Isaac BlockStacking scene, the official SONIC Y controller and the bridge/UI
+# (which in turn owns the Psi0 policy server it serves, see the bridge section).
+# Everything except the interactive SONIC controller runs as a background job
+# with a container-side pidfile; the controller keeps the foreground because `]`
+# needs this terminal (the same path as `./dev.sh sonic-controller`).  A watchdog
+# aborts the session when a background process dies, and every exit path
+# (controller exit, Ctrl-C, child failure) tears the group down in reverse order.
+
+PSI0_EVAL_LABELS=()
+PSI0_EVAL_JOBS=()
+PSI0_EVAL_PIDFILES=()
+PSI0_EVAL_MARKERS=()
+PSI0_EVAL_LOGS=()
+PSI0_EVAL_WATCHDOG=""
+PSI0_EVAL_HEARTBEAT=""
+PSI0_EVAL_CLEANED=0
+PSI0_EVAL_TAG="$(date +%Y%m%d-%H%M%S)-$$"
+PSI0_EVAL_LOG_DIR="/outputs/psi0-isaac-eval/$PSI0_EVAL_TAG"
+PSI0_EVAL_HOST_LOG_DIR="$HUMANOID_DATA_ROOT/outputs/psi0-isaac-eval/$PSI0_EVAL_TAG"
+#: The launcher refreshes this file every second; the container-side wrappers
+#: stop their children when it goes stale, so a killed launcher (Ctrl-C, crash,
+#: lost terminal) can never leave the simulation running.
+PSI0_EVAL_LEASE="$PSI0_EVAL_HOST_LOG_DIR/lease"
+PSI0_EVAL_LEASE_C="$PSI0_EVAL_LOG_DIR/lease"
+PSI0_EVAL_ABORT_FILE="/tmp/humanoid-lab-psi0-eval-abort.$$"
+
+psi0_eval_container_id() {
+  local container_id
+  container_id="$(DC ps -q dev 2>/dev/null)"
+  [ -n "$container_id" ] || { echo "error: dev container is not running" >&2; return 1; }
+  printf '%s\n' "$container_id"
+}
+
+# The user names the run directory; the bridge and the policy server live in the
+# container, so translate the host/bind-mount spellings to container paths.
+psi0_eval_container_path() {
+  local path="$1"
+  case "$path" in
+    /data/*|/outputs/*|/workspace/*) printf '%s\n' "$path"; return 0 ;;
+  esac
+  case "$path" in
+    "$HUMANOID_DATA_ROOT"/outputs/*) printf '/outputs/%s\n' "${path#"$HUMANOID_DATA_ROOT"/outputs/}" ;;
+    "$HUMANOID_DATA_ROOT"/*) printf '/data/%s\n' "${path#"$HUMANOID_DATA_ROOT"/}" ;;
+    /*) printf '%s\n' "$path" ;;
+    *) printf '/workspace/humanoid-lab/%s\n' "$path" ;;
+  esac
+}
+
+psi0_eval_bg_start() { # label, cmdline marker, container-side command
+  local label="$1" marker="$2" command="$3"
+  local container_id pidfile
+  container_id="$(psi0_eval_container_id)" || return 1
+  pidfile="/tmp/humanoid-lab-psi0-eval-$label.pid"
+  # shellcheck disable=SC2016 # Variables in this string expand in the container.
+  docker exec "$container_id" bash -lc '
+    pidfile=$1
+    logfile=$2
+    lease=$3
+    shift 3
+    mkdir -p "$(dirname "$logfile")"
+    rm -f -- "$pidfile"
+    setsid bash -lc "$1" >"$logfile" 2>&1 </dev/null &
+    child=$!
+    printf "%s\n" "$child" >"$pidfile"
+    trap "kill -- -$child 2>/dev/null || true; rm -f -- $pidfile; exit 143" INT TERM HUP
+    # Fail-safe teardown: the launcher refreshes a lease file once a second; if
+    # the refresh stops (Ctrl-C, crash, killed terminal) the session children
+    # must not keep the robot running forever.  The watch lives in this shell
+    # own wait loop, so it cannot be orphaned or reaped separately from it.
+    # Isaac handles TERM in its own shutdown and can hang there, so a stuck
+    # child is escalated to KILL after a bounded wait.
+    while kill -0 "$child" 2>/dev/null; do
+      if [ ! -e "$lease" ] ||
+         [ "$(( $(date +%s) - $(stat -c %Y "$lease" 2>/dev/null || echo 0) ))" -ge 5 ]; then
+        kill -- "-$child" 2>/dev/null || kill "$child" 2>/dev/null || true
+        for _ in {1..20}; do
+          kill -0 "$child" 2>/dev/null || break
+          sleep 0.5
+        done
+        kill -KILL -- "-$child" 2>/dev/null || kill -KILL "$child" 2>/dev/null || true
+        break
+      fi
+      sleep 1
+    done
+    if wait "$child"; then rc=0; else rc=$?; fi
+    rm -f -- "$pidfile"
+    exit "$rc"
+  ' -- "$pidfile" "$PSI0_EVAL_LOG_DIR/$label.log" "$PSI0_EVAL_LEASE_C" "$command" &
+  PSI0_EVAL_LABELS+=("$label")
+  PSI0_EVAL_JOBS+=("$!")
+  PSI0_EVAL_PIDFILES+=("$pidfile")
+  PSI0_EVAL_MARKERS+=("$marker")
+  PSI0_EVAL_LOGS+=("$PSI0_EVAL_HOST_LOG_DIR/$label.log")
+}
+
+psi0_eval_bg_stop() { # index
+  local index="$1"
+  local job="${PSI0_EVAL_JOBS[$index]}"
+  local pidfile="${PSI0_EVAL_PIDFILES[$index]}"
+  local marker="${PSI0_EVAL_MARKERS[$index]}"
+  local container_id
+  container_id="$(DC ps -q dev 2>/dev/null)" || container_id=""
+  if [ -n "$container_id" ]; then
+    # The container process was started with setsid, so the pidfile's process
+    # group is killed as one; the cmdline check keeps this from touching an
+    # unrelated process that reused the pid.
+    # shellcheck disable=SC2016
+    docker exec "$container_id" bash -lc '
+      pidfile=$1
+      marker=$2
+      [ -r "$pidfile" ] || exit 0
+      read -r pid <"$pidfile" || exit 0
+      case "$pid" in (*[!0-9]*|"") rm -f -- "$pidfile"; exit 0;; esac
+      if [ -r "/proc/$pid/cmdline" ] &&
+         tr "\0" " " <"/proc/$pid/cmdline" | grep -Fq -- "$marker"; then
+        kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+        for _ in {1..20}; do
+          [ ! -d "/proc/$pid" ] && break
+          sleep 0.1
+        done
+        [ ! -d "/proc/$pid" ] || kill -KILL -- "-$pid" 2>/dev/null || true
+      fi
+      rm -f -- "$pidfile"
+    ' -- "$pidfile" "$marker" >/dev/null 2>&1 || true
+  fi
+  if kill -0 "$job" 2>/dev/null; then
+    kill -TERM "$job" 2>/dev/null || true
+  fi
+  psi0_eval_reap_job "$job"
+}
+
+psi0_eval_reap_job() { # host job pid; never blocks forever
+  local job="$1"
+  local attempt
+  [ -n "$job" ] || return 0
+  for ((attempt=0; attempt<50; attempt++)); do
+    kill -0 "$job" 2>/dev/null || break
+    sleep 0.1
+  done
+  kill -KILL "$job" 2>/dev/null || true
+  wait "$job" 2>/dev/null || true
+}
+
+
+psi0_eval_require_alive() { # index, startup grace in seconds
+  local index="$1" grace="${2:-2}"
+  local job="${PSI0_EVAL_JOBS[$index]}"
+  local label="${PSI0_EVAL_LABELS[$index]}"
+  local rc=0
+  sleep "$grace"
+  if kill -0 "$job" 2>/dev/null; then
+    echo "[psi0-isaac-eval] $label: running" >&2
+    return 0
+  fi
+  wait "$job" || rc=$?
+  echo "error: [$label] exited during startup with status $rc; log tail:" >&2
+  tail -n 20 "${PSI0_EVAL_LOGS[$index]}" >&2 2>/dev/null || true
+  return 1
+}
+
+psi0_eval_heartbeat() { # $1 = launcher pid this lease belongs to
+  local owner="$1"
+  while kill -0 "$owner" 2>/dev/null; do
+    touch "$PSI0_EVAL_LEASE" 2>/dev/null || true
+    sleep 1
+  done
+  # The launcher is gone (Ctrl-C, crash, kill): drop the lease so the
+  # container-side wrappers stop their children instead of leaving the
+  # simulation running.
+  rm -f -- "$PSI0_EVAL_LEASE" 2>/dev/null || true
+}
+
+psi0_eval_report_isaac() {
+  # Isaac is a background job in PSI0_EVAL_JOBS; if it already died (profile
+  # error, another simulation holding the lock) say why here.
+  local index
+  for index in "${!PSI0_EVAL_LABELS[@]}"; do
+    if [ "${PSI0_EVAL_LABELS[$index]}" = "isaac" ]; then
+      if ! kill -0 "${PSI0_EVAL_JOBS[$index]}" 2>/dev/null; then
+        echo "error: [isaac] exited during startup; log tail:" >&2
+        tail -n 20 "${PSI0_EVAL_LOGS[$index]}" >&2 2>/dev/null || true
+      fi
+    fi
+  done
+}
+
+psi0_eval_stop_sonic_controller() {
+  local container_id
+  container_id="$(DC ps -q dev 2>/dev/null)" || return 0
+  [ -n "$container_id" ] || return 0
+  # shellcheck disable=SC2016 # Variables in this string expand in the container.
+  docker exec "$container_id" bash -lc '
+    pidfile=/tmp/humanoid-lab-sonic-controller-isaac.pid
+    [ -r "$pidfile" ] || exit 0
+    read -r pid <"$pidfile" || exit 0
+    case "$pid" in (*[!0-9]*|"") rm -f -- "$pidfile"; exit 0;; esac
+    [ -r "/proc/$pid/environ" ] || exit 0
+    tr "\0" "\n" <"/proc/$pid/environ" |
+      grep -Fxq "HUMANOID_LAB_CONTROLLER_TARGET=isaac" || exit 0
+    tr "\0" " " <"/proc/$pid/cmdline" | grep -Fq "g1_deploy_onnx_ref" || exit 0
+    echo "[psi0-isaac-eval] stopping the SONIC Y controller pid=$pid" >&2
+    kill -TERM "$pid" 2>/dev/null || true
+    for _ in {1..50}; do
+      [ ! -d "/proc/$pid" ] && break
+      sleep 0.1
+    done
+    [ ! -d "/proc/$pid" ] || kill -KILL "$pid" 2>/dev/null || true
+    rm -f -- "$pidfile"
+  ' >/dev/null 2>&1 || true
+}
+
+psi0_eval_watchdog() {
+  # A background process dying means the session cannot complete: record why and
+  # stop the foreground controller so psi0_isaac_eval can tear everything down.
+  local index job
+  while true; do
+    sleep 1
+    for index in "${!PSI0_EVAL_JOBS[@]}"; do
+      job="${PSI0_EVAL_JOBS[$index]}"
+      if ! kill -0 "$job" 2>/dev/null; then
+        printf '%s\n' "${PSI0_EVAL_LABELS[$index]}" >"$PSI0_EVAL_ABORT_FILE"
+        psi0_eval_stop_sonic_controller
+        return
+      fi
+    done
+  done
+}
+
+psi0_eval_cleanup() {
+  [ "$PSI0_EVAL_CLEANED" -eq 0 ] || return 0
+  PSI0_EVAL_CLEANED=1
+  local index
+  if [ -n "$PSI0_EVAL_HEARTBEAT" ]; then
+    kill "$PSI0_EVAL_HEARTBEAT" 2>/dev/null || true
+    psi0_eval_reap_job "$PSI0_EVAL_HEARTBEAT"
+    PSI0_EVAL_HEARTBEAT=""
+  fi
+  # Removing the lease also makes the container-side wrappers stop their
+  # children, so teardown does not depend on the pidfile kill alone.
+  rm -f -- "$PSI0_EVAL_LEASE"
+  if [ -n "$PSI0_EVAL_WATCHDOG" ]; then
+    kill "$PSI0_EVAL_WATCHDOG" 2>/dev/null || true
+    psi0_eval_reap_job "$PSI0_EVAL_WATCHDOG"
+    PSI0_EVAL_WATCHDOG=""
+  fi
+  psi0_eval_stop_sonic_controller
+  for ((index=${#PSI0_EVAL_JOBS[@]}-1; index>=0; index--)); do
+    psi0_eval_bg_stop "$index"
+  done
+  rm -f -- "$PSI0_EVAL_ABORT_FILE"
+}
+
+psi0_eval_on_signal() {
+  psi0_eval_cleanup
+  exit 143
+}
+
+psi0_isaac_eval() {
+  local checkpoint_dir="" base_run_dir="" checkpoint_step="" eval_args_str="" reason="" controller_rc=0
+  local bridge_index
+  local -a eval_args=() isaac_args=()
+  local profile_file=configs/profiles/isaac-g1-sonic-blockstacking-dex3.json
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --checkpoint-dir) checkpoint_dir="${2:-}"; shift 2 ;;
+      --checkpoint-dir=*) checkpoint_dir="${1#*=}"; shift ;;
+      --checkpoint-step) checkpoint_step="${2:-}"; shift 2 ;;
+      --checkpoint-step=*) checkpoint_step="${1#*=}"; shift ;;
+      --base-run-dir) base_run_dir="${2:-}"; shift 2 ;;
+      --base-run-dir=*) base_run_dir="${1#*=}"; shift ;;
+      --gui|--headless) isaac_args+=("$1"); shift ;;
+      --duration) isaac_args+=("$1" "${2:-}"); shift 2 ;;
+      --duration=*) isaac_args+=("$1"); shift ;;
+      *)
+        # Everything else belongs to the bridge/UI launcher on the other side of
+        # docker exec; it owns the flag's meaning and its validation.
+        eval_args+=("$1"); shift ;;
+    esac
+  done
+  [ -n "$checkpoint_dir" ] || {
+    echo "usage: $0 psi0-isaac-eval --checkpoint-dir RUN_DIR --checkpoint-step STEP [--host H] [--port P] [--gui|--headless] [--duration S]" >&2
+    return 2
+  }
+  [[ "$checkpoint_step" =~ ^[0-9]+$ ]] || {
+    echo "error: --checkpoint-step must be an integer (for example 40000); 'latest' is not accepted" >&2
+    return 2
+  }
+  [ -f "$profile_file" ] || {
+    echo "error: the BlockStacking profile is missing: $profile_file" >&2
+    return 2
+  }
+  # An explicit base run dir is a host-or-container path like --checkpoint-dir;
+  # the default base location is derived inside the container from the run's own
+  # run_config.json, so this flag is only needed for a prebuilt artifact.
+  if [ -n "$base_run_dir" ]; then
+    eval_args+=("--base-run-dir=$(psi0_eval_container_path "$base_run_dir")")
+  fi
+  if [ "${#eval_args[@]}" -gt 0 ]; then
+    printf -v eval_args_str ' %q' "${eval_args[@]}"
+  fi
+
+  local container_ckpt
+  container_ckpt="$(psi0_eval_container_path "$checkpoint_dir")"
+  up_once
+  local container_id
+  container_id="$(psi0_eval_container_id)" || return 1
+  # Fail before Isaac and the policy server spend minutes loading: the bridge
+  # re-validates the same directory against the served /info anyway.
+  docker exec "$container_id" test -f "$container_ckpt/run_config.json" || {
+    echo "error: checkpoint directory has no run_config.json: $container_ckpt" >&2
+    return 2
+  }
+  docker exec "$container_id" test -d "$container_ckpt/checkpoints/ckpt_$checkpoint_step" || {
+    echo "error: checkpoint ckpt_$checkpoint_step does not exist under $container_ckpt/checkpoints" >&2
+    return 2
+  }
+  # Refuse to run next to a foreign policy server: the bridge verifies
+  # /info.run_dir, but a stale server must fail here, before Isaac and the model
+  # load.  The probe only checks reachability; identity is enforced by the bridge.
+  local stale_json=""
+  stale_json="$(docker exec "$container_id" bash -lc 'curl -fsS --max-time 2 http://127.0.0.1:8014/info' 2>/dev/null || true)"
+  if [ -n "$stale_json" ]; then
+    echo "error: :8014 already serves a policy server (${stale_json:0:140}); stop it first —" >&2
+    echo "       the bridge verifies /info.run_dir and refuses a stale server from another run" >&2
+    return 2
+  fi
+
+  mkdir -p "$PSI0_EVAL_HOST_LOG_DIR"
+  trap psi0_eval_on_signal INT TERM HUP
+  rm -f -- "$PSI0_EVAL_ABORT_FILE"
+
+  # The UI banner should name the port the bridge will actually serve.
+  local ui_port=8015 index
+  for ((index=0; index<${#eval_args[@]}; index++)); do
+    case "${eval_args[$index]}" in
+      --port) ui_port="${eval_args[$((index+1))]:-8015}" ;;
+      --port=*) ui_port="${eval_args[$index]#*=}" ;;
+    esac
+  done
+
+  g1_mode_args psi0-isaac-eval "${isaac_args[@]}"
+  echo "[psi0-isaac-eval] run dir    : $container_ckpt (step $checkpoint_step)" >&2
+  echo "[psi0-isaac-eval] logs       : $PSI0_EVAL_HOST_LOG_DIR" >&2
+  echo "[psi0-isaac-eval] UI         : http://localhost:$ui_port/" >&2
+
+  # The session lease: refreshed while the launcher lives, watched by every
+  # container-side wrapper.  A killed launcher therefore stops the whole stack.
+  touch "$PSI0_EVAL_LEASE"
+  psi0_eval_heartbeat $$ &
+  PSI0_EVAL_HEARTBEAT=$!
+
+  # 1. Isaac BlockStacking scene (WebRTC by default, like every isaac-g1 entry).
+  local isaac_flags=""
+  if [ "${#G1_ARGS[@]}" -gt 0 ]; then
+    printf -v isaac_flags ' %q' "${G1_ARGS[@]}"
+  fi
+  if [ "${#isaac_args[@]}" -gt 0 ]; then
+    printf -v isaac_flags '%s %q' "$isaac_flags" "${isaac_args[@]}"
+  fi
+  local isaac_index="${#PSI0_EVAL_JOBS[@]}"
+  psi0_eval_bg_start isaac "run-isaac-g1.py" \
+    "source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && export DISPLAY='${DISPLAY:-:0}' && export PUBLIC_IP='${ISAAC_LIVESTREAM_ENDPOINT:-}' && mkdir -p /tmp/humanoid-lab-kit-cwd && cd /tmp/humanoid-lab-kit-cwd && { exec 9>/tmp/humanoid-lab-isaac-g1.lock; flock -n 9 || { echo 'error: another Isaac G1 simulation is already running' >&2; exit 3; }; } && exec python /workspace/humanoid-lab/scripts/run-isaac-g1.py --profile /workspace/humanoid-lab/$profile_file$isaac_flags"
+
+  # 2. Bridge + UI.  It owns the policy server: it spawns serve_psi0_sonic (the
+  # upstream serve_psi0-rtc-sonic.sh invocation) as its child, so the UI
+  # checkpoint switch restarts that child under the bridge's own identity
+  # checks; the launcher only tears the bridge down.  The WebRTC endpoint/client
+  # from the host are handed to the child so the UI link points at the stream
+  # this run actually serves.
+  local bridge_index="${#PSI0_EVAL_JOBS[@]}"
+  psi0_eval_bg_start psi0-bridge "psi0-isaac-eval.py" \
+    "source /opt/humanoid-lab/entrypoint.sh && use-psi0 && export CUDA_VISIBLE_DEVICES=0 && cd /workspace/humanoid-lab && PYTHONPATH=src exec python3 scripts/psi0-isaac-eval.py --checkpoint-dir='$container_ckpt' --checkpoint-step='$checkpoint_step' --policy-log='$PSI0_EVAL_LOG_DIR/psi0-server.log' --webrtc-host='${ISAAC_LIVESTREAM_ENDPOINT:-}' --webrtc-port='${ISAAC_LIVESTREAM_PORT:-49100}' --webrtc-client='${ISAAC_WEBRTC_CLIENT:-}'$eval_args_str"
+
+  psi0_eval_require_alive "$isaac_index" 4 || { psi0_eval_cleanup; return 1; }
+  psi0_eval_require_alive "$bridge_index" || { psi0_eval_report_isaac; psi0_eval_cleanup; return 1; }
+
+  psi0_eval_watchdog &
+  PSI0_EVAL_WATCHDOG=$!
+
+  # The eval streams the policy's Protocol v4 poses to the controller, so the
+  # controller must run the ZMQ input interface (`--input-type zmq`): the
+  # default keyboard interface has no pose subscriber at all.  Enter enables the
+  # pose stream, `]` starts control — both are the deployment's own keys.
+  echo "[psi0-isaac-eval] controller : ./g1_deploy_onnx_ref in this terminal — press Enter to enable the" >&2
+  echo "[psi0-isaac-eval]              policy pose stream, then ] to start control; Ctrl-C ends the session" >&2
+  run_sonic_controller zmq
+  controller_rc=$?
+
+  if [ -f "$PSI0_EVAL_ABORT_FILE" ]; then
+    reason="$(cat -- "$PSI0_EVAL_ABORT_FILE" 2>/dev/null || true)"
+  fi
+  psi0_eval_cleanup
+  trap - INT TERM HUP
+  if [ -n "$reason" ]; then
+    echo "error: [$reason] exited while the session was running; the session was stopped" >&2
+    for index in "${!PSI0_EVAL_LABELS[@]}"; do
+      if [ "${PSI0_EVAL_LABELS[$index]}" = "$reason" ]; then
+        tail -n 20 "${PSI0_EVAL_LOGS[$index]}" >&2 2>/dev/null || true
+      fi
+    done
+    return 1
+  fi
+  return "$controller_rc"
+}
+
 case "${1:-}" in
   "")
     up_once
@@ -496,72 +976,16 @@ case "${1:-}" in
     run_isaac_g1 "$profile_file" "${G1_ARGS[@]}" "${@:3}"
     ;;
   sonic-controller)
-    # The official SONIC deployment in this terminal, exactly as the upstream
-    # documentation runs it: raw keyboard on this TTY, planner loaded, `]` to
-    # start. This launcher owns the Isaac-targeted controller role: a new
-    # invocation replaces an older controller started through this same path,
-    # without touching unmarked SONIC/MuJoCo deployments.
-    # The deployment owns this terminal's stdin; every variable below expands
-    # inside the container.
     up_once
-    # shellcheck disable=SC2016
-    sonic_input_type="${2:-keyboard}"
-    case "$sonic_input_type" in keyboard|zmq_manager) ;; *) echo "usage: $0 sonic-controller [keyboard|zmq_manager]" >&2; exit 2;; esac
-    DC exec dev bash -lc '
-      source /opt/humanoid-lab/entrypoint.sh
-      cd /data/models/sonic-deploy
-      export LD_LIBRARY_PATH=/data/models/sonic-deploy/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-      export SONIC_MODELS_DIR=/data/models/sonic
-      export SONIC_REFERENCE_DIR=/data/models/sonic-isaac/reference/example
-      export SONIC_PLANNER=/data/models/sonic-isaac/planner/target_vel/V2/planner_sonic.onnx
-      case "$SONIC_PLANNER" in
-        *V0*|*V1*|*V2*) ;;
-        *) echo "error: the deployment reads its planner version token from the path;" >&2
-           echo "       planner version token (V0/V1/V2) missing in: $SONIC_PLANNER" >&2
-           exit 2 ;;
-      esac
-      controller_pidfile=/tmp/humanoid-lab-sonic-controller-isaac.pid
-      takeover_lock=/tmp/humanoid-lab-sonic-controller-isaac.takeover.lock
-      controller_target=isaac
-
-      is_isaac_controller() {
-        candidate=$1
-        case "$candidate" in (*[!0-9]*|"") return 1;; esac
-        [ -r "/proc/$candidate/environ" ] || return 1
-        [ -r "/proc/$candidate/cmdline" ] || return 1
-        tr "\0" "\n" <"/proc/$candidate/environ" |
-          grep -Fxq "HUMANOID_LAB_CONTROLLER_TARGET=$controller_target" || return 1
-        tr "\0" " " <"/proc/$candidate/cmdline" |
-          grep -Fq "g1_deploy_onnx_ref" || return 1
-      }
-
-      # Serialize only the short replacement transaction. The lock is released
-      # before exec so a later invocation can enter, stop this PID, and take over.
-      exec 8>"$takeover_lock"
-      flock 8
-      if [ -r "$controller_pidfile" ]; then
-        read -r previous_pid <"$controller_pidfile" || previous_pid=
-        if is_isaac_controller "$previous_pid" && [ "$previous_pid" != "$$" ]; then
-          echo "[sonic-controller] replacing previous Isaac controller pid=$previous_pid" >&2
-          kill -TERM "$previous_pid" 2>/dev/null || true
-          for _ in {1..50}; do
-            [ ! -d "/proc/$previous_pid" ] && break
-            sleep 0.1
-          done
-          [ ! -d "/proc/$previous_pid" ] || kill -KILL "$previous_pid" 2>/dev/null || true
-        fi
-      fi
-      export HUMANOID_LAB_CONTROLLER_TARGET="$controller_target"
-      printf "%s\n" "$$" >"$controller_pidfile"
-      flock -u 8
-      exec 8>&-
-      exec ./g1_deploy_onnx_ref lo \
-        "$SONIC_MODELS_DIR/sonic_v1_1/model_decoder.onnx" \
-        "$SONIC_REFERENCE_DIR" \
-        --obs-config "$SONIC_MODELS_DIR/sonic_v1_1/observation_config.yaml" \
-        --encoder-file "$SONIC_MODELS_DIR/sonic_v1_1/model_encoder.onnx" \
-        --planner-file "$SONIC_PLANNER" \
-        --input-type "$1" --output-type zmq --disable-crc-check' sonic-controller "$sonic_input_type"
+    run_sonic_controller "${2:-keyboard}"
+    ;;
+  psi0-isaac-eval)
+    # One command for the whole Psi0-in-the-loop evaluation: Isaac BlockStacking,
+    # the official SONIC Y controller and the bridge/UI (which owns the policy
+    # server it serves, restarted on a UI checkpoint switch).
+    # Flags not listed here are passed to scripts/psi0-isaac-eval.py.
+    up_once
+    psi0_isaac_eval "${@:2}"
     ;;
   doctor)
     ./doctor.sh
@@ -692,7 +1116,15 @@ case "${1:-}" in
     ;;
   sync)
     up_once
-    DC exec -T dev /opt/humanoid-lab/bootstrap-venvs.sh
+    # The image carries a copy of the bootstrap script, but the bind-mounted
+    # workspace is authoritative: an image built before a new environment was
+    # added (for example psi0) would otherwise silently skip it.
+    DC exec -T dev bash -lc '
+      source /opt/humanoid-lab/entrypoint.sh
+      if [ -f /workspace/humanoid-lab/containers/bootstrap-venvs.sh ]; then
+        exec bash /workspace/humanoid-lab/containers/bootstrap-venvs.sh
+      fi
+      exec /opt/humanoid-lab/bootstrap-venvs.sh'
     ;;
   fetch-models)
     up_once
@@ -722,7 +1154,7 @@ case "${1:-}" in
     exit 2
     ;;
   *)
-    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-direct-reference dex3|isaac-g1-sonic-fixed-base dex3|isaac-g1-sonic {dex3|inspire-ftp}|sonic-controller|sonic-dataset-validate|sonic-pilot|sonic-encode|sonic-review|sonic-review-serve|sonic-convert|sonic-convert-unitree|sonic-tests|sonic-verify|doctor|smoke|groot-finetune-smoke|psi0-smoke|psi0-dex3-check|psi0-dex3-run|psi0-tests|psi0-dex3-dataset-split|psi0-dex3-dataset-convert|psi0-dex3-dataset-validate|sync|fetch-models|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
+    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-direct-reference dex3|isaac-g1-sonic-fixed-base dex3|isaac-g1-sonic {dex3|inspire-ftp}|sonic-controller|psi0-isaac-eval --checkpoint-dir RUN_DIR --checkpoint-step STEP|sonic-dataset-validate|sonic-pilot|sonic-encode|sonic-review|sonic-review-serve|sonic-convert|sonic-convert-unitree|sonic-tests|sonic-verify|doctor|smoke|groot-finetune-smoke|psi0-smoke|psi0-dex3-check|psi0-dex3-run|psi0-tests|psi0-dex3-dataset-split|psi0-dex3-dataset-convert|psi0-dex3-dataset-validate|sync|fetch-models|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
     exit 2
     ;;
 esac

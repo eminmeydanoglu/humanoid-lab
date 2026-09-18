@@ -38,6 +38,11 @@ dependencies = [
     # --group serve
     "fastapi==0.119.1",
     "uvicorn==0.38.0",
+    # The Psi0-SONIC bridge (scripts/psi0-isaac-eval.py) runs in this environment
+    # and owns the ZMQ endpoints itself: action PUB :5556, g1_debug SUB :5557,
+    # camera REQ :5558. pyzmq is already in upstream's resolved graph; this makes
+    # it a real dependency of the serve group instead of a bare constraint.
+    "pyzmq==27.2.0",
     # --group viz
     "transforms3d==0.4.2",
     "viser==1.0.15",

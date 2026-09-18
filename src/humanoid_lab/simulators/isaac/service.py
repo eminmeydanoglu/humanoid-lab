@@ -18,12 +18,22 @@ from typing import Any, Mapping
 from ...contracts.commands import CommandError, CompleteRobotCommand, JointCommand, JointLayout, resolve_layouts
 from ...controllers.base import ControllerSource, RobotStateSample
 from ...controllers.factory import build_controller
+from .camera_service import (
+    DEFAULT_CAMERA_ENDPOINT,
+    DEFAULT_CONTROL_ENDPOINT,
+    HeadCameraEndpoint,
+    ResetControlEndpoint,
+)
 from .contracts import ContractError, RunProfile, TimelineState, quaternion_up_z
 from .maths import quat_to_rotation_vector
 
 PASSIVE = "passive"
 CONTROLLED = "controlled"
 HAND_FALLBACKS = ("passive",)
+
+# Diffuse colors for the block-stacking scene materials.
+_CUBE_DIFFUSE_RGB = {"red": (0.80, 0.05, 0.05), "yellow": (0.85, 0.75, 0.05), "blue": (0.05, 0.20, 0.80)}
+_TARGET_DIFFUSE_RGB = (0.02, 0.02, 0.02)
 
 
 def _scalar_or_none(value: Any) -> float | None:
@@ -55,6 +65,10 @@ class SimulatorService:
 
     PAUSED_RENDER_HZ = 30.0
     PHYSX_NUM_THREADS = 4
+    #: Distal arm links whose world height the table calibration reads. The
+    #: declared table surface is derived from these in the standing pose, so the
+    #: live value is what tells an operator whether the table sits right.
+    PALM_LINK_NAMES = ("left_hand_palm_link", "right_hand_palm_link")
     # A setpoint change below this size is the deployment holding a pose, not
     # the controller moving; above it, control has taken over.
     SUPPORT_STATIC_EPSILON_RAD = 1e-3
@@ -79,6 +93,9 @@ class SimulatorService:
         kinematic_reference: Any | None = None,
         kinematic_label: str | None = None,
         replay_clock_output: Path | None = None,
+        camera_service: bool = False,
+        camera_endpoint: str = DEFAULT_CAMERA_ENDPOINT,
+        control_endpoint: str = DEFAULT_CONTROL_ENDPOINT,
     ) -> None:
         self.profile = profile
         self.app = simulation_app
@@ -92,6 +109,11 @@ class SimulatorService:
         self.kinematic_reference = kinematic_reference
         self.kinematic_label = kinematic_label or "kinematic"
         self.replay_clock_output = replay_clock_output
+        # The head-camera service is independent of GUI, tests and video: when
+        # the profile asks for it, the camera must exist and stream regardless.
+        self.camera_service = camera_service
+        self.camera_endpoint = camera_endpoint
+        self.control_endpoint = control_endpoint
         self.state = TimelineState.STARTING
         self.tick = 0
         self.episode_id = 0
@@ -105,6 +127,12 @@ class SimulatorService:
         self._control_window: Any = None
         self._head_camera_panel: Any = None
         self._pending_ui_reset = False
+        self._reset_source: str | None = None
+        self._head_camera: HeadCameraEndpoint | None = None
+        self._reset_control: ResetControlEndpoint | None = None
+        self._camera_service_final: dict[str, Any] | None = None
+        self._palm_body_ids: dict[str, int] = {}
+        self._asset_top_heights: dict[str, float] = {}
         self._device = profile.device
         self._is_rendering = False
         self._run_started = time.monotonic()
@@ -227,6 +255,7 @@ class SimulatorService:
         print('{"event":"isaac_g1_start","stage":"passive_actuators"}', flush=True)
         self._resolve_and_disable_actuators()
         self._resolve_initial_pose()
+        self._resolve_palm_body_ids()
         # The hard reset above wrote the asset's own defaults; the profile's
         # declared start-up pose has to replace them before the first step.
         self._write_initial_state_to_sim()
@@ -239,6 +268,7 @@ class SimulatorService:
         self._set_debug_camera()
         if self.show_ui:
             self._open_ui()
+        self._start_camera_service()
         self._transition(TimelineState.PAUSED)
 
     def play(self) -> None:
@@ -255,7 +285,12 @@ class SimulatorService:
         self._transition(TimelineState.STOPPING)
 
     def reset_episode(self, *, resume: bool | None = None) -> None:
-        """Soft-reset tensors without rebuilding topology or hard-resetting Kit."""
+        """Soft-reset tensors without rebuilding topology or hard-resetting Kit.
+
+        The episode id is bumped first: it is the boundary that makes the reset
+        safe with a live controller, because every command still cached or in
+        flight under the old id fails the episode check in ``_apply_control``.
+        """
         was_playing = bool(self._timeline.is_playing())
         should_resume = was_playing if resume is None else resume
         default_root = self._write_initial_state_to_sim()
@@ -276,6 +311,17 @@ class SimulatorService:
         self._camera_shape = None
         self._camera_changed_frames = 0
         self._previous_camera_digest = None
+        # A reset restores the robot and the cubes; the frame from before that
+        # restoration must not be served as if it showed the current episode.
+        if self._head_camera is not None:
+            self._head_camera.invalidate(episode_id=self.episode_id)
+        # The previous episode's commands are invalid from here on, so the robot
+        # is passive until the controller sends new ones under the new id.  The
+        # declared start-up support goes back up for exactly that window: a
+        # reset robot that no controller has claimed yet must not fall over.
+        self._control_mode = PASSIVE
+        if self._support_active:
+            self._start_support()
         self._transition(TimelineState.PLAYING if should_resume else TimelineState.PAUSED)
         if should_resume and not self._timeline.is_playing():
             self.play()
@@ -608,17 +654,41 @@ class SimulatorService:
 
     def _request_reset_from_ui(self) -> None:
         """Queue reset work for the simulation-loop boundary."""
-        if self._control_mode == CONTROLLED:
-            # A reset teleports the articulation while the controller still
-            # drives it from its own state history. Refusing the request is the
-            # only outcome that cannot mix two episodes.
-            print(
-                '{"event":"isaac_g1_ui_reset_refused","reason":"controller_active"}',
-                flush=True,
-            )
-            return
+        self._queue_reset(source="ui")
+
+    def _request_reset_from_service(self) -> bool:
+        """Queue a headless reset request from the ZMQ control endpoint.
+
+        Called on the control service thread; it only sets the same pending flag
+        the GUI uses, so the actual reset still runs on the simulation loop.
+        """
+        return self._queue_reset(source="control")
+
+    def _queue_reset(self, *, source: str) -> bool:
+        """Accept a reset request from any timeline state, controller included.
+
+        The client stops its action stream and then asks for the reset, so a
+        request routinely arrives inside the command TTL window, while the
+        controller is still the last writer.  Refusing it there turned the
+        client's own ordering into a silent failure.  The reset itself stays
+        safe for a different reason: it bumps the episode id, so the command
+        the controller still holds -- and anything in flight -- fails the
+        episode check and the robot goes passive until fresh commands arrive.
+        """
+        self._reset_source = source
         self._pending_ui_reset = True
-        print('{"event":"isaac_g1_ui_reset_requested"}', flush=True)
+        print(
+            json.dumps(
+                {
+                    "event": "isaac_g1_reset_requested",
+                    "source": source,
+                    "control_mode": self._control_mode,
+                    "episode_id": self.episode_id,
+                }
+            ),
+            flush=True,
+        )
+        return True
 
     def _open_ui(self) -> None:
         from omni import ui
@@ -650,11 +720,11 @@ class SimulatorService:
             with ui.VStack(spacing=8, height=0):
                 ui.Label("Passive robot: motors disabled")
                 ui.Button("Reset Robot", height=36, clicked_fn=self._request_reset_from_ui)
-                ui.Label("Reset restores the initial pose and pauses physics.")
+                ui.Label("Reset restores the initial pose; physics keeps running.")
 
     def _make_scene_cfg(self) -> Any:
         import isaaclab.sim as sim_utils
-        from isaaclab.assets import ArticulationCfg, AssetBaseCfg
+        from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
         from isaaclab.scene import InteractiveSceneCfg
         from isaaclab.sensors import CameraCfg
         from isaaclab.utils import configclass
@@ -684,10 +754,39 @@ class SimulatorService:
         )
         camera = self.profile.camera
         camera_path = f"{{ENV_REGEX_NS}}/Robot/{camera.parent_link}/{camera.name}"
+        scene_spec = self.profile.scene
+
+        def _cube_cfg(cube: Any) -> RigidObjectCfg:
+            return RigidObjectCfg(
+                prim_path=f"{{ENV_REGEX_NS}}/Cube_{cube.color}",
+                init_state=RigidObjectCfg.InitialStateCfg(pos=cube.position_m, rot=cube.rotation_wxyz),
+                spawn=sim_utils.CuboidCfg(
+                    size=cube.size_m,
+                    rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+                    mass_props=sim_utils.MassPropertiesCfg(mass=cube.mass_kg),
+                    collision_props=sim_utils.CollisionPropertiesCfg(),
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=_CUBE_DIFFUSE_RGB[cube.color]),
+                    physics_material=sim_utils.RigidBodyMaterialCfg(
+                        friction_combine_mode="max",
+                        restitution_combine_mode="min",
+                        static_friction=1.0,
+                        dynamic_friction=1.0,
+                        restitution=0.0,
+                    ),
+                ),
+            )
+
+        # Built outside the configclass body so the intermediate mapping is not
+        # auto-annotated into a config field.
+        scene_cubes = {} if scene_spec is None else {cube.color: _cube_cfg(cube) for cube in scene_spec.cubes}
 
         @configclass
         class IsaacG1BaseSceneCfg(InteractiveSceneCfg):
-            ground = AssetBaseCfg(prim_path="/World/ground", spawn=sim_utils.GroundPlaneCfg())
+            ground = (
+                AssetBaseCfg(prim_path="/World/ground", spawn=sim_utils.GroundPlaneCfg())
+                if scene_spec is None or scene_spec.ground_plane
+                else None
+            )
             dome_light = AssetBaseCfg(
                 prim_path="/World/DomeLight",
                 spawn=sim_utils.DomeLightCfg(intensity=1400.0, color=(0.82, 0.86, 0.92)),
@@ -696,6 +795,36 @@ class SimulatorService:
                 prim_path="/World/KeyLight",
                 spawn=sim_utils.DistantLightCfg(intensity=2800.0, color=(1.0, 0.95, 0.88)),
             )
+            if scene_spec is not None:
+                table = AssetBaseCfg(
+                    prim_path="{ENV_REGEX_NS}/Table",
+                    init_state=AssetBaseCfg.InitialStateCfg(
+                        pos=scene_spec.table.position_m,
+                        rot=scene_spec.table.rotation_wxyz,
+                    ),
+                    spawn=sim_utils.UsdFileCfg(
+                        usd_path=scene_spec.table.asset_reference,
+                        rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+                    ),
+                )
+                cube_red = scene_cubes["red"]
+                cube_yellow = scene_cubes["yellow"]
+                cube_blue = scene_cubes["blue"]
+                target = AssetBaseCfg(
+                    prim_path="{ENV_REGEX_NS}/TargetTape",
+                    init_state=AssetBaseCfg.InitialStateCfg(
+                        pos=scene_spec.target.position_m,
+                        rot=scene_spec.target.rotation_wxyz,
+                    ),
+                    # A flat marker with no collider: it labels the goal without
+                    # perturbing the cubes or the robot that reach for it.
+                    spawn=sim_utils.CuboidCfg(
+                        size=scene_spec.target.size_m,
+                        visual_material=sim_utils.PreviewSurfaceCfg(
+                            diffuse_color=_TARGET_DIFFUSE_RGB, metallic=0.0, roughness=0.9
+                        ),
+                    ),
+                )
             robot: ArticulationCfg = robot_cfg
 
         @configclass
@@ -735,7 +864,7 @@ class SimulatorService:
 
         scene_cfg = (
             IsaacG1CameraSceneCfg
-            if self.test_mode is not None or self.show_head_camera or self.record_video is not None
+            if self.test_mode is not None or self.show_head_camera or self.record_video is not None or self.camera_service
             else IsaacG1BaseSceneCfg
         )
         return scene_cfg(num_envs=1, env_spacing=2.5, replicate_physics=False)
@@ -1496,6 +1625,195 @@ class SimulatorService:
         self._camera_frames += 1
         self._camera_shape = [int(value) for value in image.shape]
 
+    def _start_camera_service(self) -> None:
+        """Open the head-camera and reset endpoints the profile asked for.
+
+        Both services answer on their own threads and only touch plain Python
+        state: the camera service a byte buffer, the reset service the loop's
+        reset flag.  No Isaac object is reachable from either thread.
+        """
+        if not self.camera_service:
+            return
+        if self._head_camera is None:
+            self._head_camera = HeadCameraEndpoint(self.camera_endpoint)
+            self._head_camera.start()
+            if not self._head_camera.wait_ready():
+                raise RuntimeError(f"head-camera endpoint {self.camera_endpoint} did not bind")
+            if self._head_camera.error is not None:
+                raise RuntimeError(f"head-camera endpoint failed: {self._head_camera.error}")
+            self._reset_control = ResetControlEndpoint(
+                self.control_endpoint,
+                on_reset=self._request_reset_from_service,
+                status_provider=self._control_status,
+            )
+            self._reset_control.start()
+            if not self._reset_control.wait_ready() or self._reset_control.error is not None:
+                raise RuntimeError(f"reset control endpoint failed: {self._reset_control.error}")
+        print(
+            json.dumps(
+                {
+                    "event": "isaac_g1_camera_service",
+                    "camera_endpoint": self.camera_endpoint,
+                    "control_endpoint": self.control_endpoint,
+                }
+            ),
+            flush=True,
+        )
+
+    def _publish_camera_frame(self) -> None:
+        """Hand this tick's rendered RGB to the endpoint's thread-safe buffer."""
+        endpoint = self._head_camera
+        if endpoint is None:
+            return
+        image = self._head_camera_rgb()
+        if image is None:
+            return
+        endpoint.publish_frame(image, timestamp_s=time.monotonic(), episode_id=self.episode_id)
+
+    def _control_status(self) -> dict[str, Any]:
+        """State the control thread may read; no Isaac API is involved."""
+        camera = self._head_camera.status() if self._head_camera is not None else None
+        return {
+            "episode_id": self.episode_id,
+            "physics_tick": self.tick,
+            "timeline": self.state.value,
+            "control_mode": self._control_mode,
+            "camera": camera,
+        }
+
+    def _camera_service_status(self) -> dict[str, Any] | None:
+        if self._head_camera is None:
+            return None
+        return {
+            **self._head_camera.status(),
+            "control_endpoint": self.control_endpoint,
+        }
+
+    def _stop_camera_service(self) -> None:
+        for endpoint in (self._head_camera, self._reset_control):
+            if endpoint is not None:
+                endpoint.stop()
+        self._head_camera = None
+        self._reset_control = None
+
+    # ------------------------------------------------------------- palm height
+
+    def _resolve_palm_body_ids(self) -> None:
+        """Bind the palm links the table-height diagnostic reads."""
+        names = list(self._robot.body_names)
+        self._palm_body_ids = {
+            name: names.index(name) for name in self.PALM_LINK_NAMES if name in names
+        }
+
+    def _palm_height_sample(self) -> dict[str, Any] | None:
+        """World height of each palm link, against the declared table surface.
+
+        The declared surface height is derived from these palms in the standing
+        pose, so a live reading is the number an operator compares against the
+        profile to decide whether the worktop needs to move.  This only reads
+        the robot; it changes nothing it observes.
+        """
+        if self._robot is None or not self._palm_body_ids:
+            return None
+        heights = {
+            name: float(self._robot.data.body_pos_w[0, index, 2])
+            for name, index in self._palm_body_ids.items()
+        }
+        surface = self.profile.scene.table.surface_height_m if self.profile.scene is not None else None
+        return {
+            "palm_z_m": heights,
+            "min_palm_z_m": min(heights.values()),
+            "max_palm_z_m": max(heights.values()),
+            "table_surface_height_m": surface,
+            "palm_minus_surface_m": (
+                {name: value - surface for name, value in heights.items()}
+                if surface is not None
+                else None
+            ),
+            "episode_id": self.episode_id,
+            "physics_tick": self.tick,
+        }
+
+    def _asset_top_height_m(self, prim_path: str) -> float | None:
+        """World height of the top face of one static scene prim, read live.
+
+        The profile states the height each scene asset was placed for; this is
+        the same reading taken on the stage the simulation actually runs, so the
+        declared numbers can be checked against the assets instead of trusted.
+        These prims are kinematic, so a reading is cached once it succeeds; a
+        stage that does not expose the prim reports None rather than a guess.
+        """
+        if prim_path in self._asset_top_heights:
+            return self._asset_top_heights[prim_path]
+        if self._sim is None or self.profile.scene is None:
+            return None
+        try:
+            from pxr import Usd, UsdGeom
+        except ImportError:
+            return None
+        prim = self._sim.stage.GetPrimAtPath(prim_path)
+        if not prim.IsValid():
+            return None
+        cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
+        aligned = cache.ComputeWorldBound(prim).ComputeAlignedRange()
+        if aligned.IsEmpty():
+            return None
+        self._asset_top_heights[prim_path] = float(aligned.GetMax()[2])
+        return self._asset_top_heights[prim_path]
+
+    def _table_worktop_height_m(self) -> float | None:
+        return self._asset_top_height_m("/World/envs/env_0/Table")
+
+    def _target_top_height_m(self) -> float | None:
+        return self._asset_top_height_m("/World/envs/env_0/TargetTape")
+
+    def _scene_probe(self) -> dict[str, Any] | None:
+        """Live table, target and cube readings next to the profile's numbers.
+
+        The declared surface height comes from the palms, so whether the cubes
+        actually rest on the worktop is a property only the running scene can
+        show.  Every field is allowed to be None: a reading that failed says so
+        instead of standing in for a measurement.
+        """
+        scene = self.profile.scene
+        if scene is None or self._scene is None:
+            return None
+        worktop = self._table_worktop_height_m()
+        target_top = self._target_top_height_m()
+        declared_target_top = scene.target.position_m[2] + scene.target.size_m[2] / 2.0
+        cubes: dict[str, Any] = {}
+        for cube in scene.cubes:
+            entry: dict[str, Any] = {
+                "declared_center_z_m": cube.position_m[2],
+                "live_center_z_m": None,
+                "expected_center_z_m": (
+                    worktop + cube.size_m[2] / 2.0 if worktop is not None else None
+                ),
+            }
+            try:
+                rigid = self._scene[f"cube_{cube.color}"]
+                entry["live_center_z_m"] = float(rigid.data.root_pos_w[0, 2])
+            except (KeyError, AttributeError, IndexError, TypeError, ValueError):
+                entry["live_center_z_m"] = None
+            cubes[cube.color] = entry
+        return {
+            "table_asset_reference": scene.table.asset_reference,
+            "table_origin_z_m": scene.table.position_m[2],
+            "declared_surface_height_m": scene.table.surface_height_m,
+            "live_worktop_height_m": worktop,
+            "live_worktop_minus_declared_m": (
+                worktop - scene.table.surface_height_m if worktop is not None else None
+            ),
+            "declared_target_top_z_m": declared_target_top,
+            "live_target_top_z_m": target_top,
+            "live_target_minus_declared_m": (
+                target_top - declared_target_top if target_top is not None else None
+            ),
+            "cubes": cubes,
+            "episode_id": self.episode_id,
+            "physics_tick": self.tick,
+        }
+
     def _start_video_recording(self) -> None:
         if self.record_video is None:
             return
@@ -1572,6 +1890,8 @@ class SimulatorService:
         self._scene.update(self.profile.physics_dt)
         self._publish_robot_state()
         self._perf_step_seconds += time.perf_counter() - step_started
+        if rendered:
+            self._publish_camera_frame()
         if rendered and self.test_mode is not None:
             self._consume_head_camera_frame()
         if rendered and self.record_video is not None:
@@ -1627,6 +1947,7 @@ class SimulatorService:
         if rendered and self.record_video is not None:
             self._record_video_frame()
         if at_frame_boundary:
+            self._publish_camera_frame()
             self._record_kinematic_row()
         self._perf_step_seconds += time.perf_counter() - step_started
         self._report_performance()
@@ -1680,6 +2001,15 @@ class SimulatorService:
         self._perf_step_seconds = 0.0
         self._perf_render_seconds = 0.0
         self._perf_render_count = 0
+        if self.profile.scene is not None:
+            sample = self._palm_height_sample()
+            if sample is not None:
+                print(
+                    json.dumps(
+                        {"event": "isaac_g1_palm_height", **sample, "scene": self._scene_probe()}
+                    ),
+                    flush=True,
+                )
 
     def run(self) -> dict[str, Any]:
         self.start()
@@ -1694,13 +2024,25 @@ class SimulatorService:
             ) and not self._kinematic_finished():
                 if self._pending_ui_reset:
                     self._pending_ui_reset = False
-                    # Match the official Isaac Lab reset order: write state
-                    # while playing, publish it through the sole physics step,
-                    # then pause on the freshly rendered initial pose.
+                    # Match the official Isaac Lab reset order: write state,
+                    # publish it through the sole physics step, and keep
+                    # running.  The reset restores the robot, the cubes and the
+                    # start-up support; pausing here would stop the loop that
+                    # everything downstream -- controller, camera, viewer --
+                    # reads from, with nothing left to restart it.
                     self.reset_episode(resume=True)
                     self._step_physics()
-                    self.pause()
-                    print('{"event":"isaac_g1_ui_reset","timeline":"paused"}', flush=True)
+                    print(
+                        json.dumps(
+                            {
+                                "event": "isaac_g1_reset",
+                                "timeline": self.state.value,
+                                "source": self._reset_source,
+                                "episode_id": self.episode_id,
+                            }
+                        ),
+                        flush=True,
+                    )
                     continue
                 if self._timeline.is_playing():
                     if self.state is not TimelineState.PLAYING:
@@ -1723,6 +2065,11 @@ class SimulatorService:
             if self._controller is not None:
                 self._controller.close()
             self._finish_video_recording()
+            # The endpoints are closed here, but the run summary still has to
+            # report what they served; without this the camera section of every
+            # completed run is empty.
+            self._camera_service_final = self._camera_service_status()
+            self._stop_camera_service()
         self._transition(TimelineState.STOPPED)
         summary = (
             self._passive_fall_acceptance()
@@ -1754,6 +2101,14 @@ class SimulatorService:
             "profile_id": self.profile.profile_id,
             **self._accounting(),
             "controller": self._controller_status(),
+            "camera_service": (
+                self._camera_service_final
+                if self._camera_service_final is not None
+                else self._camera_service_status()
+            ),
+            "palm_height": self._palm_height_sample(),
+            "scene_probe": self._scene_probe(),
+            "episode_id": self.episode_id,
             "video": {
                 "path": str(self.record_video) if self.record_video is not None else None,
                 "frames": self._video_frames,
