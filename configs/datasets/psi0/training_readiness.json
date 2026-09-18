@@ -1,0 +1,62 @@
+{
+  "recorded_at": "2026-09-17",
+  "repository_commit_before_changes": "9f8c322e2d9d2cd2cb8d8ad64fb4d078dc22295b",
+  "worktree_changes_committed": false,
+  "psi0_commit": "4f3720d45e102b36d7c3e9465ab8062274170518",
+  "dataset": {
+    "root": "data/datasets/psi0-unitree-dex3-sonic-v1",
+    "conversion_manifest_sha256": "a53a21c8baa499bc05a9edfce7d6f7e42d62ebea4b9d1cc011ae89baf6dafc1e",
+    "conversion_config_sha256": "0492882cdadd00a3bdd02aa302ce5fc97b49837c324012c416f3e8e9fe98a379",
+    "split_manifest_sha256": "0fc6cf2e92a60ac4a8bc65b5e585aa75ee4703d7f5532772b13dfab707d0f306",
+    "joint_contract_sha256": "0f7647ba3211be9a0ff9abda4d6addd306b8d48ae825af8e2f261448d140f50b",
+    "train_episodes": 2993,
+    "validation_episodes": 157,
+    "train_frames": 2452510,
+    "validation_frames": 134351,
+    "tasks": 13
+  },
+  "warm_start": {
+    "path": "data/checkpoints/psi0/postpre.sonic1.0.unifolm.2609092156.40k",
+    "model_sha256": "90f3ca3e189d7ecc43aa3f2d0c524edf87332537f7f328341c7199336e9ec8ca",
+    "action_header_sha256": "a714d69ed51cffdf1ca56894c51c8974a497e0bbdfee6ceb39fa340a15e619b2"
+  },
+  "training": {
+    "entrypoint": "./dev.sh psi0-dex3-run",
+    "gpu": "NVIDIA GeForce RTX 5090",
+    "microbatch": 1,
+    "gradient_accumulation": 32,
+    "effective_batch": 32,
+    "learning_rate": 0.000025,
+    "precision": "bf16",
+    "vlm": "frozen",
+    "action_expert": "trainable",
+    "max_steps": 40000,
+    "warmup_steps": 1000,
+    "validation_steps": 500,
+    "validation_batches": 10,
+    "checkpoint_steps": 1000,
+    "max_checkpoints_to_keep": 5,
+    "augmentation": {
+      "image_and_view": true,
+      "state_drop": 0.1,
+      "state_jitter_frames": 10,
+      "state_jitter_probability": 0.5,
+      "state_noise_std": 0.05
+    }
+  },
+  "measurements": {
+    "gradient_accumulation_verified": "32/32 microbatches",
+    "peak_cuda_allocated_gib": 19.19,
+    "peak_cuda_reserved_gib": 19.68,
+    "checkpoint_size_gib": 12,
+    "free_disk_gib_before_run": 404,
+    "steady_optimizer_step_seconds": 2.6,
+    "estimated_total_hours": 29
+  },
+  "active_run": {
+    "wandb_mode": "offline",
+    "wandb_project": "psi0-unitree-dex3",
+    "wandb_run_id": "e30jn33b",
+    "run_directory": "data/outputs/psi0-unitree-dex3-sonic-v1/finetune/unitree-dex3-sonic-v1.sonic.flow1000.cosine.lr2.5e-05.b32.gpus1.2609171406"
+  }
+}

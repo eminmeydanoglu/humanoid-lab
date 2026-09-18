@@ -109,6 +109,23 @@ shell_env() { # $1 = use-... function name
   DC exec dev bash -lc "source /opt/humanoid-lab/entrypoint.sh && $1 && exec bash"
 }
 
+# psi0-dex3-run/check are driven by env knobs; docker compose exec does not
+# forward the host environment, so pass the knobs the wrapper reads explicitly.
+psi0_forward_env() {
+  PSI0_FORWARD=()
+  local name
+  for name in \
+    MAX_STEPS BATCH ACCUM LR VAL_STEPS CKPT_STEPS VAL_BATCHES AUG \
+    STATE_DROP_PROB STATE_JITTER STATE_JITTER_PROB STATE_NOISE_STD \
+    RESUME EXP SEED DATASET_ROOT STATS INIT_DIR OUTPUT_DIR \
+    INSTRUCTION_KEY MASK_KEY WANDB_PROJECT WANDB_MODE CUDA_VISIBLE_DEVICES \
+    OMP_NUM_THREADS PSI0_PYTHON; do
+    if [ -n "${!name:-}" ]; then
+      PSI0_FORWARD+=(-e "$name=${!name}")
+    fi
+  done
+}
+
 cleanup_isaac_demo() { # $1 = container-side pidfile
   # docker compose exec does not terminate its container process when this
   # client is interrupted. The pidfile is per invocation, so cleanup cannot
@@ -561,6 +578,49 @@ case "${1:-}" in
     up_once
     DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-psi0 && exec /opt/humanoid-lab/psi0-env-smoke.sh "$@"' psi0-smoke "${@:2}"
     ;;
+  psi0-dex3-dataset-split)
+    # Kapı 0: freeze the episode-level train/validation split. Writes
+    # split_manifest.json (seed included) under the pack root; touches no source.
+    up_once
+    DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-psi0 && cd /workspace/humanoid-lab && PYTHONPATH=src exec python3 scripts/psi0-build-split.py "$@"' psi0-dex3-dataset-split "${@:2}"
+    ;;
+  psi0-dex3-dataset-convert)
+    # Kapı 1: Unitree Dex3 + 50 Hz SONIC -> Psi0 30 Hz LeRobot pack. Defaults to
+    # a mini dataset (one episode per task per split); --all-episodes converts
+    # the whole split manifest (Kapı 6).
+    up_once
+    DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-psi0 && cd /workspace/humanoid-lab && PYTHONPATH=src exec python3 scripts/convert-psi0-sonic-dataset.py "$@"' psi0-dex3-dataset-convert "${@:2}"
+    ;;
+  psi0-dex3-dataset-validate)
+    # Re-derives every produced episode from the frozen sources with its own
+    # resampling code and opens both splits with the pinned LeRobot loader.
+    up_once
+    DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-psi0 && cd /workspace/humanoid-lab && PYTHONPATH=src exec python3 scripts/validate-psi0-sonic-dataset.py "$@"' psi0-dex3-dataset-validate "${@:2}"
+    ;;
+  psi0-dex3-check)
+    # Kapı 2 dataset + warm-start preflight for the Unitree Dex3 SONIC v1 pack.
+    # No dataset -> it reports the missing pack instead of running a forward.
+    up_once
+    psi0_forward_env
+    DC exec -T "${PSI0_FORWARD[@]}" dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-psi0 && cd /workspace/humanoid-lab && exec bash scripts/psi0-unitree-dex3-sonic-v1.sh --check-only' psi0-dex3-check
+    ;;
+  psi0-dex3-run)
+    # Kapı 3-7: the same wrapper, stepped up through MAX_STEPS/ACCUM/AUG/RESUME.
+    up_once
+    psi0_forward_env
+    DC exec -T "${PSI0_FORWARD[@]}" dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-psi0 && cd /workspace/humanoid-lab && exec bash scripts/psi0-unitree-dex3-sonic-v1.sh "$@"' psi0-dex3-run "${@:2}"
+    ;;
+  psi0-tests)
+    # Contract tests plus the fixture checks against Psi0's real config and
+    # transforms.  Runs with the psi0 interpreter; pytest is not installed there.
+    up_once
+    DC exec -T dev bash -lc '
+      source /opt/humanoid-lab/entrypoint.sh
+      use-psi0
+      cd /workspace/humanoid-lab
+      set -e
+      PYTHONPATH=src python3 -m unittest discover -s tests -p "test_psi0_*.py" -v' psi0-tests "${@:2}"
+    ;;
   sonic-dataset-validate)
     up_once
     DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && cd /workspace/humanoid-lab && PYTHONPATH=src exec python3 scripts/validate-sonic-dataset.py "$@"' sonic-dataset-validate "${@:2}"
@@ -662,7 +722,7 @@ case "${1:-}" in
     exit 2
     ;;
   *)
-    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-direct-reference dex3|isaac-g1-sonic-fixed-base dex3|isaac-g1-sonic {dex3|inspire-ftp}|sonic-controller|sonic-dataset-validate|sonic-pilot|sonic-encode|sonic-review|sonic-review-serve|sonic-convert|sonic-convert-unitree|sonic-tests|sonic-verify|doctor|smoke|groot-finetune-smoke|psi0-smoke|sync|fetch-models|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
+    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-direct-reference dex3|isaac-g1-sonic-fixed-base dex3|isaac-g1-sonic {dex3|inspire-ftp}|sonic-controller|sonic-dataset-validate|sonic-pilot|sonic-encode|sonic-review|sonic-review-serve|sonic-convert|sonic-convert-unitree|sonic-tests|sonic-verify|doctor|smoke|groot-finetune-smoke|psi0-smoke|psi0-dex3-check|psi0-dex3-run|psi0-tests|psi0-dex3-dataset-split|psi0-dex3-dataset-convert|psi0-dex3-dataset-validate|sync|fetch-models|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
     exit 2
     ;;
 esac

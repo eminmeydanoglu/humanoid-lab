@@ -1,0 +1,136 @@
+# Psi0 Unitree G1 Dex3 + SONIC v1.1 conversion contract (Gate 0).
+#
+# Every semantic decision the converter must not make again lives here. The
+# sources under `source:` are frozen inputs: the converter only ever reads them.
+schema_version: 1
+name: psi0-unitree-dex3-sonic-v1
+
+source:
+  raw_root: /data/datasets/first_tur_ham/unitree-g1-dex3
+  sonic_root: /data/datasets/unitree-sonic-v1.1-78d
+  collections:
+    - G1_Dex3_BlockStacking_Dataset
+    - G1_Dex3_CameraPackaging_Dataset
+    - G1_Dex3_GraspSquare_Dataset
+    - G1_Dex3_ObjectPlacement_Dataset
+    - G1_Dex3_PickApple_Dataset
+    - G1_Dex3_PickBottle_Dataset
+    - G1_Dex3_PickCharger_Dataset
+    - G1_Dex3_PickDoll_Dataset
+    - G1_Dex3_PickGum_Dataset
+    - G1_Dex3_PickSnack_Dataset
+    - G1_Dex3_PickTissue_Dataset
+    - G1_Dex3_Pouring_Dataset
+    - G1_Dex3_ToastedBread_Dataset
+  # These two episodes are never converted and never appear in a split.
+  excluded_episodes:
+    G1_Dex3_ObjectPlacement_Dataset:
+      episodes: [0]
+      reason: >-
+        49 source frames; the SONIC future window cannot be produced from it, so
+        it is absent from the frozen 78D corpus.
+    G1_Dex3_ToastedBread_Dataset:
+      episodes: [396]
+      reason: >-
+        upstream episode metadata/parquet offset inconsistency; the declared
+        location is unreachable and the episode is absent from the frozen 78D
+        corpus.
+
+# Single left camera. The right camera is never a training input.
+camera:
+  source_key: observation.images.cam_left_high
+  target_key: observation.images.egocentric
+  excluded_keys:
+    - observation.images.cam_right_high
+  source_width: 640
+  source_height: 480
+  aspect_ratio: "4:3"
+
+fps:
+  source: 30
+  sonic: 50
+  dataset: 30
+
+# 50 Hz SONIC corpus -> 30 Hz dataset timeline.
+#
+# The two timelines share a 1/150 s grid, so an in-corpus nearest sample is at
+# most 1/150 s away; measured over all 3150 episodes, every frame a valid anchor
+# depends on is within that bound. The frozen corpus is sometimes one or two
+# frames shorter than the ideal resampling of the raw 30 Hz timeline, so beyond
+# the last valid anchor the error may grow to the tail bound. The selection must
+# also be monotone, and it was monotone in every episode.
+resample:
+  method: nearest_timestamp
+  max_timestamp_error_s: 0.0068
+  tail_timestamp_error_s: 0.021
+
+# Action: the frozen 78D array is stored as two separate fields so that the
+# Psi0 SONIC `action[:14]` hand slice can never be read as the body token.
+action:
+  field: action
+  body_token_field: action.body_token_v1_1
+  body_token_dim: 64
+  hand_dim: 14
+  source_body_token_slice: [0, 64]
+  source_hand_slice: [64, 78]
+
+# State: synthetic standing lower body/waist + measured arms and hands.
+state:
+  field: observation.state
+  dim: 43
+  measured_dim: 28
+  standing_source: official_sonic_default_standing_pose
+  joint_layout:
+    legs_and_waist: [0, 15]
+    arms: [15, 29]
+    hands: [29, 43]
+  semantics:
+    legs_and_waist: synthetic constant SONIC standing proxy
+    arms: measured observation
+    hands: measured observation
+
+# Model-side contract after the Psi0 repack/padding step.
+model_contract:
+  state_dim: 45
+  action_dim: 80
+  action_chunk_size: 30
+  action_exec_horizon: 30
+
+video:
+  codec: h264
+  pix_fmt: yuv420p
+  crf: 23
+  preset: veryfast
+
+split:
+  seed: 20260917
+  val_fraction: 0.05
+  strategy: episode_level_stratified_by_collection
+  min_val_per_collection: 1
+
+output:
+  root: /data/datasets/psi0-unitree-dex3-sonic-v1
+  train_repo: train
+  val_repo: val
+
+# Canonical English instruction per collection. These are the deployment
+# instructions and are not paraphrased during the first training run. The
+# upstream `meta/tasks.parquet` label is unreliable (seven pick-* collections
+# share one label, GraspSquare carries CameraPackaging's label), so the
+# collection name is the task identifier and this list is the only source of
+# the instruction text.
+tasks:
+  G1_Dex3_BlockStacking_Dataset: "Stack the three cubic blocks on the black tape in the order red, yellow, blue."
+  G1_Dex3_CameraPackaging_Dataset: "Place the RealSense D-405 camera into the mounting case and secure the lid."
+  # Upstream label is "camera packaging" (copied from CameraPackaging); corrected.
+  G1_Dex3_GraspSquare_Dataset: "Grasp the square object."
+  G1_Dex3_ObjectPlacement_Dataset: "Pick up the toothpaste and the trash bag and place them into the blue storage container."
+  G1_Dex3_PickApple_Dataset: "Put the apple into the plate."
+  G1_Dex3_PickBottle_Dataset: "Put the bottle into the plate."
+  G1_Dex3_PickCharger_Dataset: "Put the charger into the plate."
+  G1_Dex3_PickDoll_Dataset: "Put the doll into the plate."
+  G1_Dex3_PickGum_Dataset: "Put the gum into the plate."
+  G1_Dex3_PickSnack_Dataset: "Put the snack into the plate."
+  G1_Dex3_PickTissue_Dataset: "Put the tissue paper into the plate."
+  G1_Dex3_Pouring_Dataset: "Take the water bottle and pour water into the transparent glass cup."
+  G1_Dex3_ToastedBread_Dataset: "Place the bread from the serving tray into the toaster, then hand the toast to the human."
