@@ -69,6 +69,51 @@ class IsaacG1SimulationConfigTests(unittest.TestCase):
         self.assertEqual(profile.with_device(None).device, "cpu")
         self.assertEqual(profile.with_device("cuda").device, "cuda")
 
+    def test_render_cadence_comes_from_the_profile_and_can_be_overridden(self) -> None:
+        """The render cadence is declarable, and the camera period follows it."""
+        source = json.loads((ROOT / "configs/profiles/isaac-g1-dex3.json").read_text())
+        source["simulation"]["render_interval"] = 12
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cadence.json"
+            path.write_text(json.dumps(source))
+            profile = RunProfile.load(path)
+        self.assertEqual(profile.render_interval, 12)
+        # The sensor period and the viewport move together: a camera left on the
+        # default cadence would sample a different instant than the frame shown.
+        self.assertAlmostEqual(profile.camera_update_period, 12 * profile.physics_dt)
+        self.assertEqual(profile.with_render_interval(16).render_interval, 16)
+        self.assertEqual(profile.with_render_interval(None).render_interval, 12)
+        with self.assertRaisesRegex(ContractError, "at least one physics tick"):
+            profile.with_render_interval(0)
+
+    def test_render_interval_rejects_values_that_are_not_whole_ticks(self) -> None:
+        profile = RunProfile.load(ROOT / "configs/profiles/isaac-g1-dex3.json")
+        # bool is an int subclass, so True would otherwise pass as one tick.
+        # None is not an error here: it is how the CLI says "no override".
+        for bad, pattern in ((True, "boolean"), ("8", "integer"), (8.5, "whole number")):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(ContractError, pattern):
+                    profile.with_render_interval(bad)  # type: ignore[arg-type]
+        self.assertEqual(profile.with_render_interval(8.0).render_interval, 8)
+        self.assertEqual(profile.with_render_interval(None).render_interval, profile.render_interval)
+
+    def test_load_rejects_a_profile_cadence_that_is_not_a_whole_tick(self) -> None:
+        source = json.loads((ROOT / "configs/profiles/isaac-g1-dex3.json").read_text())
+        for bad, pattern in ((True, "boolean"), (None, "null"), (2.5, "whole number"), ("4", "integer")):
+            with self.subTest(bad=bad):
+                source["simulation"]["render_interval"] = bad
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "cadence.json"
+                    path.write_text(json.dumps(source))
+                    with self.assertRaisesRegex(ContractError, pattern):
+                        RunProfile.load(path)
+
+    def test_shipped_profiles_keep_the_default_render_cadence(self) -> None:
+        """Nothing ships a cadence override by default; the knob is opt-in."""
+        for path in sorted((ROOT / "configs/profiles").glob("isaac-g1-*.json")):
+            source = json.loads(path.read_text())
+            self.assertNotIn("render_interval", source["simulation"], path.name)
+
 
 class IsaacG1TerrainTests(unittest.TestCase):
     ROUGH = "isaac-g1-sonic-rough-dex3.json"
@@ -494,12 +539,20 @@ class IsaacG1SourceInvariantTests(unittest.TestCase):
             'settings.set_int("/persistent/physics/numThreads", self.PHYSX_NUM_THREADS)',
             source,
         )
+        self.assertIn("PHYSX_NUM_THREADS = 4", source)
         self.assertIn("device=self._device", source)
         self.assertIn("render_interval=1", source)
         self.assertIn('rendering_mode="balanced"', source)
-        self.assertIn("enable_dlssg=self.show_ui", source)
+        self.assertIn("enable_dlssg=(", source)
         self.assertIn("enable_dl_denoiser=True", source)
         self.assertIn("update_period=self.profile.camera_update_period", source)
+
+    def test_render_cadence_override_is_refused_for_a_kinematic_replay(self) -> None:
+        """A kinematic replay renders per reference frame; the flag cannot apply."""
+        source = (ROOT / "src/humanoid_lab/simulators/isaac/cli.py").read_text()
+        self.assertIn("if args.render_interval is not None and args.kinematic_reference is not None", source)
+        self.assertIn("--render-interval cannot be combined with --kinematic-reference", source)
+        self.assertIn("parser.error(", source)
 
     def test_the_service_ui_tracks_the_displayed_ui(self) -> None:
         """A streamed run is headless on the host but still draws the UI."""

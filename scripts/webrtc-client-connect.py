@@ -12,12 +12,16 @@ client started with ``--remote-debugging-port``.
 """
 
 import argparse
+import itertools
 import json
 import time
 import urllib.error
 import urllib.request
 
 import websocket
+
+#: DevTools request ids have to be unique per connection.
+_REQUEST_IDS = itertools.count(1)
 
 
 def page_socket(port: int, wait_seconds: float) -> str:
@@ -49,24 +53,28 @@ def open_page(port: int, wait_seconds: float):
     )
 
 
-def evaluate(socket, expression: str, counter=[0]):
-    counter[0] += 1
-    socket.send(
-        json.dumps(
-            {
-                "id": counter[0],
-                "method": "Runtime.evaluate",
-                "params": {"expression": expression, "returnByValue": True, "awaitPromise": True},
-            }
-        )
-    )
+def devtools(socket, method: str, params: dict | None = None) -> dict:
+    """Send one DevTools command and return its ``result`` payload."""
+    request_id = next(_REQUEST_IDS)
+    socket.send(json.dumps({"id": request_id, "method": method, "params": params or {}}))
     while True:
         message = json.loads(socket.recv())
-        if message.get("id") == counter[0]:
-            result = message.get("result", {})
-            if "exceptionDetails" in result:
-                raise SystemExit(f"the client's page raised: {result['exceptionDetails']}")
-            return result.get("result", {}).get("value")
+        if message.get("id") == request_id:
+            if "error" in message:
+                raise SystemExit(f"{method} failed: {message['error']}")
+            return message.get("result", {})
+
+
+def evaluate(socket, expression: str):
+    """Evaluate an expression in the client's page and return its value."""
+    result = devtools(
+        socket,
+        "Runtime.evaluate",
+        {"expression": expression, "returnByValue": True, "awaitPromise": True},
+    )
+    if "exceptionDetails" in result:
+        raise SystemExit(f"the client's page raised: {result['exceptionDetails']}")
+    return result.get("result", {}).get("value")
 
 
 def page_state(socket) -> tuple[str | None, str]:
@@ -94,7 +102,70 @@ def wait_for_render(socket, timeout: float = 40) -> str:
     return text
 
 
-def point_at_client(port: int, server: str | None, wait_seconds: float = 30) -> None:
+#: The client renders the incoming stream into a <video> element; its
+#: videoWidth stays zero until the first decoded frame arrives.
+VIDEO_STATE = """(() => {
+    const video = document.querySelector('video');
+    if (!video) return {present: false};
+    return {present: true, width: video.videoWidth, height: video.videoHeight,
+            time: video.currentTime, paused: video.paused};
+})()"""
+
+
+def wait_for_video(socket, timeout: float, label: str = "stream", *, after_time: float = 0.0) -> dict:
+    """Wait until the client is decoding, and report what it sees.
+
+    ``after_time`` makes this a liveness check rather than a presence check:
+    the decoded frame clock has to move past that ``currentTime``, so a stalled
+    stream is not mistaken for a running one just because its dimensions are
+    already known.
+    """
+    deadline = time.time() + timeout
+    state: dict = {"present": False}
+    while time.time() < deadline:
+        state = evaluate(socket, VIDEO_STATE) or {"present": False}
+        if state.get("present") and state.get("width"):
+            if not after_time or float(state.get("time") or 0.0) > after_time:
+                break
+        time.sleep(1)
+    if not state.get("present") or not state.get("width"):
+        raise SystemExit(f"{label}: the client never decoded a frame ({state})")
+    if after_time and float(state.get("time") or 0.0) <= after_time:
+        raise SystemExit(
+            f"{label}: the decoded frame clock did not move past {after_time:.2f}s ({state})"
+        )
+    return state
+
+
+def capture(socket, path):
+    """Save one decoded frame of the streamed UI.
+
+    This is the frame the viewer is looking at, taken through the client's own
+    compositor rather than from the simulator's camera, so it covers the whole
+    path: rendered scene, encoded, streamed, decoded and displayed.
+    """
+    import base64
+    import pathlib
+
+    result = devtools(socket, "Page.captureScreenshot", {"format": "png"})
+    data = result.get("data")
+    if not data:
+        raise SystemExit(f"the client returned no screenshot: {result}")
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(base64.b64decode(data))
+    print(f"captured {path}")
+    return path
+
+
+def point_at_client(
+    port: int,
+    server: str | None,
+    wait_seconds: float = 30,
+    *,
+    capture_path: str | None = None,
+    video_timeout: float = 60.0,
+) -> None:
     socket = open_page(port, wait_seconds)
     if server:
         field, _ = page_state(socket)
@@ -131,6 +202,18 @@ def point_at_client(port: int, server: str | None, wait_seconds: float = 30) -> 
             filter(None, (evaluate(socket, "document.body.innerText") or "").splitlines())
         )
     print(f"client now shows: {text[:200]}")
+    if capture_path:
+        state = wait_for_video(socket, video_timeout)
+        print(
+            f"client is decoding {state['width']}x{state['height']} at t={state['time']:.2f}s"
+        )
+        capture(socket, capture_path)
+        # A decoded picture is not proof the stream is live: ask for the frame
+        # clock to advance past the captured one before calling it running.
+        state = wait_for_video(
+            socket, 15.0, "after capture", after_time=float(state.get("time") or 0.0)
+        )
+        print(f"stream is live: clock advanced to t={state['time']:.2f}s, paused={state['paused']}")
     socket.close()
 
 
@@ -138,8 +221,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=9223, help="the client's DevTools port")
     parser.add_argument("--server", required=True, help="streaming host to connect to")
+    parser.add_argument("--capture", default=None, help="save one decoded frame of the streamed UI to this PNG")
+    parser.add_argument("--video-timeout", type=float, default=60.0, help="seconds to wait for the first decoded frame")
     args = parser.parse_args()
-    point_at_client(args.port, args.server)
+    point_at_client(
+        args.port, args.server, capture_path=args.capture, video_timeout=args.video_timeout
+    )
 
 
 if __name__ == "__main__":

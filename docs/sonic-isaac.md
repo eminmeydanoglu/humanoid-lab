@@ -151,6 +151,77 @@ Fizik motorları yine farklıdır: temas çözücüsü, çarpışma geometrisi v
 atalet tensörleri henüz bit düzeyinde aynı değildir. Buradaki eşleme; eklem
 adları/eksenleri, gövde kütleleri, armature ve pasif eklem sürtünmesini kapsar.
 
+## Görünüm: beyaz robot düzeltmesi
+
+Pinlenmiş Dex3 USD'si 49 görsel mesh'in 48'ini tek bir OmniPBR materyaline
+bağlar; o materyalin albedo'su `(1,1,1)` ve metallic/roughness değeri hiç
+yazılmamış. Bu yüzden hem dinamik simülatör hem GRAIL replay robotu düz beyaz
+gösteriyordu; kaynak URDF'in "yedi link koyu (0.2), 42 link beyaz (0.7)"
+ayrımı URDF → USD dönüşümünde kaybolmuştu.
+
+Düzeltme `configs/assets/g1_29dof_with_hand_rev_1_0_appearance.usda`: pinlenmiş
+USD'yi `prepend references` ile referans alıp **yalnız materyalleri** değiştiren
+bir kaplama. Geometri, eklem, kütle, çarpışma ve fizik özelliklerine
+dokunmaz; iki materyalin (gövde kabukları açık gri metalik, koyu parçalar
+near-black polimer) renk/metalness/roughness değerlerini ve bu materyallere
+bağlanan yirmi iki linki yazar. Dosya GRAIL deposundan birebir kopyalandı.
+
+Dex3 asset'ini kullanan yedi profil bu kaplamaya işaret eder; kalan profiller
+(`no_hands`, `inspire-ftp`) başka asset'ler kullanır ve değişmedi.
+
+Doğrulama, gerçek WebRTC hattından (istemci akışı çözüyor, kare istemcinin
+kendi kompozitöründen alınıyor) iki koşu karşılaştırılarak yapıldı:
+
+| | Robottaki pikseller |
+|---|---|
+| Kaplamasız (pinlenmiş asset) | tek düz beyaz kütle; koyu piksel oranı ~%2 |
+| Kaplamalı | koyu baş/visör, pelvis, kalça ve ayak bileği yatakları, Dex3 elleri; koyu piksel oranı ~%8 |
+
+Kareler: `.generated/benchmarks/ui/sonic-appearance-before-after.png`
+(beyaz = öncesi, iki tonlu = sonrası).
+
+## Performans (bu makinede ölçülen)
+
+`scripts/benchmark-sim.py` ile, tek Isaac süreci, WebRTC akışı açık, 10 s
+ısınma + 20 s pencere, o penceredeki örneklerin medyanı. "Pacing öncesi/sonrası"
+satırları aynı komutun deadline tabanlı pacing değişikliğinden önce ve sonra
+ölçülmüş halidir; `kaçırılan` sütunu bu iki satır arasında karşılaştırılamaz,
+çünkü sayaç anlam değiştirdi (aşağıya bakın).
+
+| Koşu | Komut | Fizik | RTF | render | step | render_call |
+|---|---|---|---|---|---|---|
+| Düz, serbest | `--controller none` | 207 Hz | 1.03 | 26 FPS | 3.7 ms | 9.0 ms |
+| Düz, serbest, DLSS-G kapalı | `--controller none --no-dlssg` | 213 Hz | 1.06 | 27 FPS | 3.7 ms | 8.0 ms |
+| Düz, arayüzsüz | `--controller none --headless` | 419 Hz | 2.09 | — | 2.4 ms | — |
+| Düz, pacing, öncesi | (varsayılan) | 160 Hz | 0.80 | 20 FPS | 4.5 ms | 9.7 ms |
+| Düz, pacing, sonrası | (varsayılan) | 162 Hz | 0.81 | 20 FPS | 4.5 ms | 9.6 ms |
+| Engebeli, serbest | `--controller none` | 195 Hz | 0.97 | 24 FPS | 4.0 ms | 8.8 ms |
+| Engebeli, pacing, öncesi | (varsayılan) | 132 Hz | 0.66 | 17 FPS | 4.5 ms | 20.3 ms |
+| Engebeli, pacing, sonrası | (varsayılan) | 139 Hz | 0.69 | 18 FPS | 4.5 ms | 17.3 ms |
+
+`--perf_detail` adım başına dağılımı verir: düz akışlı koşuda ~3.7 ms'lik adımın
+~3.2 ms'si PhysX, ~0.3 ms'si turun girdilerini hazırlamak, ~0.05 ms'si sahne
+tampon tazelemesi; render çağrısı ~9 ms ve her 8 tick'te bir. **Arayüz, fizik
+hızının yaklaşık yarısını alıyor**: aynı sahne arayüzsüz 2.09x RTF koşuyor.
+
+Ölçülüp **kazanç sağlamayan** şeyler (bu yüzden anahtar yapılmadı): PhysX iş
+parçacığı sayısı (4 > 16 > 24; 1 ve 2 fark etmedi), PhysX → USD geri yazma
+sıklığı, asset'in contact sensörleri (bu depoda hiçbir şey okumuyor) ve render
+sıklığı — render aralığını 16'ya çıkarmak çağrı başına maliyeti ~9 ms'den
+~18-22 ms'ye çıkarıyor, yani saniye başına render maliyeti aynı kalıyor ve
+ulaşılan hız değişmiyor (1.03 ve 0.98 RTF ölçüldü, varsayılanda 1.03).
+Tekrarlanabilir tek render kazancı `--no-dlssg`: aynı pencerede 206.5 → 213.0 Hz
+ve render çağrısı 9.0 → 8.0 ms.
+
+Pacing artık mutlak deadline ile yürüyor: geciken bir tur bir sonraki turda
+telafi ediliyor, her turda `sleep(dt - elapsed)` ile uyanma gecikmesi kalıcı
+kayba dönüşmüyor. Eşleşen 20 s pencerelerde düz profil 159.7 Hz / 0.80 RTF'den
+162.0 Hz / 0.81 RTF'ye çıktı (15 s pencereli ikinci bir koşu 0.82 verdi); paced koşular
+varyansın baskın olduğu ölçümler, yani bu etkinin büyüklüğü, bir garanti değil.
+`pacing_overruns` sayacı değişimden önce kendi işi bir periyodu aşan turları,
+sonrasında ise mutlak takvimin gerisinde kalan turları sayıyor; bu yüzden iki
+satırın "kaçırılan" değeri karşılaştırılmaz.
+
 ## Sınırlar
 
 - Bu yol GR00T, CloudWalk veya görev başarısı içermez; yalnız gövde kontrol

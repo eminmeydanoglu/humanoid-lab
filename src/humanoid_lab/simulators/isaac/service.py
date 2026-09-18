@@ -18,7 +18,13 @@ from typing import Any, Mapping
 from ...contracts.commands import CommandError, CompleteRobotCommand, JointCommand, JointLayout, resolve_layouts
 from ...controllers.base import ControllerSource, RobotStateSample
 from ...controllers.factory import build_controller
-from .contracts import ContractError, RunProfile, TimelineState, quaternion_up_z
+from .contracts import (
+    DEFAULT_RENDER_INTERVAL,
+    ContractError,
+    RunProfile,
+    TimelineState,
+    quaternion_up_z,
+)
 from .maths import quat_to_rotation_vector
 
 PASSIVE = "passive"
@@ -79,6 +85,8 @@ class SimulatorService:
         kinematic_reference: Any | None = None,
         kinematic_label: str | None = None,
         replay_clock_output: Path | None = None,
+        perf_detail: bool = False,
+        dlss_frames: bool | None = None,
     ) -> None:
         self.profile = profile
         self.app = simulation_app
@@ -87,6 +95,11 @@ class SimulatorService:
         self.show_head_camera = show_head_camera
         self.test_mode = test_mode
         self.controller_provider = controller_provider
+        self.perf_detail = perf_detail
+        # DLSS frame generation is a presentation choice: it interpolates extra
+        # frames for the streamed UI at the cost of render time and a higher
+        # encoded frame rate. Default follows the profile's UI, overridable.
+        self.dlss_frames = dlss_frames
         self.record_video = record_video
         self.trajectory_reference = trajectory_reference
         self.kinematic_reference = kinematic_reference
@@ -116,6 +129,12 @@ class SimulatorService:
         self._perf_step_seconds = 0.0
         self._perf_render_seconds = 0.0
         self._perf_render_count = 0
+        #: Where the step time went: the four phases the loop spends it in.
+        #: Physics is PhysX, apply is staging the tick's inputs, sensors is the
+        #: scene's buffer refresh, publish is handing state to the controller.
+        self._perf_phase = {"apply": 0.0, "physics": 0.0, "sensors": 0.0, "publish": 0.0}
+        self._perf_phase_reported = dict.fromkeys(self._perf_phase, 0.0)
+        self._performance_breakdown: dict[str, float] | None = None
         self._last_paused_render = 0.0
         self._root_z: list[float] = []
         self._root_up: list[float] = []
@@ -163,6 +182,7 @@ class SimulatorService:
         self._tracking_rows: list[dict[str, Any]] = []
         self._last_body_command_q: list[float] | None = None
         self._pacing_overruns = 0
+        self._pace_deadline: float | None = None
         self._hold_initial_q: Any = None
         self._hold_target_q: Any = None
         self._last_controlled_tick: int | None = None
@@ -192,7 +212,9 @@ class SimulatorService:
         settings = carb.settings.get_settings()
         # Isaac Lab's Fabric/Warp view path does not support a CPU device.
         use_fabric = self._device.startswith("cuda")
-        # PhysX reads the thread count when the physics scene is created.
+        # PhysX reads the thread count when the physics scene is created. Four
+        # measured fastest for this one-articulation CPU scene; 16 and 24 were
+        # both slower, and one or two made no difference.
         settings.set_int("/persistent/physics/numThreads", self.PHYSX_NUM_THREADS)
         settings.set_bool("/physics/fabricEnabled", use_fabric)
         settings.set_bool("/physics/updateToUsd", not use_fabric)
@@ -215,9 +237,11 @@ class SimulatorService:
             render_interval=1,
             render=sim_utils.RenderCfg(
                 rendering_mode="balanced",
-                enable_dlssg=self.show_ui
-                and self.test_mode is None
-                and not self.show_head_camera,
+                enable_dlssg=(
+                    self.dlss_frames
+                    if self.dlss_frames is not None
+                    else self.show_ui and self.test_mode is None and not self.show_head_camera
+                ),
                 enable_dl_denoiser=True,
                 dlss_mode=1,
             ),
@@ -260,10 +284,15 @@ class SimulatorService:
 
     def play(self) -> None:
         self._timeline.play()
+        # A pause or a reset breaks the pacing schedule; the next tick re-anchors
+        # from its own start rather than trying to make up a deadline that
+        # passed while the loop was not running.
+        self._pace_deadline = None
         self._transition(TimelineState.PLAYING)
 
     def pause(self) -> None:
         self._timeline.pause()
+        self._pace_deadline = None
         self._transition(TimelineState.PAUSED)
 
     def stop(self) -> None:
@@ -287,6 +316,9 @@ class SimulatorService:
         self._perf_step_seconds = 0.0
         self._perf_render_seconds = 0.0
         self._perf_render_count = 0
+        self._perf_phase = dict.fromkeys(self._perf_phase, 0.0)
+        self._perf_phase_reported = dict.fromkeys(self._perf_phase, 0.0)
+        self._pace_deadline = None
         self._root_z.clear()
         self._root_up.clear()
         self._camera_frames = 0
@@ -1622,8 +1654,13 @@ class SimulatorService:
         self._apply_support()
         self._scene.write_data_to_sim()
         self._flush_effort()
+        mark = time.perf_counter()
+        self._perf_phase["apply"] += mark - step_started
         self._sim.step(render=False)
         self.tick += 1
+        now = time.perf_counter()
+        self._perf_phase["physics"] += now - mark
+        mark = now
         if self.replay_clock_output is not None and self.tick % 4 == 0:
             self.replay_clock_output.parent.mkdir(parents=True, exist_ok=True)
             self.replay_clock_output.write_text(f"{self.tick * self.profile.physics_dt:.6f}\n", encoding="ascii")
@@ -1638,8 +1675,14 @@ class SimulatorService:
             self._perf_render_seconds += time.perf_counter() - render_started
             self._perf_render_count += 1
             step_started = time.perf_counter()
+            # The render call is accounted for on its own; without this mark the
+            # next phase would absorb it and the breakdown would double-count it.
+            mark = step_started
         self._scene.update(self.profile.physics_dt)
+        now = time.perf_counter()
+        self._perf_phase["sensors"] += now - mark
         self._publish_robot_state()
+        self._perf_phase["publish"] += time.perf_counter() - now
         self._perf_step_seconds += time.perf_counter() - step_started
         if rendered and self.test_mode is not None:
             self._consume_head_camera_frame()
@@ -1716,34 +1759,81 @@ class SimulatorService:
         free-running loop would silently change their meaning and starve the
         threads that carry them. With no controller the loop stays unpaced,
         exactly as it was before controllers existed.
+
+        The deadline is absolute and moves by exactly one period per tick, so a
+        tick that runs long is made up on the next one instead of shifting the
+        whole schedule. A wake-up costs the loop a few hundred microseconds that
+        a per-tick ``sleep(dt - elapsed)`` would charge in full, every tick, for
+        the rest of the run. On the flat profile, matched 20 s windows measured
+        159.7 Hz / 0.80 RTF before this change and 162.0 Hz / 0.81 RTF after it
+        (a second after-run over a 15 s window measured 0.82); paced runs are
+        variance-dominated,
+        so that is the size of the effect rather than a promise. The
+        ``pacing_overruns`` counter is not comparable across the change: it used
+        to count ticks whose own work exceeded one period and now counts ticks
+        that are behind the absolute schedule. Catch-up is bounded to one
+        period, so a genuinely overloaded loop falls behind rather than
+        accumulating a burst of unpaced steps.
         """
-        delay = self.profile.physics_dt - (time.monotonic() - iteration_started)
+        now = time.monotonic()
+        if self._pace_deadline is None:
+            self._pace_deadline = iteration_started + self.profile.physics_dt
+        else:
+            self._pace_deadline += self.profile.physics_dt
+        delay = self._pace_deadline - now
         if delay > 0.0:
             time.sleep(delay)
         else:
             self._pacing_overruns += 1
+            if -delay > self.profile.physics_dt:
+                # More than one period behind: restart the schedule here rather
+                # than replaying the backlog as a burst of unpaced steps.
+                self._pace_deadline = time.monotonic()
 
     def _report_performance(self) -> None:
-        """Print one compact performance sample per wall-clock second."""
+        """Print one compact performance sample per wall-clock second.
+
+        The render rate in this line is counted, not inferred from the physics
+        rate: the loop owns the render cadence, and a skipped render (a stall in
+        ``app.update``) has to show up as a lower rate rather than disappear.
+        """
         now = time.monotonic()
         elapsed = now - self._last_perf_report
         if elapsed < 1.0:
             return
-        physics_hz = (self.tick - self._last_perf_tick) / elapsed
-        render_fps = physics_hz / self.profile.render_interval if self._is_rendering else 0.0
         ticks = self.tick - self._last_perf_tick
+        physics_hz = ticks / elapsed
+        render_fps = self._perf_render_count / elapsed if self._is_rendering else 0.0
         step_ms = 1000.0 * self._perf_step_seconds / ticks if ticks else 0.0
         render_ms = (
             1000.0 * self._perf_render_seconds / self._perf_render_count
             if self._perf_render_count
             else 0.0
         )
-        print(
+        line = (
             f"[isaac-g1] physics={physics_hz:.1f} Hz  render={render_fps:.1f} FPS  "
             f"RTF={physics_hz * self.profile.physics_dt:.2f}x  "
-            f"step={step_ms:.2f} ms  render_call={render_ms:.2f} ms  device={self._device}",
-            flush=True,
+            f"step={step_ms:.2f} ms  render_call={render_ms:.2f} ms  device={self._device}"
         )
+        if self.profile.render_interval != DEFAULT_RENDER_INTERVAL or self.perf_detail:
+            line += f"  render_interval={self.profile.render_interval}"
+        if ticks:
+            # The accumulators are cumulative; this sample's share is the part
+            # added since the previous report.
+            window = {
+                name: seconds - self._perf_phase_reported[name]
+                for name, seconds in self._perf_phase.items()
+            }
+            self._performance_breakdown = {
+                name: round(1000.0 * seconds / ticks, 4) for name, seconds in window.items()
+            }
+        if self.perf_detail and self._performance_breakdown:
+            breakdown = " ".join(
+                f"{name}={value:.2f}" for name, value in self._performance_breakdown.items()
+            )
+            line += f"  [ms/tick: {breakdown}]"
+        print(line, flush=True)
+        self._perf_phase_reported = dict(self._perf_phase)
         self._last_perf_report = now
         self._last_perf_tick = self.tick
         self._perf_step_seconds = 0.0
@@ -1815,6 +1905,9 @@ class SimulatorService:
             "render_interval": self.profile.render_interval,
             "physics_pacing": "realtime" if self._controller is not None else "free",
             "pacing_overruns": self._pacing_overruns,
+            # Mean step cost per phase, in ms/tick, over the last reported
+            # measurement window (the per-second samples the loop prints).
+            "step_ms_by_phase": self._performance_breakdown,
         }
 
     def _runtime_summary(self) -> dict[str, Any]:

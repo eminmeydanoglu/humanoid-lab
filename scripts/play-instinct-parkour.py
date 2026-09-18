@@ -141,11 +141,36 @@ parser.add_argument(
     default=False,
     help="Skip the playback-only scene trimming (mesh_boxes terrain, debug markers, rewards, monitors).",
 )
+parser.add_argument(
+    "--diagnostic_no_depth",
+    action="store_true",
+    default=False,
+    help="profiling control: freeze the policy depth sensor after initialization (robot behavior is not valid)",
+)
 parser.add_argument("--seed", type=int, default=None, help="Random seed.")
+parser.add_argument(
+    "--perf_detail",
+    action="store_true",
+    default=False,
+    help="split the reported loop rate into its per-phase costs (env step, ONNX inference, depth window)",
+)
+parser.add_argument(
+    "--step_detail",
+    action="store_true",
+    default=False,
+    help="attribute the env step to its managers and scene sensors in the [perf] report (implies "
+    "--perf_detail). The values are CPU wall intervals around each wrapped call, so they include any "
+    "waiting inside that call and never force a GPU sync.",
+)
 
 cli_args.add_instinct_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+
+if args_cli.step_detail:
+    # The step attribution is a sub-breakdown of the per-loop costs, so ask for
+    # those as well.
+    args_cli.perf_detail = True
 
 # The policy's only exteroception is a ray-cast depth camera.  Without this the
 # sensor is never rendered and the policy would be fed a dead depth buffer.
@@ -166,6 +191,7 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 import carb.input  # noqa: E402
+import carb.settings  # noqa: E402
 import omni.appwindow  # noqa: E402
 from carb.input import KeyboardEventType  # noqa: E402
 
@@ -243,6 +269,29 @@ def make_fast(env_cfg, interactive: bool) -> None:
     if dropped:
         print(f"[INFO] perf: observation groups disabled: {', '.join(dropped)} (playback reads 'policy')")
 
+    # The exported actor does not consume the AMASS motion reference.  It exists
+    # for AMP training and only remains connected to playback through the
+    # dataset-exhausted termination, while keyboard playback already disables
+    # episode timeouts.  Removing both avoids loading and updating that training
+    # sensor without changing policy observations or fall recovery.
+    if getattr(env_cfg.scene, "motion_reference", None) is not None:
+        env_cfg.scene.motion_reference = None
+        if getattr(env_cfg.terminations, "dataset_exhausted", None) is not None:
+            env_cfg.terminations.dataset_exhausted = None
+        print("[INFO] perf: unused AMP motion reference and dataset termination disabled")
+
+    # These sensors feed reward terms only.  Playback has no reward manager, and
+    # neither the exported actor nor the fall terminations read them.  The
+    # contact sensor stays enabled because it resets the robot after torso hits.
+    dropped_sensors = []
+    for name in ("left_height_scanner", "right_height_scanner", "leg_volume_points"):
+        if getattr(env_cfg.scene, name, None) is not None:
+            setattr(env_cfg.scene, name, None)
+            dropped_sensors.append(name)
+    if getattr(env_cfg.events, "register_virtual_obstacles", None) is not None:
+        env_cfg.events.register_virtual_obstacles = None
+    if dropped_sensors:
+        print(f"[INFO] perf: reward-only sensors disabled: {', '.join(dropped_sensors)}")
 
 
 def make_watchable(env_cfg, num_envs: int) -> None:
@@ -382,6 +431,50 @@ class DepthWindow:
         print(f"[INFO] depth window: {self.TITLE}, {width}x{height} sensor image, nearest pixel upscale")
 
 
+def cpu_session_options(ort):
+    """Session options for the two tiny ONNX graphs: serial, one thread, no spin.
+
+    Both graphs are a few hundred KB and run back to back once per control step,
+    so onnxruntime's defaults are pure oversubscription here: each session builds
+    its own thread pool sized to the machine's core count and lets those threads
+    spin between calls, which competes with the physics step and the depth
+    ray-caster for exactly the cores they need.  One intra-op thread, one
+    inter-op thread, sequential execution, and both documented spinning session
+    config entries off keep inference on a single core that is returned to the
+    rest of the loop between calls.
+    """
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 1
+    options.inter_op_num_threads = 1
+    if hasattr(ort, "ExecutionMode"):  # absent only from the test double
+        options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    options.add_session_config_entry("session.intra_op.allow_spinning", "0")
+    options.add_session_config_entry("session.inter_op.allow_spinning", "0")
+    return options
+
+
+def create_policy_sessions(ort, encoder_path: str, actor_path: str):
+    """Open one CPU session per graph, both with the explicit serial options.
+
+    The two sessions share a single SessionOptions object: onnxruntime copies the
+    options into each session as it is constructed, so both graphs are guaranteed
+    the same explicit configuration and neither session can change the other's
+    afterwards.  This is the only place a policy session is opened, so the
+    effective thread configuration is printed here exactly once.
+    """
+    options = cpu_session_options(ort)
+    encoder = ort.InferenceSession(encoder_path, sess_options=options, providers=["CPUExecutionProvider"])
+    actor = ort.InferenceSession(actor_path, sess_options=options, providers=["CPUExecutionProvider"])
+    print(
+        "[INFO] ONNX Runtime policy sessions: CPUExecutionProvider | "
+        f"intra_op_num_threads={options.intra_op_num_threads} "
+        f"inter_op_num_threads={options.inter_op_num_threads} "
+        f"execution_mode={getattr(options, 'execution_mode', 'default')} | "
+        "session.intra_op.allow_spinning=0 session.inter_op.allow_spinning=0"
+    )
+    return encoder, actor
+
+
 class OnnxParkourPolicy:
     """Run the exported parkour policy exactly as the real robot does.
 
@@ -394,7 +487,9 @@ class OnnxParkourPolicy:
     One deliberate difference from deployment: onnxruntime is pinned to the CPU
     provider.  Both graphs are tiny (a 3-layer MLP and a small conv net), and
     keeping them off the GPU leaves the whole 24 GB and the copy queues to PhysX
-    and the ray-caster camera.
+    and the ray-caster camera.  They are also run with explicit single-thread,
+    non-spinning sessions (see ``cpu_session_options``); the default per-session
+    pools would size themselves to every core and spin between calls.
     """
 
     def __init__(self, run_dir: str, env):
@@ -408,8 +503,7 @@ class OnnxParkourPolicy:
                 raise FileNotFoundError(f"[ERROR] Missing ONNX export: {path}")
         self.paths = (actor_path, encoder_path)
 
-        self._encoder = ort.InferenceSession(encoder_path, providers=["CPUExecutionProvider"])
-        self._actor = ort.InferenceSession(actor_path, providers=["CPUExecutionProvider"])
+        self._encoder, self._actor = create_policy_sessions(ort, encoder_path, actor_path)
         self._encoder_input = self._encoder.get_inputs()[0].name
         self._actor_input = self._actor.get_inputs()[0].name
 
@@ -475,7 +569,192 @@ class OnnxParkourPolicy:
         return torch.from_numpy(out).to(obs.device)
 
 
+def _resolve_attribute(root, dotted: str):
+    """Walk a dotted attribute path, returning None at the first missing step."""
+    target = root
+    for part in dotted.split("."):
+        target = getattr(target, part, None)
+        if target is None:
+            return None
+    return target
+
+
+class StepAttribution:
+    """CPU wall-time attribution of ``env.step`` by the methods it calls.
+
+    ``ManagerBasedRLEnv.step`` is a fixed sequence of manager calls, and every
+    scene sensor's ``update`` runs inside ``InteractiveScene.update``.  Wrapping
+    those instance methods after the environment is built shows where the step's
+    milliseconds go without touching the task code.  Wrapping is by attribute
+    assignment on the instances, so a manager or sensor that this task does not
+    have is skipped instead of failing.
+
+    Every value is a host ``perf_counter`` interval around the wrapped call: a
+    CPU wall interval that includes any waiting the call does (physics,
+    rendering, DDS).  No GPU sync is inserted -- it would change the scheduling
+    these numbers describe -- so a phase that mostly waits on the GPU shows that
+    wait, and the numbers are not per-kernel GPU times.
+
+    The phases are disjoint calls of one step, so ``phases + other`` is the
+    unwrapped env step and ``phases + other + wrapper`` is the whole loop-side
+    ``env.step``.  Sensor updates are nested inside ``scene_update``: they are
+    accumulated separately and must not be added to the phase sum.
+    """
+
+    #: Dotted path on the unwrapped env -> phase name.  These are disjoint calls
+    #: made by the step, so their times can be summed.
+    PHASES = (
+        ("action_manager.process_action", "action_process"),
+        ("action_manager.apply_action", "action_apply"),
+        ("scene.write_data_to_sim", "scene_write"),
+        ("sim.step", "sim_step"),
+        ("sim.render", "render"),
+        ("scene.update", "scene_update"),
+        ("command_manager.compute", "command"),
+        ("termination_manager.compute", "termination"),
+        ("reward_manager.compute", "reward"),
+        ("observation_manager.compute", "observation"),
+        ("curriculum_manager.compute", "curriculum"),
+        ("event_manager.apply", "events"),
+    )
+
+    #: Scene sensors whose ``update`` is nested inside ``scene.update``.
+    SENSORS = (
+        "camera",
+        "left_height_scanner",
+        "right_height_scanner",
+        "contact_forces",
+        "leg_volume_points",
+        "motion_reference",
+    )
+
+    def __init__(self, clock=time.perf_counter):
+        self._clock = clock
+        self.phase_seconds: dict[str, float] = {}
+        self.sensor_seconds: dict[str, float] = {}
+        self._core = {"step": 0.0}
+        self.installed_phases: tuple[str, ...] = ()
+        self.installed_sensors: tuple[str, ...] = ()
+        self.skipped: tuple[str, ...] = ()
+        self._installed = False
+
+    def install(self, env) -> None:
+        """Wrap every target present on ``env``; skip the absent ones.
+
+        ``env`` may be any wrapper whose ``unwrapped`` attribute is the manager
+        environment; only the instance found through it is touched.  Calling
+        this twice is a no-op, so a phase is never wrapped into itself.
+        """
+        if self._installed:
+            return
+        self._installed = True
+        root = getattr(env, "unwrapped", env)
+
+        phases, skipped = [], []
+        for path, name in self.PHASES:
+            owner_path, _, method_name = path.rpartition(".")
+            owner = _resolve_attribute(root, owner_path)
+            method = getattr(owner, method_name, None) if owner is not None else None
+            if callable(method):
+                setattr(owner, method_name, self._timed(method, self.phase_seconds, name))
+                phases.append(name)
+            else:
+                skipped.append(path)
+
+        sensors = []
+        scene_sensors = getattr(getattr(root, "scene", None), "sensors", None)
+        if isinstance(scene_sensors, dict):
+            for name in self.SENSORS:
+                method = getattr(scene_sensors.get(name), "update", None)
+                if callable(method):
+                    setattr(scene_sensors[name], "update", self._timed(method, self.sensor_seconds, name))
+                    sensors.append(name)
+                else:
+                    skipped.append(f"scene.sensors.{name}")
+
+        core_step = getattr(root, "step", None)
+        if callable(core_step):
+            setattr(root, "step", self._timed(core_step, self._core, "step"))
+        else:
+            skipped.append("step")
+
+        self.installed_phases = tuple(phases)
+        self.installed_sensors = tuple(sensors)
+        self.skipped = tuple(skipped)
+
+    def _timed(self, method, store, key):
+        """Wrap ``method`` so each call adds its wall interval to ``store[key]``."""
+        clock = self._clock
+
+        def timed(*args, **kwargs):
+            started = clock()
+            try:
+                return method(*args, **kwargs)
+            finally:
+                store[key] = store.get(key, 0.0) + (clock() - started)
+
+        return timed
+
+    def snapshot(self):
+        """Cumulative totals the next report can be diffed against."""
+        return {
+            "phases": dict(self.phase_seconds),
+            "sensors": dict(self.sensor_seconds),
+            "core_step": self._core["step"],
+        }
+
+    def report(self, previous, env_step_seconds: float, loops: int):
+        """Return ``([perf] lines, snapshot)`` for a window of ``loops`` loops.
+
+        ``previous`` is the snapshot returned by the last call, or None for the
+        whole run so far.  ``env_step_seconds`` is the loop-side wall time of
+        ``env.step`` in the same window; what the wrapped calls do not account
+        for is reported as ``wrapper`` (outside the unwrapped env) and ``other``
+        (inside it), so the phase row always sums to the loop-side env step.
+        """
+        previous = previous or {"phases": {}, "sensors": {}, "core_step": 0.0}
+        current = self.snapshot()
+        loops = max(int(loops), 1)
+
+        def per_loop(seconds: float) -> float:
+            return 1000.0 * seconds / loops
+
+        phases = {
+            name: current["phases"].get(name, 0.0) - previous["phases"].get(name, 0.0)
+            for name in self.installed_phases
+        }
+        sensors = {
+            name: current["sensors"].get(name, 0.0) - previous["sensors"].get(name, 0.0)
+            for name in self.installed_sensors
+        }
+        core = current["core_step"] - previous["core_step"]
+        wrapper = max(0.0, env_step_seconds - core)
+        other = max(0.0, core - sum(phases.values()))
+
+        lines = [
+            "[perf] step ms/loop: "
+            + " ".join(f"{name}={per_loop(value):.2f}" for name, value in phases.items())
+            + f" | other={per_loop(other):.2f} | wrapper={per_loop(wrapper):.2f}"
+        ]
+        if sensors:
+            lines.append(
+                "[perf] step nested ms/loop (inside scene_update, already counted there): "
+                + " ".join(f"{name}={per_loop(value):.2f}" for name, value in sensors.items())
+            )
+        return lines, current
+
+
 def main():
+    # The full streaming experience enables Kit's own main-loop rate limiter.
+    # This runner already owns wall-clock pacing below; leaving both enabled made
+    # every sim.render() wait about 20 ms even when the GPU was mostly idle.
+    # Disable Kit's limiter for both paced and unpaced runs, then let the runner's
+    # absolute deadline pacing enforce real time when requested.
+    kit_settings = carb.settings.get_settings()
+    kit_rate_limited = bool(kit_settings.get("/app/runLoops/main/rateLimitEnabled"))
+    kit_settings.set_bool("/app/runLoops/main/rateLimitEnabled", False)
+    print(f"[INFO] Kit main-loop rate limiter: {kit_rate_limited} -> False (runner owns pacing)")
+
     # --load_run / --no_resume / --checkpoint come from cli_args (shared with the
     # stock play.py).  ONNX playback needs --load_run: it names the directory that
     # holds the exported policies.
@@ -511,18 +790,23 @@ def main():
 
     if args_cli.seed is not None:
         env_cfg.seed = args_cli.seed
+    if args_cli.diagnostic_no_depth:
+        env_cfg.scene.camera.update_period = 1.0e9
+        print("[INFO] diagnostic: depth sensor updates frozen; policy behavior is not valid")
 
     if args_cli.keyboard_control:
         # You are driving it, not measuring it: one robot and no episode timeout.
         env_cfg.scene.num_envs = 1
         env_cfg.episode_length_s = 1e10
     elif args_cli.num_envs is None:
-        # --no-keyboard without an explicit --num_envs would otherwise inherit the
-        # task's *training* default of 4096 envs.  That renders as a slideshow
-        # (~1 fps) and is never what someone opening a viewer wants, so cap the
-        # automatic case.  Passing --num_envs explicitly overrides this.
-        env_cfg.scene.num_envs = 8
-        print(f"[INFO] scene: --num_envs not given, defaulting to {env_cfg.scene.num_envs} for a watchable run")
+        # The shipped ONNX exports have a fixed batch dimension of one.  Do not
+        # inherit the task's 4096-environment training default.
+        env_cfg.scene.num_envs = 1
+        print("[INFO] scene: --num_envs not given, using 1 (the ONNX exports have fixed batch=1)")
+    elif env_cfg.scene.num_envs != 1:
+        raise SystemExit(
+            f"[ERROR] The shipped ONNX exports require --num_envs 1; got {env_cfg.scene.num_envs}."
+        )
 
     if args_cli.scene == "play":
         make_watchable(env_cfg, env_cfg.scene.num_envs)
@@ -623,6 +907,21 @@ def main():
     obs, _ = env.get_observations()
     policy_step_dt = float(env.unwrapped.step_dt)
 
+    # Opt-in attribution of the env step's internals.  Installed only now -- after
+    # the env has been built, reset and asked for observations -- so the first
+    # reporting window contains nothing but loop-time work.
+    attribution = None
+    if args_cli.step_detail:
+        attribution = StepAttribution()
+        attribution.install(env)
+        print(
+            f"[INFO] perf: env.step attribution: {len(attribution.installed_phases)} phases, "
+            f"{len(attribution.installed_sensors)} sensors; ms/loop are CPU wall intervals "
+            "(no GPU sync); other=resets+recorder+bookkeeping, wrapper=outside the unwrapped env"
+        )
+        if attribution.skipped:
+            print(f"[INFO] perf: step targets absent, skipped: {', '.join(attribution.skipped)}")
+
     timestep = 0
     sim_time = 0.0
     wall_start = time.perf_counter()
@@ -650,6 +949,14 @@ def main():
     print("[INFO] Close the window or press Ctrl+C here to stop.\n")
 
     try:
+        # Per-phase cost of one policy loop, so a slow run can be attributed to
+        # the environment step, the ONNX inference or the depth window instead of
+        # being reported as one opaque loop rate.
+        phase_seconds = {"env_step": 0.0, "policy": 0.0, "depth_window": 0.0}
+        phase_seconds_reported = dict.fromkeys(phase_seconds, 0.0)
+        phase_loops = 0
+        reported_loops = 0
+        step_snapshot = None
         while simulation_app.is_running():
             with torch.inference_mode():
                 # Writing the command into `obs` must happen inside inference mode:
@@ -659,12 +966,22 @@ def main():
                 if args_cli.keyboard_control:
                     obs[:, command_slice] = override_command.repeat(1, command_frames)
 
+                # Each boundary is read once and each interval is charged to
+                # exactly one phase, so the three add up to the loop body.
+                phase_mark = time.perf_counter()
                 actions = policy(obs)
+                policy_done = time.perf_counter()
+                phase_seconds["policy"] += policy_done - phase_mark
+
                 obs, _, _, _ = env.step(actions)
+                env_done = time.perf_counter()
+                phase_seconds["env_step"] += env_done - policy_done
 
             if depth_window is not None:
                 depth_window.update()
+                phase_seconds["depth_window"] += time.perf_counter() - env_done
 
+            phase_loops += 1
             timestep += 1
             sim_time += policy_step_dt
 
@@ -677,13 +994,33 @@ def main():
                 # moving rather than just that the loop is turning.
                 pos = env.unwrapped.scene["robot"].data.root_pos_w[0]
                 vel = env.unwrapped.scene["robot"].data.root_lin_vel_b[0]
+                breakdown = ""
+                loops_since_report = phase_loops - reported_loops
+                # Read before the reported counters are refreshed below: the step
+                # attribution wants the env.step time of this same window.
+                env_step_period = phase_seconds["env_step"] - phase_seconds_reported["env_step"]
+                if args_cli.perf_detail:
+                    if loops_since_report:
+                        breakdown = " | ms/loop " + " ".join(
+                            f"{name}={1000.0 * (value - phase_seconds_reported[name]) / loops_since_report:.2f}"
+                            for name, value in phase_seconds.items()
+                        )
+                    phase_seconds_reported = dict(phase_seconds)
+                    reported_loops = phase_loops
                 print(
-                    f"[perf] t={sim_time:7.1f}s sim | {fps:6.1f} loops/s | "
+                    f"[perf] t={sim_time:8.3f}s sim | {fps:6.1f} loops/s | "
                     f"{fps * env.num_envs:7.1f} env-steps/s | RTF {rtf:5.2f}x | cmd "
                     f"[{override_command[0, 0]:+.2f}, {override_command[0, 1]:+.2f}, {override_command[0, 2]:+.2f}] | "
-                    f"pos ({pos[0]:+7.2f},{pos[1]:+7.2f},{pos[2]:+5.2f}) | vx {vel[0]:+5.2f}",
+                    f"pos ({pos[0]:+7.2f},{pos[1]:+7.2f},{pos[2]:+5.2f}) | vx {vel[0]:+5.2f}"
+                    f"{breakdown}",
                     flush=True,
                 )
+                if attribution is not None and loops_since_report:
+                    step_lines, step_snapshot = attribution.report(
+                        step_snapshot, env_step_period, loops_since_report
+                    )
+                    for step_line in step_lines:
+                        print(step_line, flush=True)
                 last_report = now
 
             if args_cli.realtime:
@@ -704,10 +1041,20 @@ def main():
 
     total_wall = time.perf_counter() - wall_start
     if timestep and total_wall > 0:
+        breakdown = ""
+        if args_cli.perf_detail:
+            breakdown = " | ms/loop " + " ".join(
+                f"{name}={1000.0 * value / timestep:.2f}" for name, value in phase_seconds.items()
+            )
         print(
             f"[perf] TOTAL {timestep} policy steps | {total_wall:.1f}s wall | "
-            f"{timestep / total_wall:.1f} loops/s | {sim_time / total_wall:.2f}x RTF | {sim_time:.1f}s sim"
+            f"{timestep / total_wall:.1f} loops/s | {sim_time / total_wall:.2f}x RTF | {sim_time:.3f}s sim"
+            f"{breakdown}"
         )
+        if attribution is not None:
+            step_lines, _ = attribution.report(None, phase_seconds["env_step"], timestep)
+            for step_line in step_lines:
+                print(step_line, flush=True)
 
     env.close()
 

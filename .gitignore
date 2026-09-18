@@ -35,6 +35,7 @@ docs/*
 !docs/sonic-isaac.md
 !docs/sonic-pilots.md
 !docs/sonic-pipeline-verification.md
+!docs/instinct-parkour.md
 # buyuk model dosyalari
 .pretrained_checkpoints/
 AGENTS.md

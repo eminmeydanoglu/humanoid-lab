@@ -40,6 +40,28 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="open a second GPU viewport for the head camera (costs render throughput)",
     )
+    parser.add_argument(
+        "--render-interval",
+        type=int,
+        default=None,
+        help="physics ticks per rendered frame; the profile's own cadence (8, about 25 FPS) applies "
+             "when this is omitted. This sets the physics/viewport balance; it did not change the "
+             "achievable physics rate in measurement (the render cost per second stayed the same)",
+    )
+    parser.add_argument(
+        "--no-dlssg",
+        dest="dlss_frames",
+        action="store_false",
+        default=None,
+        help="disable DLSS frame generation for the streamed UI. The extra interpolated frames cost "
+             "render time and double the encoded frame rate; measured 206.5 -> 213.0 Hz and a "
+             "shorter render call (9.0 -> 8.0 ms) in matched windows without them",
+    )
+    parser.add_argument(
+        "--perf-detail",
+        action="store_true",
+        help="add the per-phase step breakdown to the per-second performance line",
+    )
     from isaaclab.app import AppLauncher
 
     AppLauncher.add_app_launcher_args(parser)
@@ -58,6 +80,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     # Acceptance tests remain bounded when their caller omits --duration.
     if args.duration is None and args.test:
         args.duration = 12.0
+    # A kinematic replay renders at the cadence of the reference it replays
+    # (one frame per reference frame), so a render-cadence override cannot apply
+    # to it. Refusing beats accepting a flag the run would silently ignore.
+    if args.render_interval is not None and args.kinematic_reference is not None:
+        parser.error(
+            "--render-interval cannot be combined with --kinematic-reference: a kinematic replay "
+            "renders once per reference frame, at the cadence of that reference"
+        )
     return args
 
 
@@ -74,7 +104,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .service import SimulatorService
 
         # The profile owns the physics device; --device only wins when passed explicitly.
-        profile = RunProfile.load(args.profile).with_device(device_override)
+        profile = RunProfile.load(args.profile).with_device(device_override).with_render_interval(
+            args.render_interval
+        )
         service = SimulatorService(
             profile,
             simulation_app,
@@ -88,6 +120,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             kinematic_reference=args.kinematic_reference,
             kinematic_label=args.kinematic_label,
             replay_clock_output=args.replay_clock_output,
+            perf_detail=args.perf_detail,
+            dlss_frames=args.dlss_frames,
         )
         summary = service.run()
         if args.tracking_output:

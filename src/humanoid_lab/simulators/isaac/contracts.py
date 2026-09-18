@@ -217,6 +217,33 @@ class TerrainSpec:
         return cls(preset=preset, max_init_terrain_level=level)
 
 
+def _render_interval(value: Any, *, source: str, allow_none: bool) -> int | None:
+    """Validate a render cadence: a whole number of physics ticks, at least one.
+
+    ``bool`` is rejected explicitly because it is an ``int`` subclass, so
+    ``true`` would otherwise be accepted as a cadence of one tick. Integral
+    floats are accepted (JSON writers emit ``8.0``); fractional ones are not,
+    rather than being silently truncated.
+    """
+    if value is None:
+        if allow_none:
+            return None
+        raise ContractError(f"{source} must be an integer number of physics ticks, not null")
+    if isinstance(value, bool):
+        raise ContractError(f"{source} must be an integer number of physics ticks, not a boolean")
+    if isinstance(value, float):
+        if not value.is_integer():
+            raise ContractError(
+                f"{source} must be a whole number of physics ticks, got {value!r}"
+            )
+        value = int(value)
+    if not isinstance(value, int):
+        raise ContractError(f"{source} must be an integer number of physics ticks, got {value!r}")
+    if value < 1:
+        raise ContractError(f"{source} must cover at least one physics tick")
+    return value
+
+
 @dataclass(frozen=True)
 class RunProfile:
     schema_version: int
@@ -264,12 +291,18 @@ class RunProfile:
             if not isinstance(terrain, dict):
                 raise ContractError("terrain must be an object with a preset")
             terrain = TerrainSpec.from_dict(terrain)
+        render_interval = _render_interval(
+            data["simulation"].get("render_interval", DEFAULT_RENDER_INTERVAL),
+            source="simulation.render_interval",
+            allow_none=False,
+        )
         return cls(
             schema_version=1,
             profile_id=str(data["profile_id"]),
             robot=RobotSpec.from_dict(data["robot"]),
             camera=CameraSpec.from_dict(data["camera"]),
             physics_dt=dt,
+            render_interval=render_interval,
             controller=controller,
             initial_pose=str(initial_pose) if initial_pose is not None else None,
             support=SupportSpec.from_dict(support) if support is not None else None,
@@ -290,6 +323,21 @@ class RunProfile:
         if not DEVICE_PATTERN.match(device):
             raise ContractError("simulation.device must be cpu or cuda[:N]")
         return replace(self, device=device)
+
+    def with_render_interval(self, render_interval: int | None) -> "RunProfile":
+        """Return the profile with an explicit CLI render cadence applied.
+
+        The cadence is physics ticks per rendered frame and the camera's own
+        update period follows it, so overriding it here moves the sensor and the
+        viewport together instead of leaving the camera stale.  ``None`` means
+        "no override" and returns the profile unchanged.
+        """
+        validated = _render_interval(
+            render_interval, source="render_interval", allow_none=True
+        )
+        if validated is None:
+            return self
+        return replace(self, render_interval=validated)
 
     @property
     def camera_update_period(self) -> float:

@@ -76,7 +76,72 @@ Flags:
 | `--duration SECONDS` | bounded run |
 | `--device {cpu,cuda}` | overrides the profile device; profiles default to CPU |
 | `--controller none` | disables the controller a profile declares, falling back to passive |
+| `--render-interval N` | physics ticks per rendered frame (profile default 8, about 25 FPS); sets the physics/viewport balance, and did not change the achievable rate in measurement |
+| `--no-dlssg` | disables DLSS frame generation; measured 206.5 → 213.0 Hz and a lower render call (9.0 → 8.0 ms) |
+| `--perf-detail` | adds the per-phase step breakdown to the per-second performance line |
 | `--test {passive-fall\|controlled-hold\|controller-hold}` | one of the acceptance modes below |
+
+## Interactive performance
+
+Both G1 paths are paced to wall clock when a controller is attached, so the loop
+rate *is* the acceptance number: a run that cannot keep 200 Hz is visibly behind
+real time for the controller talking to it over DDS.
+
+Measured on this host with `scripts/benchmark-sim.py` (WebRTC streaming UI, one
+Isaac process at a time, 10 s warm-up + 20 s window, medians of the samples in
+that window). The paced pairs are the same command before and after the
+deadline-based pacing change; the `misses` column is not comparable across it
+because the counter changed meaning (see `docs/sonic-isaac.md`).
+
+| Run | Command | Physics | RTF | Render | step | render_call |
+| --- | --- | --- | --- | --- | --- | --- |
+| Flat, free | `./dev.sh isaac-g1-sonic dex3 --controller none` | 207 Hz | 1.03 | 26 FPS | 3.7 ms | 9.0 ms |
+| Flat, free, no DLSS-G | `... --controller none --no-dlssg` | 213 Hz | 1.06 | 27 FPS | 3.7 ms | 8.0 ms |
+| Flat, headless | `... --controller none --headless` | 419 Hz | 2.09 | — | 2.4 ms | — |
+| Flat, paced, before deadline pacing | `./dev.sh isaac-g1-sonic dex3` | 160 Hz | 0.80 | 20 FPS | 4.5 ms | 9.7 ms |
+| Flat, paced, after deadline pacing | `./dev.sh isaac-g1-sonic dex3` | 162 Hz | 0.81 | 20 FPS | 4.5 ms | 9.6 ms |
+| Rough, free | `./dev.sh isaac-g1-sonic-rough dex3 --controller none` | 195 Hz | 0.97 | 24 FPS | 4.0 ms | 8.8 ms |
+| Rough, paced, before deadline pacing | `./dev.sh isaac-g1-sonic-rough dex3` | 132 Hz | 0.66 | 17 FPS | 4.5 ms | 20.3 ms |
+| Rough, paced, after deadline pacing | `./dev.sh isaac-g1-sonic-rough dex3` | 139 Hz | 0.69 | 18 FPS | 4.5 ms | 17.3 ms |
+
+Where the time goes (`--perf-detail`, flat, streamed UI): PhysX is ~3.2 ms of
+the ~3.7 ms step, staging the tick ~0.3 ms, the scene's own buffer refresh
+~0.05 ms; the render call is ~9 ms and runs every 8th tick. The streamed UI
+costs about half the physics rate: the same scene headless runs at 2.09x RTF.
+
+Things that were measured and did **not** help on this host, so they are not
+knobs: PhysX worker threads (4 > 16 > 24; 1 and 2 unchanged), the PhysX->USD
+writeback cadence, the asset's contact sensors (nothing reads them), and the
+render cadence — halving the render rate doubles the cost of each render call,
+leaving the per-second render cost unchanged. The one repeatable render-side
+gain is `--no-dlssg`.
+
+```
+scripts/benchmark-sim.py --list                       # the case matrix
+scripts/benchmark-sim.py --perf-detail                # all cases, one at a time
+scripts/benchmark-sim.py --case sonic-flat-paced --extra "--no-dlssg"
+```
+
+Each case runs the canonical launcher, discards the warm-up window, aggregates
+the samples the path itself prints, samples GPU/CPU alongside, and writes one
+JSON artifact under `.generated/benchmarks/` (never committed). Read it as:
+*paced* RTF ≥ 1 means the run held real time; `pacing_overruns` counts the ticks
+that missed their deadline; the *free* cases (no controller, or `--no_realtime`)
+measure the headroom the paced run has to work with. For the Instinct playback,
+whose own counters are cumulative, the harness reports the windowed rate derived
+from consecutive samples.
+
+Instinct's analysis on this host is in [docs/instinct-parkour.md](docs/instinct-parkour.md).
+The apparent 24-core CPU bottleneck was ONNX Runtime's two default spinning
+thread pools, not PhysX: explicit serial, non-spinning sessions reduced the
+process from about 22.6 CPU cores to 1.1. Removing a duplicate Kit main-loop
+rate limiter then reduced streamed render cost from about 20.6 ms to 7.9 ms.
+With real depth and policy enabled, streamed playback improved from about 0.28
+to **0.46 RTF** (~22.8 of the 50 target policy steps/s). The remaining critical
+path is four GPU PhysX steps (~21.6 ms), required depth observation processing
+(~6.5 ms) and rendering; the physics steps alone exceed the 20 ms real-time
+policy budget. The harness reports windowed rates, while playback's own
+`loops/s` counter is cumulative.
 
 
 ## Remote viewing (WebRTC)
@@ -132,7 +197,7 @@ motion, `R` resets, `O` is the emergency stop. `Enter` to switch to planner to t
 | `./dev.sh isaac-g1-test-controller dex3` | G1 driven by the deterministic scripted test controller |
 | `./dev.sh isaac-g1-sonic-rough dex3` | the SONIC G1 on the InstinctLab parkour terrain, streamed by default |
 | `./dev.sh instinct-parkour` | the Project-Instinct G1 parkour checkpoint, with the depth window, streamed by default |
-| `./dev.sh instinct-parkour-drive` | keyboard driver for a running playback, sending keys to its window |
+| `./dev.sh instinct-parkour-drive` | keyboard driver for a local X11 Isaac window; use the WebRTC client's keyboard for streamed playback |
 | `./dev.sh isaac-demo <demo.py>` | an Isaac Lab demo from `/opt/src/isaaclab/scripts/demos`, streamed over WebRTC |
 | `./dev.sh isaac-stream` | the Isaac Sim UI with no scene, streamed over WebRTC |
 | `./dev.sh webrtc-client` | Isaac Sim WebRTC client, for watching a streaming host |
