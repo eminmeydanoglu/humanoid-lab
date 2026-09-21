@@ -64,7 +64,7 @@
       "position_m": [
         0.6,
         0.0,
-        -0.3234513
+        -0.1582904
       ],
       "rotation_wxyz": [
         0.7071067812,
@@ -72,8 +72,8 @@
         0.0,
         0.7071067812
       ],
-      "surface_height_m": 0.6706,
-      "surface_height_provenance": "Measured live, not derived. On 2026-09-18 the shipped scene ran against the official SONIC Y controller (planner IDLE, DDS domain 42, Isaac 5.1, headless) and the hand_palm_link world heights settled to 0.67050-0.67079 m (right) and 0.68684-0.68698 m (left) over t=70.4-92.4 s of a 150 s run, and to 0.6628-0.6633 m (right) and 0.6820-0.6821 m (left) over t=32-81 s of a second run. The declared surface is the lowest settled palm of the first run, 0.6706 m (within 8 mm of the second run's lowest palm), so both hands reach the worktop without lowering the torso; the previous 0.7397 m came from forward kinematics of the spawn pose and sat 7 cm above where the policy actually holds the palms. Worktop offset 0.994051 m above the asset origin measured with usd-core BBoxCache over SM_HeavyDutyPackingTable_C02_01 (stage metersPerUnit 0.01) and reproduced in the running stage to 3e-8 m. Verified in the same runs: the cubes rest on the live worktop (live centers 0.6956002 m against the expected 0.6956000 m) and the head camera sees all three cubes and the black target marker. The runtime scene probe reports the live worktop, target and cube heights on every run."
+      "surface_height_m": 0.8357609,
+      "surface_height_provenance": "Measured live on 2026-09-19 with the pose probe (src/humanoid_lab/simulators/isaac/pose_probe.py; record outputs/isaac-blockstacking-scene-polish/probe/current-profile.json), not derived. The probe commands both elbow joints to -0.32227265783984543 rad and reports that value as elbow_joint_commanded_rad; the per-hand write echo equals it by construction, because ArticulationData.joint_pos is a timestamped cache that a state write fills without advancing its timestamp, so the probe records it under that name instead of claiming it is a measurement. The articulation's realized readback of that pose -- root_physx_view.get_dof_positions(), reported as elbow_joint_realized_rad and as post_render_joint_readback_rad -- is -0.2932764589 rad (left) and -0.2931782007 rad (right), i.e. the elbow does not sit exactly at the commanded value and the two sides differ by 1e-4 rad. The 90 deg bend itself is measured from the live link positions (shoulder-yaw, elbow and wrist-roll link origins), not from a joint value: the asset's authored elbow frames solve to -0.2932327 rad for a perpendicular arm, applying that value measures 88.319 deg live, and the probe therefore refines the applied command until the measured upper-arm/forearm bend is 90.000 deg (left 90.0025, right 89.9969). The lowest world-z over all eight Dex3 links of each hand (palm, index, middle, thumb; mesh vertices transformed by the simulated link poses, because the stage prims keep the authored pose) is 0.8857629 m (left) and 0.8857609 m (right), both on the palm bottom; the shared lower value minus the 0.05 m cube size gives this surface, so table_surface + cube_size = lowest hand/finger world-z holds for both hands. The torso stays upright (waist joints zero) and both hands hang 2 um apart, so the common value is the safe one. Table root z is the surface minus the worktop offset 0.9940513 m above the asset origin (live worktop 0.8357609377640927 m, 3.8e-8 m below the declared surface; table asset bbox x 0.2190-1.0006, y +/-1.2368 in the same run). The older flexed4 record under outputs/isaac-blockstacking-calibration/elbow90/ belongs to the previous profile: its 0.6706 m scene was measured before the table was raised, and the current-profile record is the one named above. The runtime scene probe keeps reporting the live worktop, target and cube heights on every run."
     },
     "cubes": [
       {
@@ -86,8 +86,8 @@
         "mass_kg": 0.1,
         "position_m": [
           0.45,
-          -0.15,
-          0.6956
+          -0.1,
+          0.8607609
         ]
       },
       {
@@ -100,8 +100,8 @@
         "mass_kg": 0.1,
         "position_m": [
           0.45,
-          0.0,
-          0.6956
+          0.05,
+          0.8607609
         ]
       },
       {
@@ -114,8 +114,8 @@
         "mass_kg": 0.1,
         "position_m": [
           0.45,
-          0.15,
-          0.6956
+          0.2,
+          0.8607609
         ]
       }
     ],
@@ -129,8 +129,8 @@
       ],
       "position_m": [
         0.72,
-        0.0,
-        0.6716
+        0.05,
+        0.8367609
       ]
     }
   },

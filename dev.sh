@@ -675,6 +675,46 @@ psi0_eval_report_isaac() {
   done
 }
 
+# The official deployment exits when its LowState stream goes stale for more
+# than 500 ms, and the simulator publishes LowState only while its physics loop
+# runs.  The loop's first frames stall it for seconds while the RTX camera and
+# shaders warm up (worse when the GPU is busy with another job), which would
+# kill the controller right after it starts and tear the whole session down
+# with it.  Hand the terminal to the controller only after the loop has
+# reported physics steadily; the start-up support band holds the robot until
+# the first controller command, so a later start is safe.
+psi0_eval_wait_isaac_steady() { # $1 = isaac job index; $2 = steady window seconds
+  local index="$1" settle_s="${2:-30}" grace_s=4
+  local log="$PSI0_EVAL_HOST_LOG_DIR/isaac.log"
+  local job="${PSI0_EVAL_JOBS[$index]}"
+  local deadline=$(( $(date +%s) + 900 ))
+  local now count last_count=-1 progress_at="" observed_since=""
+  while :; do
+    now=$(date +%s)
+    [ "$now" -lt "$deadline" ] || return 1
+    # A dead or aborting job must fail the wait here, not after the timeout.
+    kill -0 "$job" 2>/dev/null || return 1
+    [ ! -e "$PSI0_EVAL_ABORT_FILE" ] || return 1
+    count="$(grep -c -- '^\[isaac-g1\] physics=' "$log" 2>/dev/null || true)"
+    count="${count:-0}"
+    if [ "$count" -gt "$last_count" ]; then
+      last_count="$count"
+      progress_at="$now"
+      [ -n "$observed_since" ] || observed_since="$now"
+    elif [ -n "$observed_since" ] && [ $(( now - progress_at )) -ge "$grace_s" ]; then
+      # A reporting gap longer than the grace restarts the window: the physics
+      # loop stalled, so the deployment would see stale state.
+      observed_since=""
+    fi
+    if [ -n "$observed_since" ] && [ $(( now - progress_at )) -lt "$grace_s" ] &&
+       [ $(( now - observed_since )) -ge "$settle_s" ]; then
+      echo "[psi0-isaac-eval] Isaac physics loop steady for $(( now - observed_since ))s (${count} reports)" >&2
+      return 0
+    fi
+    sleep 1
+  done
+}
+
 psi0_eval_stop_sonic_controller() {
   local container_id
   container_id="$(DC ps -q dev 2>/dev/null)" || return 0
@@ -868,6 +908,18 @@ psi0_isaac_eval() {
 
   psi0_eval_watchdog &
   PSI0_EVAL_WATCHDOG=$!
+
+  # The controller may only take the terminal once Isaac's state stream is
+  # steady; otherwise the deployment's 500 ms LowState check exits it during the
+  # RTX warm-up stall and the watchdog tears the session down (see
+  # psi0_eval_wait_isaac_steady).
+  if ! psi0_eval_wait_isaac_steady "$isaac_index" 30; then
+    echo "error: [isaac] did not reach a steady physics loop; the session was stopped" >&2
+    tail -n 20 "${PSI0_EVAL_LOGS[$isaac_index]}" >&2 2>/dev/null || true
+    psi0_eval_cleanup
+    trap - INT TERM HUP
+    return 1
+  fi
 
   # The eval streams the policy's Protocol v4 poses to the controller, so the
   # controller must run the ZMQ input interface (`--input-type zmq`): the

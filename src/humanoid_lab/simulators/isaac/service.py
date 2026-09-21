@@ -33,7 +33,60 @@ HAND_FALLBACKS = ("passive",)
 
 # Diffuse colors for the block-stacking scene materials.
 _CUBE_DIFFUSE_RGB = {"red": (0.80, 0.05, 0.05), "yellow": (0.85, 0.75, 0.05), "blue": (0.05, 0.20, 0.80)}
+#: A matte black tape is a dielectric: no metallic lobe, and 2 % diffuse is the
+#: reflectance of real black gaffer tape.
 _TARGET_DIFFUSE_RGB = (0.02, 0.02, 0.02)
+_TARGET_METALLIC = 0.0
+
+#: The target tape's live world path, for the material adjustment below.
+TARGET_TAPE_PRIM_PATH = "/World/envs/env_0/TargetTape"
+
+
+def flatten_tape_specular(stage: Any, target_prim_path: str = TARGET_TAPE_PRIM_PATH) -> dict[str, Any]:
+    """Remove the specular response from the target tape's own material.
+
+    The tape keeps the scene's UsdPreviewSurface (the same
+    :class:`PreviewSurfaceCfg` path as the cubes); what changes is only the
+    reflection: a matte black tape has no dielectric sheen, and the sheen is
+    what made a 2 % diffuse surface read as mid-gray under the dome and key
+    lights -- the Fresnel lobe of the default F0 = 4 % sits on top of the
+    diffuse term whatever the diffuse color is.  Both UsdPreviewSurface
+    workflows are authored to F0 = 0 (zero specular color in the specular
+    workflow, an index-matched ``ior`` in the metalness workflow) so the tape
+    renders black and the scene's lighting is left untouched.
+
+    Returns the inputs that were set, so a caller can log and check them.
+    """
+    from pxr import Gf, Sdf, Usd, UsdShade
+
+    prim = stage.GetPrimAtPath(target_prim_path)
+    if not prim or not prim.IsValid():
+        raise RuntimeError(f"live stage is missing {target_prim_path}")
+    for child in Usd.PrimRange(prim):
+        shader = UsdShade.Shader(child)
+        if shader and shader.GetIdAttr().Get() == "UsdPreviewSurface":
+            # The SDR-created shader does not expose every preview-surface input
+            # as an existing property, so a missing one is defined here, the
+            # same way Isaac Lab's own shader spawner sets its inputs.
+            def set_input(name: str, value: Any, type_name: Any) -> None:
+                attribute = child.GetAttribute(f"inputs:{name}")
+                if not attribute:
+                    attribute = child.CreateAttribute(f"inputs:{name}", type_name)
+                attribute.Set(value)
+
+            set_input("useSpecularWorkflow", 1, Sdf.ValueTypeNames.Int)
+            set_input("specularColor", Gf.Vec3f(0.0, 0.0, 0.0), Sdf.ValueTypeNames.Color3f)
+            set_input("ior", 1.0, Sdf.ValueTypeNames.Float)
+            set_input("roughness", 1.0, Sdf.ValueTypeNames.Float)
+            return {
+                "shader_path": str(child.GetPath()),
+                "use_specular_workflow": 1,
+                "specular_color": [0.0, 0.0, 0.0],
+                "ior": 1.0,
+                "roughness": 1.0,
+                "diffuse_color": list(_TARGET_DIFFUSE_RGB),
+            }
+    raise RuntimeError(f"{target_prim_path} exposes no UsdPreviewSurface shader")
 
 
 def _scalar_or_none(value: Any) -> float | None:
@@ -133,6 +186,7 @@ class SimulatorService:
         self._camera_service_final: dict[str, Any] | None = None
         self._palm_body_ids: dict[str, int] = {}
         self._asset_top_heights: dict[str, float] = {}
+        self._asset_bounds: dict[str, tuple[tuple[float, float, float], tuple[float, float, float]]] = {}
         self._device = profile.device
         self._is_rendering = False
         self._run_started = time.monotonic()
@@ -244,6 +298,12 @@ class SimulatorService:
         )
         print('{"event":"isaac_g1_start","stage":"interactive_scene"}', flush=True)
         self._scene = InteractiveScene(self._make_scene_cfg())
+        if self.profile.scene is not None:
+            # The declared black tape must render black, and the renderer
+            # translates a material on first use: author the fix before any
+            # reset or render rather than after the scene has been drawn once.
+            material = flatten_tape_specular(self._sim.stage)
+            print(json.dumps({"event": "isaac_g1_target_tape_material", **material}), flush=True)
         # Mirror DirectRLEnv: rendering is only needed for a GUI or an RTX sensor.
         self._is_rendering = self._sim.has_gui() or self._sim.has_rtx_sensors()
         print('{"event":"isaac_g1_start","stage":"free_base"}', flush=True)
@@ -821,7 +881,7 @@ class SimulatorService:
                     spawn=sim_utils.CuboidCfg(
                         size=scene_spec.target.size_m,
                         visual_material=sim_utils.PreviewSurfaceCfg(
-                            diffuse_color=_TARGET_DIFFUSE_RGB, metallic=0.0, roughness=0.9
+                            diffuse_color=_TARGET_DIFFUSE_RGB, metallic=_TARGET_METALLIC, roughness=0.9
                         ),
                     ),
                 )
@@ -1730,9 +1790,38 @@ class SimulatorService:
                 if surface is not None
                 else None
             ),
+            # The standing hold is only safe if the robot also stays clear of
+            # the table it reaches over; this travels with the same sample.
+            "table_clearance": self._table_clearance_sample(),
+            # Commanded vs measured elbow joints: the profile's start-up pose
+            # value is a command, and only this pair shows what the live
+            # articulation realizes under the controller.
+            "elbows": self._elbow_sample(),
             "episode_id": self.episode_id,
             "physics_tick": self.tick,
         }
+
+    def _elbow_sample(self) -> dict[str, Any] | None:
+        """The elbow joints the table height derives from, command next to measurement."""
+        if self._robot is None:
+            return None
+        names = list(self._robot.joint_names)
+        measured = self._robot.data.joint_pos[0]
+        command = self._last_body_command_q
+        layout = self._body_layout
+        sample: dict[str, Any] = {}
+        for side in ("left", "right"):
+            joint = f"{side}_elbow_joint"
+            if joint not in names:
+                continue
+            entry: dict[str, Any] = {"measured_rad": float(measured[names.index(joint)])}
+            entry["commanded_rad"] = (
+                float(command[layout.names.index(joint)])
+                if command is not None and layout is not None and joint in layout.names
+                else None
+            )
+            sample[joint] = entry
+        return sample or None
 
     def _asset_top_height_m(self, prim_path: str) -> float | None:
         """World height of the top face of one static scene prim, read live.
@@ -1760,6 +1849,83 @@ class SimulatorService:
             return None
         self._asset_top_heights[prim_path] = float(aligned.GetMax()[2])
         return self._asset_top_heights[prim_path]
+
+    def _asset_bounds_m(
+        self, prim_path: str
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
+        """World AABB of one static scene prim, cached like the worktop height."""
+        if prim_path in self._asset_bounds:
+            return self._asset_bounds[prim_path]
+        if self._sim is None or self.profile.scene is None:
+            return None
+        try:
+            from pxr import Usd, UsdGeom
+        except ImportError:
+            return None
+        prim = self._sim.stage.GetPrimAtPath(prim_path)
+        if not prim.IsValid():
+            return None
+        cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
+        aligned = cache.ComputeWorldBound(prim).ComputeAlignedRange()
+        if aligned.IsEmpty():
+            return None
+        self._asset_bounds[prim_path] = (
+            tuple(float(value) for value in aligned.GetMin()),
+            tuple(float(value) for value in aligned.GetMax()),
+        )
+        return self._asset_bounds[prim_path]
+
+    def _table_clearance_sample(self) -> dict[str, Any] | None:
+        """How the robot sits relative to the table, read from the live state.
+
+        The table's near edge stands 0.219 m in front of the spawn, so the
+        standing hold has to show the robot stays clear of it.  Body origins
+        come from the articulation view -- never from the stage prims, which
+        keep the authored pose for articulated children -- and the table box
+        from the cached live bounds.  The robot's hands hanging under the
+        worktop's overhang are *below* the solid top, so the box test carries
+        each body's z: a hand under the worktop is not a collision, a body
+        reaching up through the worktop band would be.
+        """
+        if self._robot is None or self.profile.scene is None:
+            return None
+        bounds = self._asset_bounds_m("/World/envs/env_0/Table")
+        if bounds is None:
+            return None
+        worktop = float(bounds[1][2])
+        positions = self._robot.data.body_pos_w[0]
+        names = list(self._robot.body_names)
+        hand_markers = ("_hand_",)
+        inside: dict[str, list[float]] = {}
+        forward_body_x = float("-inf")
+        forward_hand_x = float("-inf")
+        for index, name in enumerate(names):
+            x, y, z = (float(positions[index, component]) for component in range(3))
+            if bounds[0][0] <= x <= bounds[1][0] and bounds[0][1] <= y <= bounds[1][1]:
+                inside[name] = [x, y, z]
+            if any(marker in name for marker in hand_markers):
+                forward_hand_x = max(forward_hand_x, x)
+            else:
+                forward_body_x = max(forward_body_x, x)
+        highest_inside = max((z for _, _, z in inside.values()), default=None)
+        return {
+            "table_bounds_m": [list(bounds[0]), list(bounds[1])],
+            "table_near_edge_x_m": float(bounds[0][0]),
+            "worktop_height_m": worktop,
+            "forward_body_x_max_m": None if forward_body_x == float("-inf") else forward_body_x,
+            "forward_hand_x_max_m": None if forward_hand_x == float("-inf") else forward_hand_x,
+            "body_gap_m": (
+                None if forward_body_x == float("-inf") else float(bounds[0][0]) - forward_body_x
+            ),
+            "bodies_inside_table_box": sorted(inside),
+            "body_z_inside_table_box_m": {name: values[2] for name, values in sorted(inside.items())},
+            # A positive value is a body below the worktop: the worktop slab
+            # itself is the top of the table, so the hands hanging 0.1 m below
+            # it are under the overhang rather than inside the table.
+            "clearance_to_worktop_top_m": None if highest_inside is None else worktop - highest_inside,
+            "episode_id": self.episode_id,
+            "physics_tick": self.tick,
+        }
 
     def _table_worktop_height_m(self) -> float | None:
         return self._asset_top_height_m("/World/envs/env_0/Table")
@@ -1789,10 +1955,17 @@ class SimulatorService:
                 "expected_center_z_m": (
                     worktop + cube.size_m[2] / 2.0 if worktop is not None else None
                 ),
+                # An accidental touch shows as a lateral displacement; the cube
+                # is otherwise expected to stay where the profile put it.
+                "displacement_xy_m": None,
             }
             try:
                 rigid = self._scene[f"cube_{cube.color}"]
-                entry["live_center_z_m"] = float(rigid.data.root_pos_w[0, 2])
+                live = [float(value) for value in rigid.data.root_pos_w[0, :3]]
+                entry["live_center_z_m"] = live[2]
+                entry["displacement_xy_m"] = (
+                    (live[0] - cube.position_m[0]) ** 2 + (live[1] - cube.position_m[1]) ** 2
+                ) ** 0.5
             except (KeyError, AttributeError, IndexError, TypeError, ValueError):
                 entry["live_center_z_m"] = None
             cubes[cube.color] = entry

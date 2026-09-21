@@ -7,8 +7,11 @@ policy server only to fail minutes later.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -318,6 +321,43 @@ class CheckpointEntriesTest(unittest.TestCase):
         self.assertEqual(fine.step, 40000)
 
 
+class PolicyDeviceRemovalTest(unittest.TestCase):
+    """CPU serving is gone: a device request fails before anything starts."""
+
+    def test_the_policy_device_flag_is_rejected_before_any_server_spawns(self) -> None:
+        launcher = load_launcher()
+        with mock.patch.object(launcher.PolicyServerProcess, "start") as start, \
+             mock.patch.object(launcher, "Session") as session:
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as ctx:
+                    launcher.main(["--checkpoint-dir", "/tmp/run", "--checkpoint-step", "40000",
+                                   "--policy-device", "cpu"])
+        self.assertEqual(ctx.exception.code, 2)
+        start.assert_not_called()
+        session.assert_not_called()
+
+    def test_the_environment_cannot_select_a_device_either(self) -> None:
+        # The old PSI0_POLICY_DEVICE default is gone; nothing reads it, so a
+        # leftover export cannot smuggle a CPU device past the CLI.
+        launcher = load_launcher()
+        base = ["--checkpoint-dir", "/tmp/run", "--checkpoint-step", "40000"]
+        with mock.patch.dict(os.environ, {"PSI0_POLICY_DEVICE": "cpu"}):
+            args = launcher.parse_args(base)
+        self.assertFalse(hasattr(args, "policy_device"))
+
+    def test_the_usage_does_not_advertise_a_device_option(self) -> None:
+        launcher = load_launcher()
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            with self.assertRaises(SystemExit):
+                launcher.parse_args(["--help"])
+        self.assertNotIn("--policy-device", out.getvalue())
+
+    def test_devsh_forwards_bridge_flags(self) -> None:
+        # recv-timeout/port style flags travel to the bridge through the
+        # launcher's own argument passthrough.
+        self.assertIn("$eval_args_str", DEV_SH.read_text(encoding="utf-8"))
+
+
 class DevShEntrypointTest(unittest.TestCase):
     def test_devsh_is_valid_and_exposes_the_single_command(self) -> None:
         proc = subprocess.run(["bash", "-n", str(DEV_SH)], capture_output=True, text=True)
@@ -341,6 +381,18 @@ class DevShEntrypointTest(unittest.TestCase):
         self.assertNotIn("psi0_eval_bg_start psi0-server", text)
         self.assertNotIn("exec serve_psi0_sonic", text)
         self.assertIn("--policy-log='$PSI0_EVAL_LOG_DIR/psi0-server.log'", text)
+
+    def test_the_controller_starts_only_after_isaac_steps_steadily(self) -> None:
+        """The deployment exits when LowState is stale for more than 500 ms, and
+        the physics loop stalls during the RTX warm-up; handing it the terminal
+        before the loop has reported steadily tears the session down."""
+        text = DEV_SH.read_text(encoding="utf-8")
+        self.assertIn("psi0_eval_wait_isaac_steady", text)
+        self.assertIn("^\\[isaac-g1\\] physics=", text)
+        self.assertIn("Isaac physics loop steady", text)
+        wait_call = text.index('psi0_eval_wait_isaac_steady "$isaac_index"')
+        self.assertLess(wait_call, text.index("run_sonic_controller zmq"))
+        self.assertIn("did not reach a steady physics loop", text)
 
 
 if __name__ == "__main__":

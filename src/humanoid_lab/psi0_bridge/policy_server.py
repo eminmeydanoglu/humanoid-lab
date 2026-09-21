@@ -27,6 +27,9 @@ from typing import Any, Optional
 #: The canonical deployment invocation (same flags dev.sh used when the launcher
 #: owned the server): ``--action_exec_horizon 30`` matches the bridge's 30 Hz
 #: Protocol v4 stream and ``--rtc`` enables the replan path verified at startup.
+#: No ``--device`` is passed: the deployment's own ``cuda:0`` default is the only
+#: servable configuration, because its inference path pins CUDA autocast -- a
+#: CPU device still loads and answers /info, then fails on the first forward pass.
 SERVE_EXECUTABLE = "serve_psi0_sonic"
 
 DEFAULT_STOP_TIMEOUT_S = 15.0

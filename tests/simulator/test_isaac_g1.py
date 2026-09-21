@@ -326,10 +326,17 @@ class IsaacG1BlockStackingSceneTests(unittest.TestCase):
         # which is the space the cubes and the target need (measured with
         # usd-core BBoxCache on the shipped USDs).
         self.assertTrue(table.asset_reference.endswith("/PackingTable_2/PackingTable.usd"))
-        # The one measured number: the settled palm height of the SONIC Y
-        # standing stance (see the profile's surface_height_provenance).
-        self.assertAlmostEqual(table.surface_height_m, 0.6706, places=4)
+        # The one measured number: the lowest Dex3 mesh point (palm bottom)
+        # with both elbows at a measured 90.00 deg bend, minus the 0.05 m cube
+        # (see the profile's surface_height_provenance and the elbow-flexion
+        # probe record under outputs/isaac-blockstacking-calibration/elbow90).
+        self.assertAlmostEqual(table.surface_height_m, 0.8357609, places=4)
         self.assertTrue(table.surface_height_provenance)
+        # table_surface + cube_size = lowest hand/finger world-z, the relation
+        # the height exists for: the cube top lands on the measured hand bottom.
+        self.assertAlmostEqual(
+            table.surface_height_m + scene.cubes[0].size_m[2], 0.8857609, places=4
+        )
         # The table is placed so the measured 0.994051 m worktop offset lands on
         # the declared surface height.
         self.assertAlmostEqual(
@@ -343,6 +350,21 @@ class IsaacG1BlockStackingSceneTests(unittest.TestCase):
             self.assertAlmostEqual(
                 cube.position_m[2], table.surface_height_m + cube.size_m[2] / 2.0, places=4
             )
+
+        # The canonical row: one x line, equal 0.15 m spacing along y, centred
+        # on the tape that sits beyond the middle cube.  On 2026-09-19 the row
+        # and the tape were shifted together +0.05 m in y, because the head
+        # camera cropped the red cube at the frame's right edge; moving them as
+        # one piece keeps the row, the spacing and the row-to-tape alignment
+        # canonical and only changes where the arrangement sits in front of the
+        # robot.
+        self.assertEqual({cube.position_m[0] for cube in scene.cubes}, {0.45})
+        ys = [cube.position_m[1] for cube in scene.cubes]
+        self.assertAlmostEqual(ys[1] - ys[0], 0.15, places=6)
+        self.assertAlmostEqual(ys[2] - ys[1], 0.15, places=6)
+        self.assertAlmostEqual((ys[0] + ys[2]) / 2.0, ys[1], places=6)
+        self.assertAlmostEqual(scene.target.position_m[1], ys[1], places=6)
+        self.assertGreater(scene.target.position_m[0], max(cube.position_m[0] for cube in scene.cubes))
 
         self.assertEqual(scene.target.kind, "tape")
         self.assertEqual(scene.target.color, "black")
@@ -404,11 +426,32 @@ class IsaacG1BlockStackingSceneTests(unittest.TestCase):
             "live_target_top_z_m",
             "live_target_minus_declared_m",
             "cubes",
+            "displacement_xy_m",
         ):
             self.assertIn(field, source)
         # Emitted with the palm reading and carried into the run summary.
         self.assertIn('"scene": self._scene_probe()', source)
         self.assertIn('"scene_probe": self._scene_probe()', source)
+
+    def test_the_black_tape_is_flattened_and_robot_table_clearance_is_logged(self) -> None:
+        """The declared black tape used to render mid-gray (the dielectric
+        specular of its own preview surface under the scene lights), and the
+        standing hold needs a robot-versus-table reading next to the palms."""
+        source = SERVICE.read_text()
+        # The tape keeps the scene's own UsdPreviewSurface; only its specular
+        # response is authored away, and the inputs are logged as evidence.
+        self.assertIn("def flatten_tape_specular", source)
+        self.assertIn("usespecularworkflow", source.lower())
+        self.assertIn("isaac_g1_target_tape_material", source)
+        # Clearance and penetration travel with the palm sample, so the log and
+        # the run summary both carry them.
+        self.assertIn("def _table_clearance_sample", source)
+        self.assertIn("bodies_inside_table_box", source)
+        self.assertIn('"table_clearance": self._table_clearance_sample()', source)
+        # The probe builds the same target, so it flattens the same material
+        # rather than reproducing the gray in its frames.
+        probe = (ROOT / "src/humanoid_lab/simulators/isaac/pose_probe.py").read_text()
+        self.assertIn("flatten_tape_specular", probe)
 
 
 if __name__ == "__main__":

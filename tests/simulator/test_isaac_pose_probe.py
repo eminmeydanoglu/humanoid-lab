@@ -12,7 +12,9 @@ from humanoid_lab.simulators.isaac.pose_probe import (  # noqa: E402
     BEND_ANGLE_TOLERANCE_DEG,
     build_report,
     lowest_link,
+    mesh_lowest_link,
     perpendicular_elbow_angle,
+    quaternion_rotation,
     with_elbow_flexion,
     arm_bend_angle_deg,
     hand_link_names,
@@ -88,6 +90,57 @@ class ElbowFlexionTests(unittest.TestCase):
                 self.assertIn(f"{side}_hand_{finger}_link", links)
         with self.assertRaisesRegex(ValueError, "side"):
             hand_link_names("middle")
+
+
+class MeshHeightTests(unittest.TestCase):
+    def test_the_lowest_mesh_vertex_sets_the_hand_height(self) -> None:
+        # A unit cube per link, in the link frame, at the world origin.
+        points = {
+            "palm": [(-0.5, -0.5, -0.5), (0.5, 0.5, 0.5)],
+            "finger": [(-0.5, -0.5, -0.5), (0.5, 0.5, 0.5)],
+        }
+        poses = {"palm": ((0.0, 0.0, 1.0), (1.0, 0.0, 0.0, 0.0)), "finger": ((0.0, 0.0, 0.9), (1.0, 0.0, 0.0, 0.0))}
+        link, value, per_link = mesh_lowest_link(points, poses)
+        self.assertEqual(link, "finger")
+        self.assertAlmostEqual(value, 0.4)
+        self.assertAlmostEqual(per_link["palm"], 0.5)
+
+    def test_a_quarter_turn_about_x_moves_the_height_by_the_rotation(self) -> None:
+        # A vertex at (0, 1, 0) rotated 90 deg about +X lands on +Z.
+        quaternion = (math.cos(math.pi / 4.0), math.sin(math.pi / 4.0), 0.0, 0.0)
+        rows = quaternion_rotation(quaternion)
+        height = rows[2][0] * 0.0 + rows[2][1] * 1.0 + rows[2][2] * 0.0
+        self.assertAlmostEqual(height, 1.0, places=9)
+        with self.assertRaisesRegex(ValueError, "zero norm"):
+            quaternion_rotation((0.0, 0.0, 0.0, 0.0))
+
+    def test_meshes_from_the_asset_cover_every_hand_link(self) -> None:
+        # The source asserts an asset that exposes no hand mesh is refused.
+        source = PROBE.read_text()
+        self.assertIn("_asset_link_points", source)
+        self.assertIn("exposes no", source)
+
+
+class ProbeJointProvenanceTests(unittest.TestCase):
+    def test_commanded_and_realized_joint_values_are_recorded_separately(self) -> None:
+        """``robot.data.joint_pos`` is a timestamped cache that a state write
+        fills without advancing its timestamp, so the old per-hand readback was
+        the command echoed back.  The probe now records the command, the write
+        echo and the physics view read under names that say which is which."""
+        source = PROBE.read_text()
+        self.assertIn("elbow_joint_commanded_rad", source)
+        self.assertIn("elbow_joint_write_echo_rad", source)
+        self.assertIn("elbow_joint_realized_rad", source)
+        self.assertIn("def physx_joint_readback", source)
+        self.assertIn("post_render_joint_readback_rad", source)
+        self.assertNotIn('"joint_readback_rad"', source)
+
+    def test_the_probe_flattens_the_target_tape_material(self) -> None:
+        # The probe frames are the evidence for the black tape, so the probe
+        # has to apply the same material adjustment the service does.
+        source = PROBE.read_text()
+        self.assertIn("flatten_tape_specular", source)
+        self.assertIn("target_material", source)
 
 
 class ProbeReportTests(unittest.TestCase):

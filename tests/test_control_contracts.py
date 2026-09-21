@@ -154,7 +154,11 @@ class SonicConstantTests(unittest.TestCase):
         """The deployment parses its planner version from the path, so the run
         command is the one place that must carry a version token."""
         dev_sh = (REPO / "dev.sh").read_text()
-        block = dev_sh[dev_sh.index("sonic-controller)") : dev_sh.index("  doctor)")]
+        # The controller invocation lives in run_sonic_controller(), shared by
+        # the sonic-controller entry and psi0-isaac-eval; the case entries only
+        # forward to it, so the launch contract is checked in the function.
+        start = dev_sh.index("run_sonic_controller()")
+        block = dev_sh[start : dev_sh.index("\n}\n", start)]
         self.assertIn("V2/planner_sonic.onnx", block)
         self.assertIn("--planner-file", block)
         for flag in sonic.SIMULATION_ONLY_FLAGS:

@@ -125,7 +125,11 @@ server it serves).
 `checkpoints/ckpt_<step>`); host paths under the data root and the in-container
 spellings (`/outputs/...`, `/data/...`) are both accepted. The command validates
 the checkpoint, the action port (`:5556`) and the served `/info` contract before
-anything is served, and stops with the reason instead of guessing.
+anything is served, and stops with the reason instead of guessing. Serving is
+CUDA-only: the bridge spawns the deployment with its canonical `cuda:0` command,
+and a machine whose GPU cannot host the checkpoint cannot serve it — a CPU device
+would load the model and answer `/info`, then fail on the first action, because
+the deployment's inference path runs under CUDA autocast.
 
 The SONIC controller keeps this terminal, started in its pose-streaming mode so
 it can consume the policy's Protocol v4 messages: press `Enter` to enable the

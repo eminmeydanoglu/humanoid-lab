@@ -7,6 +7,7 @@ merge runs on a handful of tensors instead of the 11 GB warm start.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -57,11 +58,27 @@ class PolicyServerProcessTest(unittest.TestCase):
         self.addCleanup(self._probe.stop)
 
     def test_the_canonical_serve_command_is_the_deployment_invocation(self) -> None:
+        command = serve_command(Path("/outputs/run"), 40000, 8014)
         self.assertEqual(
-            serve_command(Path("/outputs/run"), 40000, 8014),
+            command,
             ["serve_psi0_sonic", "--host", "0.0.0.0", "--port", "8014",
              "--action_exec_horizon", "30", "--policy", "psi", "--rtc",
              "--run-dir", "/outputs/run", "--ckpt-step", "40000"],
+        )
+        self.assertNotIn("--device", command)
+
+    def test_cpu_serving_cannot_be_requested_at_all(self) -> None:
+        # The deployment's inference path pins CUDA autocast: a CPU device loads
+        # the model and answers /info, then fails on the first forward pass, so
+        # the bridge has no device knob -- the canonical cuda:0 command is the
+        # only servable path and a CPU request is a TypeError before any spawn.
+        with self.assertRaises(TypeError):
+            serve_command(Path("/outputs/run"), 40000, 8014, device="cpu")
+        with self.assertRaises(TypeError):
+            PolicyServerProcess(port=8014, device="cpu")
+        self.assertEqual(
+            PolicyServerProcess(port=8014).command(Path("/outputs/run"), 0),
+            serve_command(Path("/outputs/run"), 0, 8014),
         )
 
     def test_start_stop_restart_touches_only_the_child(self) -> None:
@@ -136,8 +153,10 @@ class BaseMaterializationTest(unittest.TestCase):
         (self.source_dir / "MODEL_PROVENANCE.json").write_text(json.dumps({
             "repo": "USC-PSI-Lab/psi-model", "revision": "abc123",
             "variant": "psi0/postpre.sonic1.0.40k",
-            "files": [{"path": "model.safetensors", "sha256": "aa"},
-                      {"path": "action_header.safetensors", "sha256": "bb"}],
+            "files": [{"path": "model.safetensors",
+                       "sha256": self.sha256(self.source_dir / "model.safetensors")},
+                      {"path": "action_header.safetensors",
+                       "sha256": self.sha256(self.source_dir / "action_header.safetensors")}],
         }), encoding="utf-8")
 
         (self.fine_dir / "run_config.json").write_text(json.dumps({
@@ -148,6 +167,17 @@ class BaseMaterializationTest(unittest.TestCase):
             "finetune-real-psi0\n--model.action-dim=80\n--model.state-null-token\n"
             "--train.learning_rate=2.5e-5\n", encoding="utf-8")
         (self.fine_dir / "clip_pooled_cache.pt").write_bytes(b"cache")
+
+    @staticmethod
+    def sha256(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    @property
+    def merged(self) -> Path:
+        return self.out_dir / "checkpoints" / "ckpt_0" / "model.safetensors"
+
+    def materialize(self, **kwargs) -> dict:
+        return base_artifact.materialize_base_run_dir(self.fine_dir, self.out_dir, **kwargs)
 
     def test_materialize_merges_keys_and_patches_the_config(self) -> None:
         record = base_artifact.materialize_base_run_dir(self.fine_dir, self.out_dir)
@@ -174,16 +204,133 @@ class BaseMaterializationTest(unittest.TestCase):
             merged["action_header.transformer_blocks.0.proj.weight"], torch.full((2,), 7.0)))
         self.assertEqual(record["merged"]["vlm_model_keys"], 2)
         self.assertEqual(record["merged"]["action_header_keys"], 2)
+        self.assertEqual(record["source_files"]["model.safetensors"]["sha256"],
+                         self.sha256(self.source_dir / "model.safetensors"))
+        self.assertEqual(record["merged"]["sha256"], self.sha256(self.merged))
         self.assertEqual((self.out_dir / "clip_pooled_cache.pt").read_bytes(), b"cache")
         self.assertTrue((self.out_dir / "BASE_ARTIFACT.json").is_file())
 
     def test_materialization_is_idempotent(self) -> None:
         base_artifact.materialize_base_run_dir(self.fine_dir, self.out_dir)
-        merged_path = self.out_dir / "checkpoints" / "ckpt_0" / "model.safetensors"
-        stamp = merged_path.stat().st_mtime_ns
-        record = base_artifact.materialize_base_run_dir(self.fine_dir, self.out_dir)
-        self.assertEqual(merged_path.stat().st_mtime_ns, stamp)
+        inode = self.merged.stat().st_ino
+        record = self.materialize()
+        self.assertEqual(self.merged.stat().st_ino, inode)  # verified, not rewritten
         self.assertEqual(record["merged"]["vlm_model_keys"], 2)
+
+    def test_reuse_is_refused_when_a_source_file_changes(self) -> None:
+        base_artifact.materialize_base_run_dir(self.fine_dir, self.out_dir)
+        inode = self.merged.stat().st_ino
+        # Same keys, same size, different weights: only the recorded sha256 can
+        # tell the stale merge from a fresh one.
+        save_file({"model.embed_tokens.weight": torch.full((2, 3), 5.0),
+                   "model.layers.0.mlp.weight": torch.ones(3)},
+                  str(self.source_dir / "model.safetensors"))
+        record = self.materialize()
+        self.assertNotEqual(self.merged.stat().st_ino, inode)
+        self.assertEqual(record["source_files"]["model.safetensors"]["sha256"],
+                         self.sha256(self.source_dir / "model.safetensors"))
+        self.assertTrue(torch.equal(
+            load_file(str(self.merged))["vlm_model.model.embed_tokens.weight"],
+            torch.full((2, 3), 5.0)))
+
+    def test_a_truncated_merge_is_rebuilt(self) -> None:
+        base_artifact.materialize_base_run_dir(self.fine_dir, self.out_dir)
+        good = self.merged.read_bytes()
+        self.merged.write_bytes(good[:-4])
+        self.materialize()
+        self.assertEqual(self.merged.read_bytes(), good)
+
+    def test_a_corrupted_merge_is_rebuilt(self) -> None:
+        base_artifact.materialize_base_run_dir(self.fine_dir, self.out_dir)
+        good = self.merged.read_bytes()
+        flipped = bytearray(good)
+        flipped[-1] ^= 0xFF  # a payload byte: only the recorded sha256 sees this
+        self.merged.write_bytes(bytes(flipped))
+        self.materialize()
+        self.assertEqual(self.merged.read_bytes(), good)
+
+    def test_merged_keys_outside_the_source_layout_are_rebuilt(self) -> None:
+        base_artifact.materialize_base_run_dir(self.fine_dir, self.out_dir)
+        tensors = load_file(str(self.merged))
+        tensors["vlm_model.model.extra.weight"] = torch.zeros(1)
+        save_file(tensors, str(self.merged))
+        self.materialize()
+        self.assertNotIn("vlm_model.model.extra.weight", load_file(str(self.merged)))
+
+    def test_run_config_drift_is_repaired(self) -> None:
+        base_artifact.materialize_base_run_dir(self.fine_dir, self.out_dir)
+        config_path = self.out_dir / "run_config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config["model"]["state_null_token"] = True
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        self.materialize()
+        served = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertIs(served["model"]["state_null_token"], False)
+
+    def test_argv_drift_is_repaired(self) -> None:
+        base_artifact.materialize_base_run_dir(self.fine_dir, self.out_dir)
+        argv_path = self.out_dir / "argv.txt"
+        argv_path.write_text(argv_path.read_text(encoding="utf-8") + "--model.state-null-token\n",
+                             encoding="utf-8")
+        self.materialize()
+        self.assertNotIn("state-null-token", argv_path.read_text(encoding="utf-8"))
+
+    def test_a_removed_checkpoint_or_cache_is_restored(self) -> None:
+        base_artifact.materialize_base_run_dir(self.fine_dir, self.out_dir)
+        self.merged.unlink()
+        (self.out_dir / "clip_pooled_cache.pt").unlink()
+        self.materialize()
+        self.assertTrue(self.merged.is_file())
+        self.assertEqual((self.out_dir / "clip_pooled_cache.pt").read_bytes(), b"cache")
+
+    def test_a_record_from_another_fine_run_is_not_reused(self) -> None:
+        base_artifact.materialize_base_run_dir(self.fine_dir, self.out_dir)
+        provenance = self.out_dir / "BASE_ARTIFACT.json"
+        record = json.loads(provenance.read_text(encoding="utf-8"))
+        record["fine_run_dir"] = str(self.fine_dir.parent / "other-run")
+        provenance.write_text(json.dumps(record), encoding="utf-8")
+        inode = self.merged.stat().st_ino
+        self.materialize()
+        self.assertNotEqual(self.merged.stat().st_ino, inode)
+
+    def test_an_older_record_without_fingerprints_is_adopted_not_rebuilt(self) -> None:
+        base_artifact.materialize_base_run_dir(self.fine_dir, self.out_dir)
+        inode = self.merged.stat().st_ino
+        provenance = self.out_dir / "BASE_ARTIFACT.json"
+        record = json.loads(provenance.read_text(encoding="utf-8"))
+        record["merged"].pop("sha256")
+        record["source_files"]["model.safetensors"].pop("sha256")
+        provenance.write_text(json.dumps(record), encoding="utf-8")
+
+        reused = self.materialize()
+        self.assertEqual(self.merged.stat().st_ino, inode)  # sound artifact kept
+        self.assertEqual(reused["merged"]["sha256"], self.sha256(self.merged))
+        self.assertEqual(reused["source_files"]["model.safetensors"]["sha256"],
+                         self.sha256(self.source_dir / "model.safetensors"))
+
+    def test_a_failed_rebuild_keeps_the_previous_dir_and_leaves_no_temp(self) -> None:
+        base_artifact.materialize_base_run_dir(self.fine_dir, self.out_dir)
+        damaged = self.merged.read_bytes()[:-4]
+        self.merged.write_bytes(damaged)  # force a rebuild decision
+        with mock.patch.object(base_artifact, "_merge_state_dict",
+                               side_effect=BaseArtifactError("merge failed")):
+            with self.assertRaises(BaseArtifactError):
+                self.materialize()
+        self.assertEqual(self.merged.read_bytes(), damaged)  # nothing half-written
+        leftovers = sorted(p.name for p in self.out_dir.parent.iterdir()
+                           if p.name.startswith(f".{self.out_dir.name}."))
+        self.assertEqual(leftovers, [])
+
+        self.materialize()  # the next attempt recovers
+        self.assertNotEqual(self.merged.read_bytes(), damaged)
+
+    def test_a_stale_temp_dir_from_a_crashed_build_is_removed(self) -> None:
+        stale = self.out_dir.parent / f".{self.out_dir.name}.tmp-999999"
+        (stale / "checkpoints").mkdir(parents=True)
+        (stale / "run_config.json").write_text("{}", encoding="utf-8")
+        self.materialize()
+        self.assertFalse(stale.exists())
+        self.assertTrue(self.merged.is_file())
 
     def test_default_output_sits_next_to_the_fine_tune_runs(self) -> None:
         source = base_artifact.read_base_source(self.fine_dir)
