@@ -54,6 +54,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="ZMQ REP endpoint for headless reset and status, default tcp://*:5559",
     )
     parser.add_argument(
+        "--sonic-camera-endpoint",
+        default=None,
+        help="publish head RGB in NVIDIA SONIC ego_view format, normally tcp://*:5555",
+    )
+    parser.add_argument(
         "--no-camera-service",
         action="store_true",
         help="keep the camera and reset endpoints closed even when the profile enables them",
@@ -108,6 +113,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             camera_service=camera_service,
             camera_endpoint=args.camera_endpoint or DEFAULT_CAMERA_ENDPOINT,
             control_endpoint=args.control_endpoint or DEFAULT_CONTROL_ENDPOINT,
+            sonic_camera_endpoint=args.sonic_camera_endpoint,
         )
         summary = service.run()
         if args.tracking_output:

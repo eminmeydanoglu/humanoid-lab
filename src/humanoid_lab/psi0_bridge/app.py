@@ -39,8 +39,13 @@ from .session import Session, SessionError, info_summary
 TASK_NAME = "BlockStacking"
 
 
-def _index_html(prompt: str, task: str) -> str:
-    return _INDEX_HTML.replace("__TASK__", html.escape(task)).replace("__PROMPT__", html.escape(prompt))
+def _index_html(prompt: str, task: str, subtitle: str, policy_label: str) -> str:
+    return (
+        _INDEX_HTML.replace("__TASK__", html.escape(task))
+        .replace("__PROMPT__", html.escape(prompt))
+        .replace("__SUBTITLE__", html.escape(subtitle))
+        .replace("__POLICY_LABEL__", html.escape(policy_label))
+    )
 
 
 def _empty_checkpoint_status() -> dict[str, Any]:
@@ -53,8 +58,13 @@ def create_app(
     *,
     webrtc: Optional[dict[str, Any]] = None,
     checkpoints: Optional[CheckpointController] = None,
+    prompt: str = CANONICAL_PROMPT,
+    task: str = TASK_NAME,
+    subtitle: str = "Ψ₀ checkpoint → SONIC Protocol v4 → Isaac G1 + Dex3",
+    policy_label: str = "Ψ₀ server",
+    require_canonical_prompt: bool = True,
 ) -> FastAPI:
-    """Build the FastAPI app around an already-constructed :class:`Session`."""
+    """Build the shared evaluation UI around an already-constructed session."""
 
     from contextlib import asynccontextmanager
 
@@ -70,18 +80,18 @@ def create_app(
             session.monitor.stop()
             session.close()
 
-    app = FastAPI(title="Psi0-SONIC bridge", lifespan=lifespan)
+    app = FastAPI(title=f"{task} evaluation", lifespan=lifespan)
     webrtc_info = dict(webrtc or {})
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> HTMLResponse:
-        return HTMLResponse(_index_html(CANONICAL_PROMPT, TASK_NAME))
+        return HTMLResponse(_index_html(prompt, task, subtitle, policy_label))
 
     @app.get("/api/meta")
     def meta() -> dict[str, Any]:
         return {
-            "task": TASK_NAME,
-            "prompt": CANONICAL_PROMPT,
+            "task": task,
+            "prompt": prompt,
             "instruction_keys": ["instruction"],
             "webrtc": webrtc_info,
         }
@@ -94,6 +104,8 @@ def create_app(
     def checkpoints_status() -> dict[str, Any]:
         if checkpoints is None:
             return _empty_checkpoint_status()
+        if hasattr(checkpoints, "checkpoints_status"):
+            return checkpoints.checkpoints_status()
         return checkpoints.status()
 
     @app.post("/api/checkpoint")
@@ -119,13 +131,14 @@ def create_app(
     @app.post("/api/start")
     def start(body: dict[str, Any]) -> Any:
         instruction = body.get("instruction", "") if isinstance(body, dict) else ""
-        try:
-            require_canonical(str(instruction))
-        except PromptMismatch as exc:
-            return JSONResponse({"detail": str(exc), "canonical_prompt": CANONICAL_PROMPT}, status_code=400)
+        if require_canonical_prompt:
+            try:
+                require_canonical(str(instruction))
+            except PromptMismatch as exc:
+                return JSONResponse({"detail": str(exc), "canonical_prompt": prompt}, status_code=400)
         try:
             return session.start()
-        except SessionError as exc:
+        except (SessionError, CheckpointError) as exc:
             return JSONResponse({"detail": str(exc)}, status_code=409)
 
     @app.post("/api/stop")
@@ -142,7 +155,7 @@ def create_app(
             info = session.refresh_info()
         except Exception as exc:  # noqa: BLE001 - surfaced verbatim to the operator
             return JSONResponse({"detail": f"{type(exc).__name__}: {exc}"}, status_code=502)
-        return {"info": info_summary(info)}
+        return {"info": info if isinstance(info, dict) else info_summary(info)}
 
     @app.get("/api/camera/frame")
     def camera_frame() -> Any:
@@ -206,7 +219,7 @@ _INDEX_HTML = """<!doctype html>
 <body>
 <header>
   <h1>__TASK__</h1>
-  <span class="sub">Ψ₀ checkpoint → SONIC Protocol v4 → Isaac G1 + Dex3</span>
+  <span class="sub">__SUBTITLE__</span>
 </header>
 <main>
   <section class="panel">
@@ -221,7 +234,7 @@ _INDEX_HTML = """<!doctype html>
   </section>
 
   <section class="panel">
-    <h2>Policy checkpoint</h2>
+    <h2>Model</h2>
     <div class="row" id="cp-options"></div>
     <div id="cp-detail">—</div>
   </section>
@@ -230,7 +243,7 @@ _INDEX_HTML = """<!doctype html>
     <h2>Status</h2>
     <dl>
       <dt>Session</dt><dd id="session">—</dd>
-      <dt>Ψ₀ server</dt><dd id="psi0">—</dd>
+      <dt>__POLICY_LABEL__</dt><dd id="psi0">—</dd>
       <dt>SONIC g1_debug</dt><dd id="sonic">—</dd>
       <dt>Camera</dt><dd id="camera">—</dd>
       <dt>Last action</dt><dd id="lastaction">—</dd>
@@ -328,7 +341,8 @@ function renderCheckpoints(cp) {
     : '—'));
   const active = cp.active;
   lines.push('active: ' + (active
-    ? '<code>' + escapeHtml(active.run_dir) + '</code> · step ' + active.step
+    ? escapeHtml(active.label || '') + ' · <code>' + escapeHtml(active.run_dir) + '</code>'
+      + (active.step === null || active.step === undefined ? '' : ' · step ' + active.step)
       + (cp.serving_selected ? '' : ' (does not match the selection)')
     : 'no verified policy server'));
   (cp.options || []).forEach((opt) => {

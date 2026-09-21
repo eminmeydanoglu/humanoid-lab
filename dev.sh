@@ -427,8 +427,12 @@ run_sonic_controller() { # $1 = input type (keyboard|zmq|zmq_manager)
     keyboard|zmq|zmq_manager) ;;
     *) echo "usage: $0 sonic-controller [keyboard|zmq|zmq_manager]" >&2; return 2 ;;
   esac
+  local -a exec_args=(exec)
+  if [ "${SONIC_CONTROLLER_NO_TTY:-0}" = 1 ]; then
+    exec_args+=(-T)
+  fi
   # shellcheck disable=SC2016
-  DC exec dev bash -lc '
+  DC "${exec_args[@]}" dev bash -lc '
     source /opt/humanoid-lab/entrypoint.sh
     cd /data/models/sonic-deploy
     export LD_LIBRARY_PATH=/data/models/sonic-deploy/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
@@ -787,8 +791,8 @@ psi0_eval_on_signal() {
 }
 
 psi0_isaac_eval() {
-  local checkpoint_dir="" base_run_dir="" checkpoint_step="" eval_args_str="" reason="" controller_rc=0
-  local bridge_index
+  local checkpoint_dir="" groot_checkpoint_dir="" base_run_dir="" checkpoint_step="" eval_args_str="" reason="" controller_rc=0
+  local bridge_index controller_job
   local -a eval_args=() isaac_args=()
   local profile_file=configs/profiles/isaac-g1-sonic-blockstacking-dex3.json
 
@@ -798,6 +802,8 @@ psi0_isaac_eval() {
       --checkpoint-dir=*) checkpoint_dir="${1#*=}"; shift ;;
       --checkpoint-step) checkpoint_step="${2:-}"; shift 2 ;;
       --checkpoint-step=*) checkpoint_step="${1#*=}"; shift ;;
+      --groot-checkpoint-dir) groot_checkpoint_dir="${2:-}"; shift 2 ;;
+      --groot-checkpoint-dir=*) groot_checkpoint_dir="${1#*=}"; shift ;;
       --base-run-dir) base_run_dir="${2:-}"; shift 2 ;;
       --base-run-dir=*) base_run_dir="${1#*=}"; shift ;;
       --gui|--headless) isaac_args+=("$1"); shift ;;
@@ -809,8 +815,8 @@ psi0_isaac_eval() {
         eval_args+=("$1"); shift ;;
     esac
   done
-  [ -n "$checkpoint_dir" ] || {
-    echo "usage: $0 psi0-isaac-eval --checkpoint-dir RUN_DIR --checkpoint-step STEP [--host H] [--port P] [--gui|--headless] [--duration S]" >&2
+  [ -n "$checkpoint_dir" ] && [ -n "$groot_checkpoint_dir" ] || {
+    echo "usage: $0 psi0-isaac-eval --checkpoint-dir PSI_RUN --checkpoint-step STEP --groot-checkpoint-dir GROOT_CHECKPOINT [--host H] [--port P] [--gui|--headless] [--duration S]" >&2
     return 2
   }
   [[ "$checkpoint_step" =~ ^[0-9]+$ ]] || {
@@ -831,8 +837,11 @@ psi0_isaac_eval() {
     printf -v eval_args_str ' %q' "${eval_args[@]}"
   fi
 
-  local container_ckpt
+  local container_ckpt container_groot_ckpt
   container_ckpt="$(psi0_eval_container_path "$checkpoint_dir")"
+  container_groot_ckpt="$(psi0_eval_container_path "$groot_checkpoint_dir")"
+  eval_args+=("--groot-checkpoint-dir=$container_groot_ckpt")
+  printf -v eval_args_str ' %q' "${eval_args[@]}"
   up_once
   local container_id
   container_id="$(psi0_eval_container_id)" || return 1
@@ -846,9 +855,19 @@ psi0_isaac_eval() {
     echo "error: checkpoint ckpt_$checkpoint_step does not exist under $container_ckpt/checkpoints" >&2
     return 2
   }
+  for required in config.json processor_config.json statistics.json; do
+    docker exec "$container_id" test -f "$container_groot_ckpt/$required" || {
+      echo "error: GR00T checkpoint is missing $required: $container_groot_ckpt" >&2
+      return 2
+    }
+  done
   # Refuse to run next to a foreign policy server: the bridge verifies
   # /info.run_dir, but a stale server must fail here, before Isaac and the model
   # load.  The probe only checks reachability; identity is enforced by the bridge.
+  if docker exec "$container_id" bash -lc 'ss -ltn 2>/dev/null | grep -Eq ":(5550|5555|5556|5560|5580|8015)([[:space:]]|$)"'; then
+    echo "error: a unified evaluation port (5550, 5555, 5556, 5560, 5580, 8015) is already occupied" >&2
+    return 2
+  fi
   local stale_json=""
   stale_json="$(docker exec "$container_id" bash -lc 'curl -fsS --max-time 2 http://127.0.0.1:8014/info' 2>/dev/null || true)"
   if [ -n "$stale_json" ]; then
@@ -891,7 +910,7 @@ psi0_isaac_eval() {
   fi
   local isaac_index="${#PSI0_EVAL_JOBS[@]}"
   psi0_eval_bg_start isaac "run-isaac-g1.py" \
-    "source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && export DISPLAY='${DISPLAY:-:0}' && export PUBLIC_IP='${ISAAC_LIVESTREAM_ENDPOINT:-}' && mkdir -p /tmp/humanoid-lab-kit-cwd && cd /tmp/humanoid-lab-kit-cwd && { exec 9>/tmp/humanoid-lab-isaac-g1.lock; flock -n 9 || { echo 'error: another Isaac G1 simulation is already running' >&2; exit 3; }; } && exec python /workspace/humanoid-lab/scripts/run-isaac-g1.py --profile /workspace/humanoid-lab/$profile_file$isaac_flags"
+    "source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && export DISPLAY='${DISPLAY:-:0}' && export PUBLIC_IP='${ISAAC_LIVESTREAM_ENDPOINT:-}' && mkdir -p /tmp/humanoid-lab-kit-cwd && cd /tmp/humanoid-lab-kit-cwd && { exec 9>/tmp/humanoid-lab-isaac-g1.lock; flock -n 9 || { echo 'error: another Isaac G1 simulation is already running' >&2; exit 3; }; } && exec python /workspace/humanoid-lab/scripts/run-isaac-g1.py --profile /workspace/humanoid-lab/$profile_file --sonic-camera-endpoint='tcp://*:5555'$isaac_flags"
 
   # 2. Bridge + UI.  It owns the policy server: it spawns serve_psi0_sonic (the
   # upstream serve_psi0-rtc-sonic.sh invocation) as its child, so the UI
@@ -901,7 +920,7 @@ psi0_isaac_eval() {
   # this run actually serves.
   local bridge_index="${#PSI0_EVAL_JOBS[@]}"
   psi0_eval_bg_start psi0-bridge "psi0-isaac-eval.py" \
-    "source /opt/humanoid-lab/entrypoint.sh && use-psi0 && export CUDA_VISIBLE_DEVICES=0 && cd /workspace/humanoid-lab && PYTHONPATH=src exec python3 scripts/psi0-isaac-eval.py --checkpoint-dir='$container_ckpt' --checkpoint-step='$checkpoint_step' --policy-log='$PSI0_EVAL_LOG_DIR/psi0-server.log' --webrtc-host='${ISAAC_LIVESTREAM_ENDPOINT:-}' --webrtc-port='${ISAAC_LIVESTREAM_PORT:-49100}' --webrtc-client='${ISAAC_WEBRTC_CLIENT:-}'$eval_args_str"
+    "source /opt/humanoid-lab/entrypoint.sh && use-psi0 && export CUDA_VISIBLE_DEVICES=0 && cd /workspace/humanoid-lab && PYTHONPATH=src:/opt/src/sonic exec python3 scripts/psi0-isaac-eval.py --checkpoint-dir='$container_ckpt' --checkpoint-step='$checkpoint_step' --policy-log='$PSI0_EVAL_LOG_DIR/psi0-server.log' --webrtc-host='${ISAAC_LIVESTREAM_ENDPOINT:-}' --webrtc-port='${ISAAC_LIVESTREAM_PORT:-49100}' --webrtc-client='${ISAAC_WEBRTC_CLIENT:-}'$eval_args_str"
 
   psi0_eval_require_alive "$isaac_index" 4 || { psi0_eval_cleanup; return 1; }
   psi0_eval_require_alive "$bridge_index" || { psi0_eval_report_isaac; psi0_eval_cleanup; return 1; }
@@ -921,14 +940,34 @@ psi0_isaac_eval() {
     return 1
   fi
 
-  # The eval streams the policy's Protocol v4 poses to the controller, so the
-  # controller must run the ZMQ input interface (`--input-type zmq`): the
-  # default keyboard interface has no pose subscriber at all.  Enter enables the
-  # pose stream, `]` starts control — both are the deployment's own keys.
-  echo "[psi0-isaac-eval] controller : ./g1_deploy_onnx_ref in this terminal — press Enter to enable the" >&2
-  echo "[psi0-isaac-eval]              policy pose stream, then ] to start control; Ctrl-C ends the session" >&2
-  run_sonic_controller zmq
-  controller_rc=$?
+  # One unattended SONIC manager stays alive while the UI switches PSI/GR00T.
+  (
+    while [ -e "$PSI0_EVAL_LEASE" ]; do
+      SONIC_CONTROLLER_NO_TTY=1 run_sonic_controller zmq_manager >>"$PSI0_EVAL_HOST_LOG_DIR/sonic-controller.log" 2>&1 || true
+      [ -e "$PSI0_EVAL_LEASE" ] || break
+      echo "[psi0-isaac-eval] SONIC controller exited during a model load; restarting" >>"$PSI0_EVAL_HOST_LOG_DIR/sonic-controller.log"
+      sleep 1
+    done
+  ) &
+  controller_job=$!
+  local controller_ready=0
+  for _ in {1..180}; do
+    kill -0 "$controller_job" 2>/dev/null || break
+    if grep -Fq "Init Done" "$PSI0_EVAL_HOST_LOG_DIR/sonic-controller.log" 2>/dev/null; then
+      controller_ready=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$controller_ready" -ne 1 ]; then
+    echo "error: SONIC controller did not finish initialization" >&2
+    tail -n 30 "$PSI0_EVAL_HOST_LOG_DIR/sonic-controller.log" >&2 2>/dev/null || true
+    psi0_eval_cleanup
+    trap - INT TERM HUP
+    return 1
+  fi
+  echo "[psi0-isaac-eval] controller : SONIC zmq_manager ready; use http://localhost:$ui_port/" >&2
+  wait "$controller_job" || controller_rc=$?
 
   if [ -f "$PSI0_EVAL_ABORT_FILE" ]; then
     reason="$(cat -- "$PSI0_EVAL_ABORT_FILE" 2>/dev/null || true)"

@@ -149,6 +149,7 @@ class SimulatorService:
         camera_service: bool = False,
         camera_endpoint: str = DEFAULT_CAMERA_ENDPOINT,
         control_endpoint: str = DEFAULT_CONTROL_ENDPOINT,
+        sonic_camera_endpoint: str | None = None,
     ) -> None:
         self.profile = profile
         self.app = simulation_app
@@ -167,6 +168,8 @@ class SimulatorService:
         self.camera_service = camera_service
         self.camera_endpoint = camera_endpoint
         self.control_endpoint = control_endpoint
+        self.sonic_camera_endpoint = sonic_camera_endpoint
+        self._sonic_camera: Any | None = None
         self.state = TimelineState.STARTING
         self.tick = 0
         self.episode_id = 0
@@ -298,6 +301,19 @@ class SimulatorService:
         )
         print('{"event":"isaac_g1_start","stage":"interactive_scene"}', flush=True)
         self._scene = InteractiveScene(self._make_scene_cfg())
+        if self.sonic_camera_endpoint is not None:
+            from .sonic_camera import SonicCameraPublisher
+
+            self._sonic_camera = SonicCameraPublisher(self.sonic_camera_endpoint)
+            print(
+                json.dumps(
+                    {
+                        "event": "isaac_g1_sonic_camera",
+                        "endpoint": self.sonic_camera_endpoint,
+                    }
+                ),
+                flush=True,
+            )
         if self.profile.scene is not None:
             # The declared black tape must render black, and the renderer
             # translates a material on first use: author the fix before any
@@ -924,7 +940,10 @@ class SimulatorService:
 
         scene_cfg = (
             IsaacG1CameraSceneCfg
-            if self.test_mode is not None or self.show_head_camera or self.record_video is not None or self.camera_service
+            if self.test_mode is not None or self.show_head_camera
+            or self.record_video is not None
+            or self.camera_service
+            or self.sonic_camera_endpoint is not None
             else IsaacG1BaseSceneCfg
         )
         return scene_cfg(num_envs=1, env_spacing=2.5, replicate_physics=False)
@@ -1721,14 +1740,18 @@ class SimulatorService:
         )
 
     def _publish_camera_frame(self) -> None:
-        """Hand this tick's rendered RGB to the endpoint's thread-safe buffer."""
+        """Publish this tick's RGB through the enabled camera protocols."""
         endpoint = self._head_camera
-        if endpoint is None:
+        sonic = self._sonic_camera
+        if endpoint is None and sonic is None:
             return
         image = self._head_camera_rgb()
         if image is None:
             return
-        endpoint.publish_frame(image, timestamp_s=time.monotonic(), episode_id=self.episode_id)
+        if endpoint is not None:
+            endpoint.publish_frame(image, timestamp_s=time.monotonic(), episode_id=self.episode_id)
+        if sonic is not None:
+            sonic.publish(image, time.time())
 
     def _control_status(self) -> dict[str, Any]:
         """State the control thread may read; no Isaac API is involved."""
@@ -2237,6 +2260,9 @@ class SimulatorService:
             self.stop()
             if self._controller is not None:
                 self._controller.close()
+            if self._sonic_camera is not None:
+                self._sonic_camera.close()
+                self._sonic_camera = None
             self._finish_video_recording()
             # The endpoints are closed here, but the run summary still has to
             # report what they served; without this the camera section of every

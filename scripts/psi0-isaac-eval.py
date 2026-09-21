@@ -85,6 +85,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--base-ckpt-step", type=int, default=base_artifact.BASE_STEP,
                         help="checkpoint directory name for the base entry (default 0: the "
                              "weights before the first fine-tune step)")
+    parser.add_argument("--groot-checkpoint-dir", type=Path, default=None,
+                        help="GR00T checkpoint shown as the third model option")
     parser.add_argument("--policy-log", type=Path, default=None,
                         help="file the owned serve_psi0_sonic child logs to (default: inherit)")
     parser.add_argument("--host", default="0.0.0.0")
@@ -401,10 +403,17 @@ def main(argv: list[str] | None = None) -> int:
         print("[psi0-isaac-eval] check-only: OK")
         return 0
 
+    if args.groot_checkpoint_dir is None:
+        print("[psi0-isaac-eval] --groot-checkpoint-dir is required when serving the unified UI", file=sys.stderr)
+        return 2
+
     # Serving: take the action socket first.  The service owns :5556 for its
     # whole lifetime, so a busy port fails startup here (not later at Start) and
     # no other publisher can slip in between a probe and the first action.
+    from humanoid_lab.psi0_bridge.action_router import ActionRouter, RouterError
+
     try:
+        router = ActionRouter(public_endpoint=args.action_endpoint)
         session = Session(SessionConfig(
             ws_url=args.psi0_url,
             state_endpoint=args.state_endpoint,
@@ -417,8 +426,8 @@ def main(argv: list[str] | None = None) -> int:
             recv_timeout_s=args.recv_timeout,
             reset_timeout_ms=args.reset_timeout_ms,
             command_ttl_s=args.command_ttl_s,
-        ))
-    except SessionError as exc:
+        ), publisher=router.psi_sink)
+    except (SessionError, RouterError) as exc:
         print(f"[psi0-isaac-eval] cannot own the action socket {args.action_endpoint}: {exc}",
               file=sys.stderr)
         return 2
@@ -431,6 +440,7 @@ def main(argv: list[str] | None = None) -> int:
     except (LaunchError, ContractError) as exc:
         print(f"[psi0-isaac-eval] preflight failed: {exc}", file=sys.stderr)
         session.close()
+        router.close()
         return 2
 
     # This process owns the policy server: a UI checkpoint switch restarts this
@@ -443,12 +453,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[psi0-isaac-eval] :{policy_port} already serves a policy server "
               f"({foreign.get('run_dir')!r}); refusing to start next to it", file=sys.stderr)
         session.close()
+        router.close()
         return 2
     try:
         server.start(fine_entry.run_dir, fine_entry.step)
     except PolicyServerError as exc:
         print(f"[psi0-isaac-eval] cannot start the policy server: {exc}", file=sys.stderr)
         session.close()
+        router.close()
         return 2
     print(f"[psi0-isaac-eval] policy server pid {server.pid} for {fine_entry.run_dir} "
           f"(step {fine_entry.step})", flush=True)
@@ -478,25 +490,56 @@ def main(argv: list[str] | None = None) -> int:
                 **_identity_kwargs(entry.detail),
             )
 
-        controller = CheckpointController(
-            session, server, entries,
-            verify=verify,
+        from humanoid_lab.psi0_bridge.groot_backend import GrootProcessGroup, validate_groot_checkpoint
+        from humanoid_lab.psi0_bridge.model_controller import ModelController, ModelEntry
+
+        try:
+            validate_groot_checkpoint(args.groot_checkpoint_dir)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[psi0-isaac-eval] GR00T checkpoint unavailable: {exc}", file=sys.stderr)
+            return 2
+        model_entries = [
+            ModelEntry(
+                id=entry.id, label=entry.label, kind="psi", run_dir=entry.run_dir,
+                step=entry.step, available=entry.available, reason=entry.reason,
+                detail=dict(entry.detail),
+            )
+            for entry in entries
+        ]
+        groot = GrootProcessGroup(
+            args.groot_checkpoint_dir,
+            prompt=CANONICAL_PROMPT,
+            log_dir=(args.policy_log.parent if args.policy_log else Path("/tmp/groot-eval")),
+        )
+        controller = ModelController(
+            psi_session=session,
+            psi_server=server,
+            psi_entries=model_entries,
+            verify_psi=verify,
+            groot=groot,
+            router=router,
             initial_id=FINETUNED_ID,
+            reset_endpoint=args.isaac_control_endpoint,
             log=lambda message: print(f"[psi0-isaac-eval] {message}", flush=True),
         )
 
         from humanoid_lab.psi0_bridge.app import create_app  # imported only when serving
 
-        app = create_app(session, webrtc=_webrtc_info(args), checkpoints=controller)
+        app = create_app(
+            controller, webrtc=_webrtc_info(args), checkpoints=controller,
+            subtitle="PSI / GR00T → NVIDIA SONIC → Isaac G1 + Dex3",
+            policy_label="Policy backend",
+        )
+        labels = [entry.label for entry in entries] + ["GR00T"]
         print(f"[psi0-isaac-eval] UI on http://{args.host}:{args.port}/  "
-              f"(prompt: {CANONICAL_PROMPT!r}); checkpoints: "
-              f"{', '.join(entry.label for entry in entries)}", flush=True)
+              f"(prompt: {CANONICAL_PROMPT!r}); models: {', '.join(labels)}", flush=True)
         import uvicorn
 
         uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     finally:
         server.stop()
         session.close()
+        router.close()
     return 0
 
 

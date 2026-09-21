@@ -122,7 +122,13 @@ def info_summary(info: Optional[ServerInfo]) -> Optional[dict[str, Any]]:
 class Session:
     """Owns the lifecycle of one Ψ₀ -> Protocol v4 action stream."""
 
-    def __init__(self, config: Optional[SessionConfig] = None, *, monitor: Optional[Monitor] = None) -> None:
+    def __init__(
+        self,
+        config: Optional[SessionConfig] = None,
+        *,
+        monitor: Optional[Monitor] = None,
+        publisher: Any | None = None,
+    ) -> None:
         self.config = config or SessionConfig()
         self.monitor = monitor if monitor is not None else Monitor(
             state_endpoint=self.config.state_endpoint,
@@ -155,8 +161,9 @@ class Session:
         # Own the action socket for the whole service lifetime: a busy port must
         # fail the UI service at startup (not fail later at Start), and Stop must
         # only close the send gate, never release the socket.
+        self._owns_publisher = publisher is None
         try:
-            self._publisher = PosePublisher(self.config.action_endpoint)
+            self._publisher = publisher or PosePublisher(self.config.action_endpoint)
         except PublisherError as exc:
             raise SessionError(f"action socket: {exc}") from exc
 
@@ -271,9 +278,10 @@ class Session:
         return self.status()
 
     def close(self) -> None:
-        """Release the action socket; called once by the owning service at shutdown."""
+        """Stop the session and release its output when this session owns it."""
         self.stop()
-        self._publisher.close()
+        if self._owns_publisher:
+            self._publisher.close()
 
     def reset(self) -> dict[str, Any]:
         """Stop, let the command TTL expire, restore the scene, and clear all history.

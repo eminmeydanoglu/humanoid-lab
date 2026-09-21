@@ -367,11 +367,11 @@ class DevShEntrypointTest(unittest.TestCase):
         self.assertIn("psi0_isaac_eval", text)
         self.assertIn("scripts/psi0-isaac-eval.py", text)
         self.assertIn("configs/profiles/isaac-g1-sonic-blockstacking-dex3.json", text)
-        # The eval must consume the policy's pose stream: the keyboard-only input
-        # interface has no ZMQ subscriber, so the launcher starts the controller
-        # in the upstream pose-streaming mode.
-        self.assertIn("run_sonic_controller zmq", text)
-        self.assertIn("press Enter to enable the", text)
+        # One unattended manager remains alive while the UI switches PSI/GR00T.
+        self.assertIn("run_sonic_controller zmq_manager", text)
+        self.assertIn("SONIC zmq_manager ready", text)
+        self.assertIn("--groot-checkpoint-dir", text)
+        self.assertIn("--sonic-camera-endpoint='tcp://*:5555'", text)
 
     def test_the_bridge_owns_the_policy_server(self) -> None:
         text = DEV_SH.read_text(encoding="utf-8")

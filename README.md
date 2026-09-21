@@ -111,14 +111,17 @@ Keys in the SONIC terminal: `]` starts control, `T` plays the reference motion, 
 motion, `R` resets, `O` is the emergency stop. `Enter` to switch to planner to teleop.
 
 
-## Psi0 policy in the loop (BlockStacking)
+## PSI / GR00T policy evaluation (BlockStacking)
 
-One command starts the whole evaluation: the Isaac BlockStacking scene, the
-official SONIC Y controller and the bridge/UI (which owns the Psi0 policy
-server it serves).
+One command starts the shared evaluation environment: Isaac BlockStacking, one
+SONIC controller and one browser UI. The UI keeps running while its model
+selector switches between the two PSI checkpoints and NVIDIA GR00T.
 
 ```bash
-./dev.sh psi0-isaac-eval --checkpoint-dir <run-directory> --checkpoint-step 40000
+./dev.sh psi0-isaac-eval \
+  --checkpoint-dir <psi-run-directory> \
+  --checkpoint-step 40000 \
+  --groot-checkpoint-dir <groot-checkpoint-directory>
 ```
 
 `<run-directory>` is a Psi0 training output (`run_config.json`, `argv.txt`,
@@ -131,17 +134,15 @@ and a machine whose GPU cannot host the checkpoint cannot serve it — a CPU dev
 would load the model and answer `/info`, then fail on the first action, because
 the deployment's inference path runs under CUDA autocast.
 
-The SONIC controller keeps this terminal, started in its pose-streaming mode so
-it can consume the policy's Protocol v4 messages: press `Enter` to enable the
-pose stream, then `]` to start control. Open `http://localhost:8015/` for
-Start/Stop/Reset, the checkpoint selector and the head-camera preview, and watch
-the simulation through the printed WebRTC endpoint. `Ctrl-C` in the terminal, or
-a dead background process, ends the whole session.
+Open `http://localhost:8015/` for Start/Stop/Reset, model selection and the
+head-camera preview, and watch the simulation through the printed WebRTC
+endpoint. SONIC runs unattended in `zmq_manager` mode. `Ctrl-C` in the terminal,
+or a dead shared process, ends the whole session.
 
-The UI's **Policy checkpoint** panel offers exactly two allowlisted choices:
+The UI's **Model** panel offers three allowlisted choices:
 
-* `Fine-tuned (40k)` — the run given on the command line;
-* `Base` — that run's training-start checkpoint: the warm start its own
+* `Fine-tuned (40k)` — the PSI run given on the command line;
+* `Base` — that PSI run's training-start checkpoint: the warm start its own
   `run_config.json` names (`model.model_name_or_path`), materialized on first
   launch into a servable run dir under `<experiment root>/base/<warm start>`.
   The released warm start ships HuggingFace-style `model.safetensors` plus a
@@ -149,16 +150,22 @@ The UI's **Policy checkpoint** panel offers exactly two allowlisted choices:
   deploy loader's key layout and disables `model.state_null_token`, a parameter
   the warm start does not contain and that inference never reads. Its provenance
   (source files, upstream revision, key counts) is written next to it as
-  `BASE_ARTIFACT.json`.
+  `BASE_ARTIFACT.json`;
+* `GR00T` — the checkpoint given with `--groot-checkpoint-dir`, served by
+  NVIDIA's unmodified `run_gr00t_server.py` and `run_vla_inference.py` path.
 
-Selecting an option stops the session, restarts the policy server on `:8014`
-with the selected run dir/step, and only marks it ready after `/info` matches
-the run dir, step, action/state width, transforms and dataset. A failed switch
-is fail-closed: the previous checkpoint is started again and the session goes to
+Selecting an option stops the session and changes only the policy backend. PSI
+restarts its policy server on `:8014`; GR00T starts NVIDIA's PolicyServer on
+`:5550` and VLA client on the private router input `:5560`. Isaac, SONIC, the
+camera and the UI stay alive. The shared router remains the sole owner of public
+SONIC action port `:5556`.
+
+A PSI selection is only marked ready after `/info` matches the run directory,
+step, action/state width, transforms and dataset. A failed switch is
+fail-closed: the previous backend is started again and the session goes to
 `ERROR` with the reason. If the base artifact cannot be derived, the `Base`
-option is shown unavailable with the reason — no other checkpoint is
-substituted. The API takes an allowlisted option id only; paths are not
-accepted.
+option is shown unavailable with the reason. The API accepts allowlisted model
+ids only; paths never come from the browser.
 
 
 ## If you need
@@ -178,7 +185,7 @@ accepted.
 | `./dev.sh fetch-psi0-ckpt` | downloads the pinned Psi0 SONIC warm start into PSI_HOME | |
 | `./dev.sh groot-finetune-smoke [pipeline\|pretrained\|eval]` | optional GR00T N1.7 fine-tuning smoke (two optimizer steps, then open-loop eval) |
 | `./dev.sh psi0-smoke` | Psi0 environment smoke: interpreter, torch build, upstream imports, config schema, warm-start checkpoint |
-| `./dev.sh psi0-isaac-eval --checkpoint-dir RUN_DIR --checkpoint-step STEP` | one-command Psi0-in-the-loop BlockStacking evaluation: Isaac scene, SONIC Y, policy server, bridge/UI |
+| `./dev.sh psi0-isaac-eval --checkpoint-dir PSI_RUN --checkpoint-step STEP --groot-checkpoint-dir GROOT_CHECKPOINT` | one shared BlockStacking UI for Fine-tuned PSI, Base PSI and NVIDIA GR00T |
 | `./dev.sh hf-login` | Hugging Face login for gated repositories |
 | `./dev.sh stop` | stops the container, keeps the data root |
 | `./dev.sh rebuild` | rebuilds the image with the same lock, recreates the container |
