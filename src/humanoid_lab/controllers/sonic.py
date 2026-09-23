@@ -304,16 +304,45 @@ def standing_pose() -> dict[str, float]:
 # the state the policy expects to take over from.
 STANDING_ROOT_HEIGHT_M = 0.792563
 
+# The height the *training* rig spawns the same pose at: ``init_state.pos`` of
+# ``G1_CYLINDER_MODEL_12_DEX_CFG``
+# (``gear_sonic/envs/manager_env/robots/g1.py``) is ``(0.0, 0.0, 0.76)``.  The
+# training rig therefore starts the robot 3.26 cm lower than the deployment loop
+# does.  That figure is authored for the training URDF converted with
+# ``replace_cylinders_with_capsules=True`` -- capsule feet, not the mesh soles
+# this evaluation asset keeps -- so adopting it is a separate, profile-declared
+# decision (``controller.initial_pose_model``) rather than something a mass
+# alignment may switch on by itself.
+TRAINING_ROOT_HEIGHT_M = 0.76
+
+STANDING_POSE_MODELS: dict[str, float] = {
+    "deploy": STANDING_ROOT_HEIGHT_M,
+    "training": TRAINING_ROOT_HEIGHT_M,
+}
+
 NAMED_POSES: dict[str, tuple[dict[str, float], float]] = {
     "sonic_standing": (DEFAULT_STANDING_POSE_RAD, STANDING_ROOT_HEIGHT_M),
 }
-def named_pose(name: str) -> tuple[dict[str, float], float]:
-    """Return a declared start-up pose and the root height it was authored for."""
+
+
+def named_pose(name: str, model: str = "deploy") -> tuple[dict[str, float], float]:
+    """Return a declared start-up pose and the root height it was authored for.
+
+    ``model`` selects which pinned plant's spawn height comes back.  The pose
+    itself is identical between the two -- only the height the training rig and
+    the deployment loop drop it from differs -- so the argument cannot change a
+    joint value.
+    """
     try:
-        pose, height = NAMED_POSES[name]
+        _, height = NAMED_POSES[name]
     except KeyError as error:
         raise ValueError(f"unknown named pose {name!r}; expected one of {tuple(NAMED_POSES)}") from error
-    return dict(pose), height
+    try:
+        return dict(DEFAULT_STANDING_POSE_RAD), STANDING_POSE_MODELS[model]
+    except KeyError as error:
+        raise ValueError(
+            f"unknown pose model {model!r}; expected one of {tuple(STANDING_POSE_MODELS)}"
+        ) from error
 
 
 def hand_joint_names(side: str) -> tuple[str, ...]:

@@ -22,11 +22,13 @@ from .contract import (
     CANONICAL_STATE_NAMES,
     HAND_DIM,
     MASK_KEY,
+    PHYSICAL_HAND_SAMPLE_BOUND_RAD,
     ConversionConfig,
     source_state_permutation,
     standing_lower_body,
 )
 from .convert import read_raw_episode
+from .writer import verify_stats_are_physical
 
 #: The dataset must declare exactly this camera and no other.
 EXPECTED_TASKS = 13
@@ -44,6 +46,25 @@ def _nearest(source_timestamps: np.ndarray, target_timestamps: np.ndarray) -> np
         [int(np.argmin(np.abs(source - value))) for value in target],
         dtype=np.int64,
     )
+
+
+def _source_samples_beyond_bound(
+    path: Path, rows: tuple[int, int], bound_rad: float
+) -> int:
+    """Count physical-bound violations in one episode of a frozen source file.
+
+    Read straight from the source file rather than from ``RawEpisode.state``,
+    which the repairing reader has already corrected.  This is what makes the
+    repair auditable: the validator derives the expected count independently and
+    compares it against what the converter claimed to repair.  ``rows`` is the
+    episode's ``[from, to)`` range inside the shared collection parquet.
+    """
+    import pyarrow.parquet as pq
+
+    start, stop = int(rows[0]), int(rows[1])
+    table = pq.read_table(path, columns=["observation.state"]).slice(start, stop - start)
+    values = np.asarray(table.column(0).to_pylist(), dtype=np.float64)
+    return int((np.abs(values) > bound_rad).sum())
 
 
 def _strict_anchor_mask(valid: np.ndarray, chunk: int) -> np.ndarray:
@@ -379,6 +400,38 @@ class DatasetValidator:
             bool(np.allclose(state[:, 15:], measured, atol=1e-6, rtol=0)),
         )
 
+        # Physical bound.  The pack must contain no pose the robot cannot hold,
+        # and the repair the converter recorded must account for every source
+        # sample that was outside the bound.  The source count is taken from the
+        # frozen parquet directly, not from the repairing reader, so a reader
+        # bug that silently dropped a spike cannot certify itself.
+        written = state[:, 15:]  # 28 measured channels, in canonical order
+        worst_written = float(np.abs(written).max()) if written.size else 0.0
+        self.check(
+            f"{label}.state_within_physical_bound",
+            worst_written <= PHYSICAL_HAND_SAMPLE_BOUND_RAD,
+            f"max |state| = {worst_written:.4f} rad, bound {PHYSICAL_HAND_SAMPLE_BOUND_RAD}",
+        )
+        source_bad = (
+            _source_samples_beyond_bound(
+                raw.data_path, raw.data_slice, PHYSICAL_HAND_SAMPLE_BOUND_RAD
+            )
+            if raw.data_path is not None and raw.data_slice is not None
+            else raw.repair.invalid_source_samples
+        )
+        recorded = int((row.get("hand_repair") or {}).get("invalid_source_samples", 0))
+        self.check(
+            f"{label}.hand_repair_recorded",
+            recorded == source_bad == raw.repair.invalid_source_samples,
+            f"episode metadata {recorded}, source parquet {source_bad}, "
+            f"reader {raw.repair.invalid_source_samples}",
+        )
+        self.check(
+            f"{label}.hand_repair_channels_known",
+            all(name in CANONICAL_STATE_NAMES for name in (row.get("hand_repair") or {}).get("channels", {})),
+            str(sorted((row.get("hand_repair") or {}).get("channels", {}))),
+        )
+
         if not video.is_file():
             self.check(f"{label}.video_exists", False, str(video))
             return
@@ -394,6 +447,29 @@ class DatasetValidator:
 
         self.episodes_checked += 1
         self.frames_checked += frames
+
+    def check_stats_physical(self, split: str) -> None:
+        """The written statistics must describe poses the robot can hold.
+
+        This is the check that would have caught the shipped pack: its
+        ``observation.state`` bounds reached -3363/+1921 rad, so Psi0's min/max
+        state normaliser mapped four Dex3 channels to ~0.02% of their usable
+        range.  It is evaluated on ``meta/stats_psi0.json`` on disk, so it
+        catches a hand-edited or externally-produced pack as well as ours.
+        """
+        stats_path = self.root / split / "meta/stats_psi0.json"
+        try:
+            stats = json.loads(stats_path.read_text(encoding="utf-8"))
+            verified = verify_stats_are_physical(stats, self.config)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            self.check(f"{split}.stats_physical", False, f"{type(error).__name__}: {error}")
+            return
+        self.check(
+            f"{split}.stats_physical",
+            True,
+            f"max |state| = {verified['state_abs_max_rad']:.4f} rad "
+            f"<= {verified['bound_rad']} rad",
+        )
 
     # -- consumer load ------------------------------------------------------
     def check_lerobot_load(self, split: str) -> None:
@@ -457,6 +533,7 @@ def validate_dataset(
     validator.check_split()
     for split in splits or (config.train_repo, config.val_repo):
         validator.check_split_directory(split)
+        validator.check_stats_physical(split)
         if check_lerobot:
             validator.check_lerobot_load(split)
     return validator.report()

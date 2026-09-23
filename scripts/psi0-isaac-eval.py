@@ -14,19 +14,25 @@ already correct:
 
 * ``--checkpoint-dir`` is a real Psi0 run directory: ``run_config.json``,
   ``argv.txt`` and ``checkpoints/ckpt_<step>`` all exist;
-* the run's action width is 78 or 80 and matches what the server reports, its
-  image transform is the pinned 240x320 resize, and its ``num_past_frames``
-  (when the run config states it) is 0, i.e. the single frame this bridge sends;
+* the run's action width is 78 or 80 and matches what the server reports, it
+  declares exactly one image key and one resize equal to its ``center_crop``,
+  and its ``num_past_frames`` (when the run config states it) is 0, i.e. the
+  single frame this bridge sends;
 * ``--checkpoint-step`` is an integer (``latest`` is rejected) and matches the
   step the policy server reports, and ``/info.run_dir`` must resolve to exactly
   this run directory (a stale server for another run fails the preflight);
 * ``tcp://*:5556`` is owned by this service from startup until shutdown, so no
   other publisher can slip in between the check and the first action.
 
-The UI offers exactly two allowlisted checkpoints: the fine-tuned run given on
-the command line and its training-start (base) artifact, materialized from the
-run's own ``run_config.json`` lineage into a sibling ``base/<warm-start>`` run
-dir.  The API takes an option id -- never a path.
+The UI offers the allowlisted checkpoints the launcher could build from real
+artifacts: the fine-tuned run given on the command line, its training-start
+(base) artifact materialized from the run's own ``run_config.json`` lineage into
+a sibling ``base/<warm-start>`` run dir, and -- when
+``--psi-dream-checkpoint-dir`` is given -- the released multi-task checkpoint,
+served exactly like a fine-tune run.  Each entry's own ``run_config.json``
+declares the camera key and transform its server must report, so the served
+``/info`` is held to the selected run rather than to one global pin.  The API
+takes an option id -- never a path.
 
     PYTHONPATH=src python3 scripts/psi0-isaac-eval.py \
         --checkpoint-dir /outputs/psi0-unitree-dex3-sonic-v1/finetune/<run> \
@@ -40,6 +46,7 @@ import json
 import sys
 import time
 from pathlib import Path
+from typing import Any, Optional
 from urllib.parse import urlsplit
 
 _SRC = Path(__file__).resolve().parents[1] / "src"
@@ -52,9 +59,15 @@ from humanoid_lab.psi0_bridge.checkpoints import (  # noqa: E402
     CheckpointController,
     CheckpointEntry,
 )
-from humanoid_lab.psi0_bridge.contracts import ACTION_DIMS, RESIZE_SIZE, ContractError  # noqa: E402
+from humanoid_lab.psi0_bridge.contracts import (  # noqa: E402
+    ACTION_DIMS,
+    MAX_TRANSFORM_SIDE,
+    MIN_TRANSFORM_SIDE,
+    ContractError,
+)
 from humanoid_lab.psi0_bridge.policy_server import PolicyServerError, PolicyServerProcess, probe_info  # noqa: E402
 from humanoid_lab.psi0_bridge.prompt import CANONICAL_PROMPT  # noqa: E402
+from humanoid_lab.psi0_bridge.policy_clock import PolicyClock  # noqa: E402
 from humanoid_lab.psi0_bridge.psi0_client import Psi0ClientError, fetch_info  # noqa: E402
 from humanoid_lab.psi0_bridge.session import Session, SessionConfig, SessionError  # noqa: E402
 
@@ -62,9 +75,12 @@ DEFAULT_PORT = 8015
 DEFAULT_POLICY_PORT = 8014
 DEFAULT_INFO_TIMEOUT_S = 900.0  # the 3B checkpoint takes minutes to load
 INFO_POLL_S = 5.0
+#: The released multi-task ψ-Dream checkpoint ships a single ckpt_40000.
+DEFAULT_DREAM_STEP = 40000
 
 FINETUNED_ID = "fine-tuned"
 BASE_ID = "base"
+DREAM_ID = "dream"
 
 
 class LaunchError(RuntimeError):
@@ -85,10 +101,48 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--base-ckpt-step", type=int, default=base_artifact.BASE_STEP,
                         help="checkpoint directory name for the base entry (default 0: the "
                              "weights before the first fine-tune step)")
+    parser.add_argument("--psi-dream-checkpoint-dir", type=Path, default=None,
+                        help="released multi-task Psi0 SONIC run directory (for example the "
+                             "downloaded psi0/sonic-checkpoints/multi-task.psi-dream.<stamp>); "
+                             "shown as an extra ψ option when given")
+    parser.add_argument("--psi-dream-checkpoint-step", type=int, default=DEFAULT_DREAM_STEP,
+                        help=f"checkpoint step inside that run (default {DEFAULT_DREAM_STEP})")
     parser.add_argument("--groot-checkpoint-dir", type=Path, default=None,
                         help="GR00T checkpoint shown as the third model option")
     parser.add_argument("--policy-log", type=Path, default=None,
                         help="file the owned serve_psi0_sonic child logs to (default: inherit)")
+    parser.add_argument("--policy-clock", choices=("wall", "simulation"), default="simulation",
+                        help="policy action time basis for both models; simulation (default) reads Isaac's replay clock; wall reproduces legacy runs")
+    parser.add_argument("--policy-clock-file", type=Path, default=None,
+                        help="Isaac replay-clock path in simulation mode (default /outputs/psi0-isaac-eval-policy-clock.json); direct launches must arrange for Isaac to write this path")
+    parser.add_argument("--policy-clock-timeout-s", type=float, default=5.0,
+                        help="wall watchdog for an unavailable or stalled simulation clock")
+    parser.add_argument("--groot-capture-dir", type=Path, default=None,
+                        help="opt-in lossless GR00T request/response capture directory")
+    parser.add_argument("--groot-capture-max-requests", type=int, default=32)
+    parser.add_argument(
+        "--groot-left-hand-contract",
+        choices=("compatibility", "model-independent", "model-coupled"),
+        default="model-independent",
+        help="model-independent (default) matches training observations/actions; compatibility preserves legacy upstream behavior; model modes map live thumb/middle/index "
+             "to trained thumb/index/middle observations and map actions back",
+    )
+    parser.add_argument("--psi0-neck-policy", choices=("error", "discard"), default="error",
+                        help="error (default) rejects nonzero 80D neck padding; discard explicitly "
+                             "drops unsupported neck channels and records their values in telemetry "
+                             "(only use when the checkpoint's neck labels are masked padding)")
+    parser.add_argument("--psi0-rtc-off", action="store_true",
+                        help="opt in to unguided independent psi0 chunks; guided test-time RTC "
+                             "remains the compatibility default")
+    parser.add_argument("--psi0-action-exec-horizon", type=int, default=30,
+                        help="rows executed from each independent chunk in --psi0-rtc-off mode; "
+                             "also forwarded as the server action execution contract")
+    parser.add_argument("--telemetry-dir", type=Path, default=None,
+                        help="record this session's observations, target actions, applied `pose` "
+                             "messages and head-camera frames as JSONL under this directory; "
+                             "omitted means no recording")
+    parser.add_argument("--telemetry-camera-every", type=int, default=5,
+                        help="keep one head-camera JPEG per N PSI observations (default 5)")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--psi0-url", default="ws://localhost:8014/ws",
@@ -103,6 +157,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--isaac-control-endpoint", default="tcp://localhost:5559",
                         help="Isaac reset REP endpoint (owned by the Isaac service)")
     parser.add_argument("--reset-timeout-ms", type=int, default=2000)
+    parser.add_argument("--warmstart-tokens", type=Path, default=None,
+                        help="opt-in: a prepared demonstration token stream (JSON) published to "
+                             "SONIC's action port over the settle tail of every Reset, so the "
+                             "GR00T selection starts from a demonstration-supported upper limb "
+                             "with the deployment's own history intact; off by default")
+    parser.add_argument("--warmstart-delay-s", type=float, default=0.0,
+                        help="seconds after a Reset before the warm-start stream starts "
+                             "(wall seconds by default, simulation seconds with --warmstart-sim-clock)")
+    parser.add_argument("--warmstart-sim-clock", type=Path, default=None,
+                        help="opt-in: pace warm-start frames from Isaac's --replay-clock-output file")
+    parser.add_argument("--warmstart-clock-timeout-s", type=float, default=5.0,
+                        help="fail the warm start if its simulation clock is unavailable or stale")
+    parser.add_argument("--initial-pose-handshake", action="store_true",
+                        help="opt-in: on every Reset, publish the VLA client's own initial-pose "
+                             "command (its LATENT_INITIAL_MOTION_TOKEN, packed with its own "
+                             "protocol v4 packer) to SONIC's action port from the start of the "
+                             "settle until Start, so the GR00T selection always starts from the "
+                             "intended pre-policy command instead of the previous rollout's last "
+                             "token; off by default and mutually exclusive with --warmstart-tokens")
     parser.add_argument("--command-ttl-s", type=float, default=0.3,
                         help="wait after Stop before Reset so the SONIC command TTL (0.25s) expires")
     parser.add_argument("--control-hz", type=float, default=30.0)
@@ -118,7 +191,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="optional browser URL for the WebRTC session")
     parser.add_argument("--check-only", action="store_true",
                         help="validate the checkpoint, the action port and /info, then exit")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.policy_clock == "simulation" and args.policy_clock_file is None:
+        # Direct launcher use (without dev.sh) still shares one deterministic
+        # file name with the Isaac process the operator must start separately.
+        args.policy_clock_file = Path("/outputs/psi0-isaac-eval-policy-clock.json")
+    if args.policy_clock == "wall" and args.policy_clock_file is not None:
+        parser.error("--policy-clock-file requires --policy-clock simulation")
+    if args.policy_clock_timeout_s <= 0:
+        parser.error("--policy-clock-timeout-s must be positive")
+    if args.groot_capture_max_requests <= 0:
+        parser.error("--groot-capture-max-requests must be positive")
+    if args.psi0_neck_policy == "discard" and args.telemetry_dir is None:
+        parser.error("--psi0-neck-policy discard requires --telemetry-dir to audit dropped values")
+    if args.policy_clock_file is not None:
+        args.policy_clock_file = args.policy_clock_file.resolve()
+    return args
 
 
 def validate_run_dir(run_dir: Path, step: int, *, minimum_step: int = 1) -> dict:
@@ -164,19 +252,28 @@ def validate_run_dir(run_dir: Path, step: int, *, minimum_step: int = 1) -> dict
         if isinstance(config.get("data"), dict) else {}
     )
     resize = transform.get("resize", {}).get("size") if isinstance(transform, dict) else None
-    if list(resize or []) != list(RESIZE_SIZE):
-        raise LaunchError(
-            f"run_config resize is {resize!r}; /info must report the pinned {RESIZE_SIZE} "
-            "transform for the bridge contract to hold"
-        )
+    if not isinstance(resize, (list, tuple)) or len(resize) != 2:
+        raise LaunchError(f"run_config resize is {resize!r}; expected a 2-element [height, width]")
+    resize_size = [int(resize[0]), int(resize[1])]
+    for side in resize_size:
+        if not MIN_TRANSFORM_SIDE <= side <= MAX_TRANSFORM_SIDE:
+            raise LaunchError(
+                f"run_config resize {resize_size} is outside "
+                f"[{MIN_TRANSFORM_SIDE}, {MAX_TRANSFORM_SIDE}]"
+            )
     if "center_crop" not in transform:
         raise LaunchError("run_config has no center_crop transform; refusing to guess the view")
     crop = transform.get("center_crop")
     crop_size = crop.get("size") if isinstance(crop, dict) else None
-    if list(crop_size or []) != list(RESIZE_SIZE):
+    if not isinstance(crop_size, (list, tuple)) or len(crop_size) != 2:
         raise LaunchError(
-            f"run_config center_crop is {crop_size!r}; the served transform is pinned to "
-            f"{RESIZE_SIZE}"
+            f"run_config center_crop is {crop_size!r}; expected a 2-element [height, width]"
+        )
+    crop_size = [int(crop_size[0]), int(crop_size[1])]
+    if crop_size != resize_size:
+        raise LaunchError(
+            f"run_config center_crop {crop_size} differs from its resize {resize_size}; the "
+            "bridge serves the run's own resize and cannot reproduce a narrower view"
         )
 
     state_dim = (
@@ -201,15 +298,28 @@ def validate_run_dir(run_dir: Path, step: int, *, minimum_step: int = 1) -> dict
             "single frame (history 1), so this run's state history would not match"
         )
 
+    # The served run names its one camera.  The bridge sends the frame under that
+    # key, so the name may differ between released checkpoints; the count may not,
+    # because the bridge has exactly one camera to offer.
+    image_keys = repack.get("image_keys") if isinstance(repack, dict) else None
+    if (not isinstance(image_keys, (list, tuple)) or len(image_keys) != 1
+            or not isinstance(image_keys[0], str) or not image_keys[0].strip()):
+        raise LaunchError(
+            f"run_config repack.image_keys is {image_keys!r}; the bridge sends exactly one "
+            "camera frame, so this run must declare exactly one image key"
+        )
+    image_key = image_keys[0].strip()
+
     return {
         "run_dir": str(_canonical(run_dir)),
         "ckpt_step": step,
         "action_dim": action_dim,
         "chunk_size": model.get("action_chunk_size"),
-        "resize": list(resize),
-        "center_crop": list(crop_size),
+        "resize": resize_size,
+        "center_crop": crop_size,
         "state_dim": state_dim,
         "num_past_frames": num_past_frames,
+        "image_key": image_key,
         "dataset_name": (
             config.get("data", {}).get("transform", {}).get("repack", {}).get("dataset_name")
         ),
@@ -234,6 +344,7 @@ def wait_for_info(
     expected_state_dim: int | None = None,
     expected_resize: list[int] | None = None,
     expected_center_crop: list[int] | None = None,
+    expected_image_key: str | None = None,
     expected_dataset_name: str | None = None,
 ):
     """Poll ``/info`` until the policy server has loaded, then validate its identity.
@@ -286,6 +397,12 @@ def wait_for_info(
                     f"run_config center_crop {expected_center_crop} does not match the served "
                     f"{list(info.center_crop_size)}"
                 )
+            if expected_image_key is not None and info.image_key != expected_image_key:
+                raise LaunchError(
+                    f"run_config image key {expected_image_key!r} does not match the served "
+                    f"{info.image_key!r}; the request would carry the frame under a key the "
+                    "served model does not read"
+                )
             if expected_dataset_name is not None and info.dataset_name != expected_dataset_name:
                 raise LaunchError(
                     f"run_config dataset_name {expected_dataset_name!r} does not match the served "
@@ -308,6 +425,7 @@ def _identity_kwargs(summary: dict) -> dict:
         "expected_state_dim": summary["state_dim"],
         "expected_resize": summary["resize"],
         "expected_center_crop": summary["center_crop"],
+        "expected_image_key": summary.get("image_key"),
         "expected_dataset_name": summary["dataset_name"],
     }
 
@@ -345,6 +463,45 @@ def finetuned_entry(args: argparse.Namespace) -> CheckpointEntry:
         step=args.checkpoint_step,
         detail=summary,
     )
+
+
+def dream_entry(args: argparse.Namespace) -> Optional[CheckpointEntry]:
+    """The released multi-task SONIC checkpoint, when the launcher was given one.
+
+    It is a complete Psi0 run directory (``run_config.json``, ``argv.txt``,
+    ``checkpoints/ckpt_<step>/model.safetensors`` in the deploy loader's key
+    layout), so it is served exactly like a fine-tuned run: the only difference
+    is that its own ``run_config`` names a different camera key and transform,
+    which the identity check below holds it to.
+    """
+    if args.psi_dream_checkpoint_dir is None:
+        return None
+    step = args.psi_dream_checkpoint_step
+    try:
+        summary = validate_run_dir(args.psi_dream_checkpoint_dir, step)
+    except Exception as exc:  # noqa: BLE001 - the option degrades, never the session
+        print(f"[psi0-isaac-eval] psi-dream checkpoint unavailable: {exc}", file=sys.stderr)
+        return CheckpointEntry(
+            id=DREAM_ID, label=dream_label(step),
+            run_dir=None, step=step,
+            available=False, reason=f"{type(exc).__name__}: {exc}",
+        )
+    print(f"[psi0-isaac-eval] psi-dream checkpoint: {summary['run_dir']} "
+          f"(step {step}, {summary['action_dim']}D, camera {summary['image_key']}, "
+          f"resize {summary['resize']})", flush=True)
+    return CheckpointEntry(
+        id=DREAM_ID,
+        label=dream_label(step),
+        run_dir=Path(summary["run_dir"]),
+        step=step,
+        detail=summary,
+    )
+
+
+def dream_label(step: int) -> str:
+    if step % 1000 == 0:
+        return f"ψ-Dream ({step // 1000}k)"
+    return f"ψ-Dream (step {step})"
 
 
 def base_entry(args: argparse.Namespace) -> CheckpointEntry:
@@ -411,9 +568,23 @@ def main(argv: list[str] | None = None) -> int:
     # whole lifetime, so a busy port fails startup here (not later at Start) and
     # no other publisher can slip in between a probe and the first action.
     from humanoid_lab.psi0_bridge.action_router import ActionRouter, RouterError
+    from humanoid_lab.psi0_bridge.telemetry import SessionTelemetry, TelemetryError
+
+    telemetry = None
+    if args.telemetry_dir is not None:
+        try:
+            telemetry = SessionTelemetry(
+                args.telemetry_dir,
+                camera_every=args.telemetry_camera_every,
+                session_tag=args.telemetry_dir.name,
+            )
+        except TelemetryError as exc:
+            print(f"[psi0-isaac-eval] cannot record telemetry: {exc}", file=sys.stderr)
+            return 2
+        print(f"[psi0-isaac-eval] telemetry: {telemetry.events_path}")
 
     try:
-        router = ActionRouter(public_endpoint=args.action_endpoint)
+        router = ActionRouter(public_endpoint=args.action_endpoint, telemetry=telemetry)
         session = Session(SessionConfig(
             ws_url=args.psi0_url,
             state_endpoint=args.state_endpoint,
@@ -426,11 +597,20 @@ def main(argv: list[str] | None = None) -> int:
             recv_timeout_s=args.recv_timeout,
             reset_timeout_ms=args.reset_timeout_ms,
             command_ttl_s=args.command_ttl_s,
-        ), publisher=router.psi_sink)
+            neck_policy=args.psi0_neck_policy,
+        ), publisher=router.psi_sink, telemetry=telemetry, policy_clock=PolicyClock(
+            args.policy_clock,
+            args.policy_clock_file,
+            stale_timeout_s=args.policy_clock_timeout_s,
+        ))
     except (SessionError, RouterError) as exc:
         print(f"[psi0-isaac-eval] cannot own the action socket {args.action_endpoint}: {exc}",
               file=sys.stderr)
         return 2
+    if telemetry is not None:
+        # The GR00T backend is driven by NVIDIA's VLA client, so the only camera
+        # reading the bridge can attach to its actions is its own monitor's.
+        telemetry.set_frame_provider(session.monitor.frame)
     print(f"[psi0-isaac-eval] action socket owned: {args.action_endpoint}")
 
     # The fine-tuned entry is validated before anything is spawned; a bad run
@@ -447,7 +627,15 @@ def main(argv: list[str] | None = None) -> int:
     # child.  A foreign server on the same port is refused (the identity check
     # would fail anyway, but not before Isaac and the model spent minutes).
     policy_port = urlsplit(args.psi0_url).port or DEFAULT_POLICY_PORT
-    server = PolicyServerProcess(port=policy_port, log_path=args.policy_log)
+    server = PolicyServerProcess(
+        port=policy_port,
+        log_path=args.policy_log,
+        rtc=not args.psi0_rtc_off,
+        action_exec_horizon=args.psi0_action_exec_horizon,
+        policy_clock=args.policy_clock,
+        policy_clock_file=args.policy_clock_file,
+        policy_clock_timeout_s=args.policy_clock_timeout_s,
+    )
     foreign = probe_info("127.0.0.1", policy_port)
     if foreign is not None:
         print(f"[psi0-isaac-eval] :{policy_port} already serves a policy server "
@@ -468,6 +656,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         # Materialize/validate the base entry while the 3B policy server loads.
         entries = [fine_entry, base_entry(args)]
+        dream = dream_entry(args)
+        if dream is not None:
+            entries.append(dream)
         try:
             info = wait_for_info(
                 args.psi0_url,
@@ -492,6 +683,69 @@ def main(argv: list[str] | None = None) -> int:
 
         from humanoid_lab.psi0_bridge.groot_backend import GrootProcessGroup, validate_groot_checkpoint
         from humanoid_lab.psi0_bridge.model_controller import ModelController, ModelEntry
+        from humanoid_lab.psi0_bridge.warmstart import (
+            FileSimulationClock,
+            WarmStartError,
+            WarmStartStream,
+            load_token_stream,
+        )
+
+        if args.initial_pose_handshake and args.warmstart_tokens is not None:
+            print("[psi0-isaac-eval] --initial-pose-handshake and --warmstart-tokens both own the "
+                  "settle; configure one of them", file=sys.stderr)
+            return 2
+        if args.warmstart_sim_clock is not None and args.warmstart_tokens is None:
+            print("[psi0-isaac-eval] --warmstart-sim-clock requires --warmstart-tokens", file=sys.stderr)
+            return 2
+
+        initial_pose = None
+        if args.initial_pose_handshake:
+            from humanoid_lab.psi0_bridge.initial_pose import (
+                InitialPoseError,
+                initial_pose_handshake,
+                load_initial_pose_command,
+            )
+
+            try:
+                command = load_initial_pose_command()
+            except InitialPoseError as exc:
+                print(f"[psi0-isaac-eval] initial-pose command unusable: {exc}", file=sys.stderr)
+                return 2
+            initial_pose = initial_pose_handshake(
+                router, command=command, telemetry=telemetry,
+                log=lambda message: print(f"[psi0-isaac-eval] {message}", flush=True),
+            )
+            detail = command.summary()
+            print(f"[psi0-isaac-eval] initial-pose handshake: {detail['module']}."
+                  f"{detail['constant']} ({detail['token_dim']}D, tokens[0]="
+                  f"{detail['token_head'][0]:+.4f}) held at {detail['control_hz']:g} Hz over every "
+                  f"settle, token sha256 {detail['token_sha256_f32'][:12]}")
+            if telemetry is not None:
+                telemetry.event("initial_pose", state="configured", **detail)
+
+        warmstart = None
+        if args.warmstart_tokens is not None:
+            try:
+                stream = load_token_stream(args.warmstart_tokens)
+            except WarmStartError as exc:
+                print(f"[psi0-isaac-eval] warm-start tokens unusable: {exc}", file=sys.stderr)
+                return 2
+            warmstart = WarmStartStream(
+                stream, router, telemetry=telemetry,
+                simulation_clock=(
+                    None if args.warmstart_sim_clock is None
+                    else FileSimulationClock(args.warmstart_sim_clock)
+                ),
+                clock_timeout_s=args.warmstart_clock_timeout_s,
+                log=lambda message: print(f"[psi0-isaac-eval] {message}", flush=True),
+            )
+            print(f"[psi0-isaac-eval] warm-start: {stream.ticks} demo ticks at "
+                  f"{stream.control_hz:g} Hz ({stream.duration_s:.2f}s), episode "
+                  f"{stream.source.get('episode_index')}, delay {args.warmstart_delay_s:g}s, "
+                  f"sha256 {stream.sha256[:12]}")
+            if telemetry is not None:
+                telemetry.event("warmstart", state="configured", delay_s=args.warmstart_delay_s,
+                                **stream.summary())
 
         try:
             validate_groot_checkpoint(args.groot_checkpoint_dir)
@@ -506,10 +760,17 @@ def main(argv: list[str] | None = None) -> int:
             )
             for entry in entries
         ]
+        finetuned_entry_detail = dict(fine_entry.detail)
         groot = GrootProcessGroup(
             args.groot_checkpoint_dir,
             prompt=CANONICAL_PROMPT,
             log_dir=(args.policy_log.parent if args.policy_log else Path("/tmp/groot-eval")),
+            policy_clock=args.policy_clock,
+            policy_clock_file=args.policy_clock_file,
+            policy_clock_timeout_s=args.policy_clock_timeout_s,
+            capture_dir=args.groot_capture_dir,
+            capture_max_requests=args.groot_capture_max_requests,
+            left_hand_contract=args.groot_left_hand_contract,
         )
         controller = ModelController(
             psi_session=session,
@@ -520,6 +781,9 @@ def main(argv: list[str] | None = None) -> int:
             router=router,
             initial_id=FINETUNED_ID,
             reset_endpoint=args.isaac_control_endpoint,
+            warmstart=warmstart,
+            warmstart_delay_s=args.warmstart_delay_s,
+            initial_pose=initial_pose,
             log=lambda message: print(f"[psi0-isaac-eval] {message}", flush=True),
         )
 
@@ -533,10 +797,23 @@ def main(argv: list[str] | None = None) -> int:
         labels = [entry.label for entry in entries] + ["GR00T"]
         print(f"[psi0-isaac-eval] UI on http://{args.host}:{args.port}/  "
               f"(prompt: {CANONICAL_PROMPT!r}); models: {', '.join(labels)}", flush=True)
+        if telemetry is not None:
+            telemetry.event(
+                "policy",
+                prompt=CANONICAL_PROMPT,
+                fine_tuned=finetuned_entry_detail,
+                groot_checkpoint=str(args.groot_checkpoint_dir),
+                control_hz=args.control_hz,
+                host=args.host,
+                port=args.port,
+            )
         import uvicorn
 
         uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     finally:
+        if telemetry is not None:
+            telemetry.event("shutdown")
+            telemetry.close()
         server.stop()
         session.close()
         router.close()

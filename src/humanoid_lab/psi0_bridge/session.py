@@ -33,9 +33,11 @@ import numpy as np
 
 from .actions import ActionAdapter
 from .camera import CAMERA_ENDPOINT
-from .contracts import IMAGE_KEY, NECK_NOOP_TOLERANCE, ServerInfo
+from .contracts import NECK_NOOP_TOLERANCE, ServerInfo
 from .monitor import Monitor
+from .policy_clock import PolicyClock, PolicyClockError
 from .prompt import CANONICAL_PROMPT
+from .sim_clock import SimulationClockPacer
 from .publisher import PublisherError, PosePublisher
 from .psi0_client import (
     DEFAULT_WS_URL,
@@ -97,6 +99,27 @@ class SessionConfig:
     #: and no already-published pose can land mid-reset.
     command_ttl_s: float = 0.3
     neck_tolerance: float = NECK_NOOP_TOLERANCE
+    #: ``"error"`` (default) fails closed on an 80D neck block outside the no-op
+    #: tolerance.  ``"discard"`` is the explicit opt-in that drops it, for a pack
+    #: whose neck columns are unsupervised padding (this repo's own 80D pack);
+    #: every drop is recorded through telemetry.
+    neck_policy: str = "error"
+
+
+def _neck_discard_fields(adapter: ActionAdapter) -> dict[str, Any]:
+    """Telemetry fields describing a neck block the adapter had to drop.
+
+    Empty for the ordinary case (78D action, or an in-tolerance no-op), so the
+    existing ``target_action`` schema is unchanged unless a discard happened.
+    """
+    adapted = adapter.last_adapted
+    if adapted is None or adapted.discarded_neck is None:
+        return {}
+    return {
+        "neck_discarded": True,
+        "neck_discarded_values": [float(value) for value in adapted.discarded_neck.tolist()],
+        "neck_discard_count": adapter.neck_discards,
+    }
 
 
 def info_summary(info: Optional[ServerInfo]) -> Optional[dict[str, Any]]:
@@ -128,8 +151,14 @@ class Session:
         *,
         monitor: Optional[Monitor] = None,
         publisher: Any | None = None,
+        telemetry: Any | None = None,
+        policy_clock: PolicyClock | None = None,
     ) -> None:
         self.config = config or SessionConfig()
+        #: Opt-in rollout recorder (see :mod:`humanoid_lab.psi0_bridge.telemetry`).
+        #: ``None`` -- the default and every unit test -- records nothing.
+        self.telemetry = telemetry
+        self.policy_clock = policy_clock or PolicyClock("wall")
         self.monitor = monitor if monitor is not None else Monitor(
             state_endpoint=self.config.state_endpoint,
             state_topic=self.config.state_topic,
@@ -247,6 +276,7 @@ class Session:
         self._stop_event.clear()
         self._send_gate.set()
         self._publisher.resume()  # the socket is owned since construction; Start opens the gate
+        self._note_transition("STARTING", instruction=self.config.instruction)
 
         thread = threading.Thread(target=self._run_thread, args=(generation,), name="psi0-session", daemon=True)
         with self._lock:
@@ -275,6 +305,7 @@ class Session:
             self._starting = False
             self._thread = None
             self._ws_connected = False
+        self._note_transition(self._state)
         return self.status()
 
     def close(self) -> None:
@@ -314,6 +345,7 @@ class Session:
             self._error = reset_error
             self._state = ERROR if reset_error else IDLE
             self._starting = False
+        self._note_transition(self._state, reset=True, error=reset_error)
         return self.status()
 
     # -- status ------------------------------------------------------------
@@ -339,6 +371,7 @@ class Session:
                 "url": self.config.ws_url,
                 "connected": bool(connected and state == RUNNING),
                 "info": info_summary(info),
+                "policy_clock": self.policy_clock.mode,
             },
             "sonic_state": monitor_status.get("state", {}),
             "camera": monitor_status.get("camera", {}),
@@ -371,7 +404,11 @@ class Session:
             async with Psi0Connection(self.config.ws_url) as connection:
                 if not self._is_current(generation):
                     return
-                adapter = ActionAdapter(self.config.neck_tolerance, expected_dim=info.action_dim)
+                adapter = ActionAdapter(
+                    self.config.neck_tolerance,
+                    expected_dim=info.action_dim,
+                    neck_policy=self.config.neck_policy,
+                )
                 with self._lock:
                     if generation != self._generation:
                         return
@@ -379,6 +416,17 @@ class Session:
                     self._state = RUNNING
                     self._starting = False
                 self._ready_event.set()
+                self._note_transition(
+                    RUNNING,
+                    action_dim=info.action_dim,
+                    chunk_size=info.action_chunk_size,
+                    state_dim=info.state_dim,
+                    dataset_name=info.dataset_name,
+                    run_dir=info.run_dir,
+                    ckpt_step=info.ckpt_step,
+                    policy_clock=self.policy_clock.mode,
+                    neck_policy=self.config.neck_policy,
+                )
                 try:
                     # The socket is owned since construction; the stream only
                     # publishes through it while the send gate is open.
@@ -413,6 +461,7 @@ class Session:
     ) -> None:
         period = 1.0 / max(self.config.control_hz, 1.0)
         next_tick = time.monotonic()
+        pacer = SimulationClockPacer(max(self.config.control_hz, 1.0))
         last_version = 0
         info = self.info
         # The served dataset name is the single source of truth; there is no
@@ -420,6 +469,15 @@ class Session:
         if info is None or not info.dataset_name:
             raise SessionError("no validated /info dataset_name; refusing to stream")
         dataset_name = info.dataset_name
+        # The served run names its single camera; the bridge sends its frame under
+        # that key so a checkpoint that calls the camera something else still sees
+        # the observation it was built for.
+        image_key = info.image_key
+        if self.policy_clock.mode == "simulation":
+            await self._stream_simulation(
+                generation, connection, adapter, pacer, dataset_name, image_key
+            )
+            return
 
         while self._is_current(generation):
             state_snapshot = self.monitor.state(max_age_s=STATE_MAX_AGE_S)
@@ -431,13 +489,23 @@ class Session:
                 continue
 
             payload = serialize_request(
-                image={IMAGE_KEY: frame_snapshot.frame},
+                image={image_key: frame_snapshot.frame},
                 state=state_snapshot.raw_state,
                 instruction=self.config.instruction,
                 dataset_name=dataset_name,
                 timestamp=f"{time.time():.6f}",
             )
             self._record_observation(generation, frame_snapshot.frame)
+            if self.telemetry is not None:
+                self.telemetry.observation(
+                    state=state_snapshot.raw_state,
+                    frame=frame_snapshot.frame,
+                    state_time_s=state_snapshot.timestamp_s,
+                    frame_time_s=frame_snapshot.timestamp_s,
+                    dataset_name=dataset_name,
+                    instruction=self.config.instruction,
+                    image_key=image_key,
+                )
 
             last_version = await self._flush_stale(generation, connection, last_version)
             if not self._is_current(generation):
@@ -451,16 +519,116 @@ class Session:
             if not self._is_current(generation):
                 break
             packed = adapter.pack(reply.action)  # raises on a bad width/neck/NaN
+            published = False
             if self._send_gate.is_set() and self._is_current(generation):
-                if self._publisher.publish(packed):
+                published = bool(self._publisher.publish(packed))
+                if published:
                     self._record_action(generation, adapter.next_frame_index - 1)
+            if self.telemetry is not None:
+                self.telemetry.target_action(
+                    reply.action,
+                    published=published,
+                    frame_index=adapter.next_frame_index - 1,
+                    version=reply.version,
+                    **_neck_discard_fields(adapter),
+                )
 
-            next_tick += period
-            delay = next_tick - time.monotonic()
-            if delay > 0:
-                await asyncio.sleep(delay)
-            else:
-                next_tick = time.monotonic()
+            if self.policy_clock.mode == "wall":
+                next_tick += period
+                delay = next_tick - time.monotonic()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                else:
+                    next_tick = time.monotonic()
+
+    async def _stream_simulation(
+        self,
+        generation: int,
+        connection: Psi0Connection,
+        adapter: ActionAdapter,
+        pacer: SimulationClockPacer,
+        dataset_name: str,
+        image_key: str,
+    ) -> None:
+        async def send_observations() -> None:
+            while self._is_current(generation):
+                await self._wait_simulation_tick(generation, pacer)
+                if not self._is_current(generation):
+                    return
+                state_snapshot = self.monitor.state(max_age_s=STATE_MAX_AGE_S)
+                frame_snapshot = self.monitor.frame(max_age_s=FRAME_MAX_AGE_S)
+                if state_snapshot is None or frame_snapshot is None:
+                    continue
+                payload = serialize_request(
+                    image={image_key: frame_snapshot.frame},
+                    state=state_snapshot.raw_state,
+                    instruction=self.config.instruction,
+                    dataset_name=dataset_name,
+                    timestamp=f"{time.time():.6f}",
+                )
+                self._record_observation(generation, frame_snapshot.frame)
+                if self.telemetry is not None:
+                    self.telemetry.observation(
+                        state=state_snapshot.raw_state,
+                        frame=frame_snapshot.frame,
+                        state_time_s=state_snapshot.timestamp_s,
+                        frame_time_s=frame_snapshot.timestamp_s,
+                        dataset_name=dataset_name,
+                        instruction=self.config.instruction,
+                        image_key=image_key,
+                    )
+                await connection.send(payload)
+
+        async def receive_actions() -> None:
+            last_version = 0
+            while self._is_current(generation):
+                reply = await self._wait_action(connection, last_version)
+                if reply is None:
+                    return
+                if reply.version <= last_version:
+                    continue
+                last_version = reply.version
+                packed = adapter.pack(reply.action)
+                published = False
+                if self._send_gate.is_set() and self._is_current(generation):
+                    published = bool(self._publisher.publish(packed))
+                    if published:
+                        self._record_action(generation, adapter.next_frame_index - 1)
+                if self.telemetry is not None:
+                    self.telemetry.target_action(
+                        reply.action,
+                        published=published,
+                        frame_index=adapter.next_frame_index - 1,
+                        version=reply.version,
+                        **_neck_discard_fields(adapter),
+                    )
+
+        sender = asyncio.create_task(send_observations())
+        receiver = asyncio.create_task(receive_actions())
+        done, pending = await asyncio.wait(
+            (sender, receiver), return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+        results = await asyncio.gather(*done, *pending, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(
+                result, asyncio.CancelledError
+            ):
+                raise result
+
+    async def _wait_simulation_tick(
+        self, generation: int, pacer: SimulationClockPacer,
+    ) -> int:
+        while self._is_current(generation):
+            policy_time = self.policy_clock.now()
+            update = pacer.update(policy_time.seconds, policy_time.generation)
+            if update.reset:
+                raise SessionError("Isaac simulation clock reset during a running psi0 session")
+            if update.rows_due >= 1:
+                return update.rows_due
+            await asyncio.sleep(0.001)
+        return 0
 
     async def _flush_stale(self, generation: int, connection: Psi0Connection, last_version: int) -> int:
         """Drop actions buffered from an earlier observation; return the newest version."""
@@ -531,6 +699,11 @@ class Session:
         self._publisher.halt()  # a failed session never publishes; the socket stays owned
         self._stop_event.set()
         self._ready_event.set()
+        self._note_transition(ERROR, error=message)
+
+    def _note_transition(self, state: str, **fields: Any) -> None:
+        if self.telemetry is not None:
+            self.telemetry.transition(state, **fields)
 
 
 def _iso(epoch: float) -> str:

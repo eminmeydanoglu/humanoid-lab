@@ -24,13 +24,12 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
-#: The canonical deployment invocation (same flags dev.sh used when the launcher
-#: owned the server): ``--action_exec_horizon 30`` matches the bridge's 30 Hz
-#: Protocol v4 stream and ``--rtc`` enables the replan path verified at startup.
+#: The repository wrapper keeps upstream's guided RTC path as the compatibility
+#: default and supplies the missing unguided controller when ``--rtc`` is absent.
 #: No ``--device`` is passed: the deployment's own ``cuda:0`` default is the only
 #: servable configuration, because its inference path pins CUDA autocast -- a
 #: CPU device still loads and answers /info, then fails on the first forward pass.
-SERVE_EXECUTABLE = "serve_psi0_sonic"
+SERVE_EXECUTABLE = "/workspace/humanoid-lab/scripts/serve-psi0-sonic.py"
 
 DEFAULT_STOP_TIMEOUT_S = 15.0
 DEFAULT_KILL_WAIT_S = 10.0
@@ -41,18 +40,19 @@ class PolicyServerError(RuntimeError):
 
 
 def serve_command(run_dir: Path, step: int, port: int,
-                  executable: str = SERVE_EXECUTABLE) -> list[str]:
-    """Build the canonical ``serve_psi0_sonic`` command line for one checkpoint."""
-    return [
+                  executable: str = SERVE_EXECUTABLE, *, rtc: bool = True,
+                  action_exec_horizon: int = 30) -> list[str]:
+    """Build the checkpoint server command; guided RTC remains the default."""
+    command = [
         executable,
         "--host", "0.0.0.0",
         "--port", str(port),
-        "--action_exec_horizon", "30",
+        "--action_exec_horizon", str(action_exec_horizon),
         "--policy", "psi",
-        "--rtc",
-        "--run-dir", str(run_dir),
-        "--ckpt-step", str(step),
     ]
+    if rtc:
+        command.append("--rtc")
+    return command + ["--run-dir", str(run_dir), "--ckpt-step", str(step)]
 
 
 def probe_info(host: str, port: int, *, timeout_s: float = 2.0) -> Optional[dict[str, Any]]:
@@ -77,11 +77,31 @@ class PolicyServerProcess:
         *,
         port: int,
         log_path: Optional[Path] = None,
+        rtc: bool = True,
+        action_exec_horizon: int = 30,
+        policy_clock: str = "wall",
+        policy_clock_file: Path | None = None,
+        policy_clock_timeout_s: float = 5.0,
         stop_timeout_s: float = DEFAULT_STOP_TIMEOUT_S,
         kill_wait_s: float = DEFAULT_KILL_WAIT_S,
     ) -> None:
         self.port = int(port)
         self.log_path = Path(log_path) if log_path is not None else None
+        self.rtc = bool(rtc)
+        self.action_exec_horizon = int(action_exec_horizon)
+        if policy_clock not in ("wall", "simulation"):
+            raise ValueError(f"unknown policy clock {policy_clock!r}")
+        self.policy_clock = policy_clock
+        self.policy_clock_file = None if policy_clock_file is None else Path(policy_clock_file)
+        self.policy_clock_timeout_s = float(policy_clock_timeout_s)
+        if self.policy_clock == "simulation" and self.policy_clock_file is None:
+            raise ValueError("simulation policy clock requires a clock file")
+        if self.policy_clock == "wall" and self.policy_clock_file is not None:
+            raise ValueError("policy clock file requires simulation mode")
+        if self.policy_clock_timeout_s <= 0:
+            raise ValueError("policy clock timeout must be positive")
+        if not 0 < self.action_exec_horizon <= 30:
+            raise ValueError("action_exec_horizon must be in [1, 30]")
         self.stop_timeout_s = float(stop_timeout_s)
         self.kill_wait_s = float(kill_wait_s)
         self._process: Optional[subprocess.Popen] = None
@@ -109,7 +129,10 @@ class PolicyServerProcess:
 
     def command(self, run_dir: Path, step: int) -> list[str]:
         """The exact command line to spawn; tests override this seam."""
-        return serve_command(run_dir, step, self.port)
+        return serve_command(
+            run_dir, step, self.port, rtc=self.rtc,
+            action_exec_horizon=self.action_exec_horizon,
+        )
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -138,12 +161,20 @@ class PolicyServerProcess:
         try:
             # No start_new_session: the child stays in the bridge's process
             # group, so the launcher's lease teardown reaps it too.
+            environment = dict(os.environ)
+            environment["HUMANOID_POLICY_CLOCK"] = self.policy_clock
+            if self.policy_clock_file is not None:
+                environment["HUMANOID_POLICY_CLOCK_FILE"] = str(self.policy_clock_file)
+                environment["HUMANOID_POLICY_CLOCK_TIMEOUT_S"] = str(self.policy_clock_timeout_s)
+            else:
+                environment.pop("HUMANOID_POLICY_CLOCK_FILE", None)
+                environment.pop("HUMANOID_POLICY_CLOCK_TIMEOUT_S", None)
             self._process = subprocess.Popen(
                 self.command(run_dir, step),
                 stdin=subprocess.DEVNULL,
                 stdout=stdout,
                 stderr=subprocess.STDOUT if stdout is not None else None,
-                env=dict(os.environ),
+                env=environment,
             )
         except OSError as exc:
             self._close_log()

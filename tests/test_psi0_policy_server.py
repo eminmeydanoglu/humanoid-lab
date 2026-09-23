@@ -61,11 +61,20 @@ class PolicyServerProcessTest(unittest.TestCase):
         command = serve_command(Path("/outputs/run"), 40000, 8014)
         self.assertEqual(
             command,
-            ["serve_psi0_sonic", "--host", "0.0.0.0", "--port", "8014",
+            ["/workspace/humanoid-lab/scripts/serve-psi0-sonic.py",
+             "--host", "0.0.0.0", "--port", "8014",
              "--action_exec_horizon", "30", "--policy", "psi", "--rtc",
              "--run-dir", "/outputs/run", "--ckpt-step", "40000"],
         )
         self.assertNotIn("--device", command)
+        self.assertEqual(
+            serve_command(Path("/outputs/run"), 40000, 8014, rtc=False,
+                          action_exec_horizon=12),
+            ["/workspace/humanoid-lab/scripts/serve-psi0-sonic.py",
+             "--host", "0.0.0.0", "--port", "8014",
+             "--action_exec_horizon", "12", "--policy", "psi",
+             "--run-dir", "/outputs/run", "--ckpt-step", "40000"],
+        )
 
     def test_cpu_serving_cannot_be_requested_at_all(self) -> None:
         # The deployment's inference path pins CUDA autocast: a CPU device loads
@@ -80,6 +89,28 @@ class PolicyServerProcessTest(unittest.TestCase):
             PolicyServerProcess(port=8014).command(Path("/outputs/run"), 0),
             serve_command(Path("/outputs/run"), 0, 8014),
         )
+
+    def test_simulation_clock_configuration_reaches_only_the_owned_child_environment(self) -> None:
+        clock_file = Path(self.tmp.name) / "isaac.clock"
+        self.assertFalse(clock_file.exists())
+        server = PolicyServerProcess(
+            port=8014,
+            policy_clock="simulation",
+            policy_clock_file=clock_file,
+            policy_clock_timeout_s=3.5,
+        )
+        process = mock.Mock()
+        process.poll.return_value = None
+        with mock.patch("humanoid_lab.psi0_bridge.policy_server.subprocess.Popen", return_value=process) as popen:
+            server.start(self.run_dir, 0)
+        environment = popen.call_args.kwargs["env"]
+        self.assertEqual(environment["HUMANOID_POLICY_CLOCK"], "simulation")
+        self.assertEqual(environment["HUMANOID_POLICY_CLOCK_FILE"], str(clock_file))
+        self.assertEqual(environment["HUMANOID_POLICY_CLOCK_TIMEOUT_S"], "3.5")
+
+    def test_simulation_server_refuses_a_missing_clock_file_configuration(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires a clock file"):
+            PolicyServerProcess(port=8014, policy_clock="simulation")
 
     def test_start_stop_restart_touches_only_the_child(self) -> None:
         server = _FakeServe(port=8014, log_path=Path(self.tmp.name) / "server.log")

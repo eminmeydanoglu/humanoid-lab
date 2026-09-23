@@ -21,6 +21,7 @@ import numpy as np
 from humanoid_lab.psi0_bridge import session as session_mod
 from humanoid_lab.psi0_bridge.contracts import validate_info
 from humanoid_lab.psi0_bridge.monitor import FrameSnapshot, StateSnapshot
+from humanoid_lab.psi0_bridge.policy_clock import PolicyTime
 from humanoid_lab.psi0_bridge.prompt import CANONICAL_PROMPT
 from humanoid_lab.psi0_bridge.reset_client import ResetError
 from humanoid_lab.psi0_bridge.session import (
@@ -174,6 +175,42 @@ class FakeConnection:
 
     async def close(self) -> None:
         pass
+
+
+class LiveFakeMonitor(FakeMonitor):
+    def state(self, max_age_s=None):
+        self.refresh()
+        return super().state(max_age_s)
+
+    def frame(self, max_age_s=None):
+        self.refresh()
+        return super().frame(max_age_s)
+
+
+class ScaledSimulationClock:
+    mode = "simulation"
+
+    def __init__(self, speed: float = 0.67) -> None:
+        self.speed = float(speed)
+        self.started = time.monotonic()
+
+    def now(self) -> PolicyTime:
+        return PolicyTime((time.monotonic() - self.started) * self.speed, 0)
+
+
+class SimulationPushConnection(FakeConnection):
+    """Server pushes at 30 simulation Hz after a synchronous first-chunk delay."""
+
+    async def send(self, payload: str) -> None:
+        self.sent.append(payload)
+        FakeConnection.messages_sent += 1
+
+    async def recv(self) -> str:
+        await asyncio.sleep(0.3 if self._version == 0 else 1.0 / (30.0 * 0.67))
+        self._version += 1
+        action = np.zeros((1, self.action_width), dtype=np.float32)
+        action[0, : min(64, self.action_width)] = 0.1
+        return _action_message(action, self._version)
 
 
 class FakePublisher:
@@ -442,6 +479,32 @@ class SessionLifecycleTest(unittest.TestCase):
         self.assertEqual(self.session.state, ERROR)
         self.assertIn("fake reset refused", self.session.status()["error"])
         self.assertEqual(FakeResetClient.instances[-1].calls, 1)
+
+    def test_simulation_clock_skips_obsolete_request_opportunities_without_debt(self) -> None:
+        session = Session(
+            SessionConfig(
+                ws_url="ws://localhost:8014/ws",
+                control_hz=30.0,
+                recv_timeout_s=2.0,
+                ready_timeout_s=0.3,
+                start_timeout_s=2.0,
+                stop_timeout_s=1.0,
+            ),
+            monitor=LiveFakeMonitor(),
+            policy_clock=ScaledSimulationClock(0.67),
+        )
+        with mock.patch.object(session_mod, "Psi0Connection", SimulationPushConnection):
+            session.start()
+            self.assertTrue(self._wait_for(lambda: session.state == RUNNING))
+            publisher = FakePublisher.instances[-1]
+            self.assertTrue(self._wait_for(lambda: len(publisher.sent) >= 20, timeout=2.0))
+            session.stop()
+
+        connection = SimulationPushConnection.instances[-1]
+        self.assertGreaterEqual(len(connection.sent), len(publisher.sent))
+        self.assertLessEqual(len(connection.sent) - len(publisher.sent), 8)
+        self.assertGreaterEqual(len(publisher.sent), 20)
+        self.assertEqual(session.status()["action"]["sent"], len(publisher.sent))
 
     def test_instruction_is_the_canonical_prompt_not_a_caller_string(self) -> None:
         self.assertEqual(self.session.config.instruction, CANONICAL_PROMPT)

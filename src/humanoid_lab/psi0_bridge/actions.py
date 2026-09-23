@@ -11,6 +11,14 @@ finite and inside :data:`~humanoid_lab.psi0_bridge.contracts.NECK_NOOP_TOLERANCE
 of zero (a genuine no-op), and otherwise raises so the session transitions to
 ERROR and stops publishing.
 
+That fail-closed default is wrong for this repo's own 80D pack: ``action.neck``
+is unsupervised padding (``action.mask`` is zero on those two columns for every
+frame), so the served model emits arbitrary values there and a real run trips
+the check on its first chunk.  ``neck_policy="discard"`` is the explicit opt-in
+that drops the block and records what it dropped; it is never the default,
+because a genuinely neck-bearing embodiment must not have its command silently
+thrown away.
+
 The first 64 dims are snapped onto the WBC's FSQ grid
 (``[-0.625, 0.625]`` step ``0.0625``) before publishing, exactly like every live
 SONIC client; the recorded dataset tokens already sit on that grid.
@@ -35,6 +43,13 @@ from .contracts import (
 )
 
 FSQ_MIN, FSQ_MAX, FSQ_STEP = -0.625, 0.625, 0.0625
+
+#: How an out-of-tolerance 80D neck block is treated.
+#:
+#: ``"error"`` (default) keeps the fail-closed behaviour.  ``"discard"`` drops
+#: the block after recording it, which is only correct for a pack whose neck
+#: columns were never supervised (see the module docstring).
+NECK_POLICIES = ("error", "discard")
 
 
 class ActionAdapterError(ValueError):
@@ -70,9 +85,18 @@ class AdaptedAction:
     token: np.ndarray      # (64,) FSQ-quantized motion token
     left_hand: np.ndarray  # (7,)
     right_hand: np.ndarray  # (7,)
-    neck: np.ndarray | None  # (2,) only for 80D input; validated no-op
+    neck: np.ndarray | None  # (2,) only for 80D input; validated no-op or discarded
     frame_index: int
     source_dim: int
+    #: The raw 80D neck block when ``neck_policy="discard"`` dropped a value that
+    #: was outside the no-op tolerance; ``None`` for a 78D action, an in-tolerance
+    #: no-op, or the fail-closed default.  Carried so a caller can record exactly
+    #: what was thrown away instead of the drop being invisible.
+    discarded_neck: np.ndarray | None = None
+
+    @property
+    def neck_discarded(self) -> bool:
+        return self.discarded_neck is not None
 
 
 class ActionAdapter:
@@ -94,15 +118,25 @@ class ActionAdapter:
         self,
         neck_tolerance: float = NECK_NOOP_TOLERANCE,
         expected_dim: Optional[int] = None,
+        neck_policy: str = "error",
     ) -> None:
         if expected_dim is not None and expected_dim not in ACTION_DIMS:
             raise ActionAdapterError(
                 f"expected_dim {expected_dim} is neither 78 nor 80"
             )
+        if neck_policy not in NECK_POLICIES:
+            raise ActionAdapterError(
+                f"unknown neck policy {neck_policy!r}; expected one of {NECK_POLICIES}"
+            )
         self.neck_tolerance = float(neck_tolerance)
         self.expected_dim = expected_dim
+        self.neck_policy = neck_policy
         self._next_index = 0
         self._last_sent: Optional[int] = None
+        self._neck_discards = 0
+        #: The most recently packed action, so a caller can report what the
+        #: adapter had to drop without re-deriving it from the raw vector.
+        self.last_adapted: Optional[AdaptedAction] = None
 
     def reset(self) -> None:
         """Clear the frame sequence so a new session starts from index 0."""
@@ -116,6 +150,11 @@ class ActionAdapter:
     @property
     def last_frame_index(self) -> Optional[int]:
         return self._last_sent
+
+    @property
+    def neck_discards(self) -> int:
+        """How many out-of-tolerance neck blocks this adapter discarded."""
+        return self._neck_discards
 
     def adapt(self, action: np.ndarray, frame_index: Optional[int] = None) -> AdaptedAction:
         array = _flatten(action)
@@ -131,14 +170,23 @@ class ActionAdapter:
         token = array[:TOKEN_DIM]
         hands = array[TOKEN_DIM:TOKEN_DIM + HAND14_DIM]
         neck: np.ndarray | None = None
+        discarded: np.ndarray | None = None
         if array.shape[0] == 78 + NECK_DIM:
-            neck = array[TOKEN_DIM + HAND14_DIM:]
-            if np.abs(neck).max() > self.neck_tolerance:
-                raise ActionAdapterError(
-                    "80D neck block is "
-                    f"{neck.tolist()} but Protocol v4 has no neck field; only a "
-                    f"no-op (|neck| <= {self.neck_tolerance}) is accepted"
-                )
+            raw_neck = array[TOKEN_DIM + HAND14_DIM:]
+            if np.abs(raw_neck).max() > self.neck_tolerance:
+                if self.neck_policy == "error":
+                    raise ActionAdapterError(
+                        "80D neck block is "
+                        f"{raw_neck.tolist()} but Protocol v4 has no neck field; only a "
+                        f"no-op (|neck| <= {self.neck_tolerance}) is accepted "
+                        "(pass neck_policy='discard' only for a pack whose neck "
+                        "columns are unsupervised padding)"
+                    )
+                # Opt-in discard: keep the evidence, drop the command.
+                discarded = raw_neck.astype(np.float32, copy=True)
+                self._neck_discards += 1
+            else:
+                neck = raw_neck.astype(np.float32, copy=True)
 
         if frame_index is None:
             index = self._next_index
@@ -157,9 +205,10 @@ class ActionAdapter:
             token=fsq_quantize(token),
             left_hand=hands[:HAND_DIM].astype(np.float32, copy=True),
             right_hand=hands[HAND_DIM:].astype(np.float32, copy=True),
-            neck=None if neck is None else neck.astype(np.float32, copy=True),
+            neck=neck,
             frame_index=index,
             source_dim=int(array.shape[0]),
+            discarded_neck=discarded,
         )
 
     def pack(self, action: np.ndarray, frame_index: Optional[int] = None) -> bytes:
@@ -177,4 +226,5 @@ class ActionAdapter:
         )
         self._last_sent = adapted.frame_index
         self._next_index = adapted.frame_index + 1
+        self.last_adapted = adapted
         return payload

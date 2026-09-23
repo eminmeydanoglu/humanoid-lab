@@ -276,7 +276,7 @@ def _scene_cfg(profile: RunProfile, include_scene: bool) -> Any:
     from isaaclab.utils import configclass
     from isaaclab_assets.robots.unitree import G1_29DOF_CFG
 
-    from .service import _CUBE_DIFFUSE_RGB, _TARGET_DIFFUSE_RGB, _TARGET_METALLIC
+    from .service import _TARGET_DIFFUSE_RGB, _TARGET_METALLIC, cube_diffuse_rgb
 
     robot_spec = profile.robot
     robot_cfg: ArticulationCfg = G1_29DOF_CFG.copy()
@@ -309,7 +309,7 @@ def _scene_cfg(profile: RunProfile, include_scene: bool) -> Any:
                     rigid_props=sim_utils.RigidBodyPropertiesCfg(),
                     mass_props=sim_utils.MassPropertiesCfg(mass=cube.mass_kg),
                     collision_props=sim_utils.CollisionPropertiesCfg(),
-                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=_CUBE_DIFFUSE_RGB[cube.color]),
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=cube_diffuse_rgb(cube)),
                 ),
             )
             for cube in scene_spec.cubes

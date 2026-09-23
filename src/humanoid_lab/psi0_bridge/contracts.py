@@ -3,11 +3,18 @@
 The bridge never guesses a wire layout.  Before it will connect, the server's
 ``/info`` response must describe exactly the contract this bridge was built for:
 
-* one image key, ``observation.images.egocentric``;
+* exactly one image key, named by the served run itself (this repo's own packs
+  call it ``observation.images.egocentric``; a released checkpoint may call the
+  same single camera ``observation.images.head``).  The bridge sends its one
+  frame under the declared key, so the name is the server's to choose while the
+  count is not: a checkpoint needing a second camera cannot be served;
 * a single-frame (history = 1) raw state vector, 43D, unnormalized;
 * an action width of 78 or 80 (64 token + 14 Dex3 + optional 2 neck);
 * chunk metadata (``action_chunk_size`` and ``action_exec_horizon``);
-* the ``resize`` transform pinned at 240x320 plus a ``center_crop``.
+* a ``resize`` transform plus a ``center_crop`` of the same size, both reported
+  by the server.  The bridge never resizes: the served transform is the server's
+  own, and the launcher checks that it equals the selected run's ``run_config``
+  before anything is marked ready (see ``wait_for_info``'s identity checks).
 
 The 43D number is the raw training layout from
 ``configs/datasets/psi0/unitree_dex3_sonic_v1.yaml`` (``state.dim: 43``); the
@@ -22,6 +29,10 @@ import re
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+#: The image key this repo's own Unitree Dex3 SONIC packs are built with.  It is
+#: the expected key for the fine-tuned and base entries; a served run that
+#: declares a different single key is still drivable, and the bridge sends the
+#: frame under whatever ``/info`` declares.
 IMAGE_KEY = "observation.images.egocentric"
 STATE_KEY = "states"
 
@@ -38,7 +49,15 @@ ACTION_DIMS = (78, 80)
 # the 43D vector is padded to before the checkpoint sees it.
 SERVER_STATE_DIMS = (RAW_STATE_DIM, 45)
 
-RESIZE_SIZE = (240, 320)  # (height, width), as reported by the served transform
+#: The transform this repo's own packs are built with (height, width).  The
+#: served value is read from ``/info`` and checked against the selected run's
+#: ``run_config``; this constant documents the repo's own contract and bounds
+#: what a served transform may be.
+RESIZE_SIZE = (240, 320)
+#: Bounds a declared transform must satisfy; the model sees 3D image tokens, so a
+#: non-positive or absurd size is a malformed run config rather than a variant.
+MIN_TRANSFORM_SIDE = 32
+MAX_TRANSFORM_SIDE = 4096
 
 # The 80D neck block has no field in Protocol v4's ``pose`` message.  A
 # near-zero neck therefore means "no neck command this frame"; anything above
@@ -99,6 +118,19 @@ def _transform_size(transforms: Any, name: str) -> tuple[int, int] | None:
     return None
 
 
+def _require_sane_transform(size: tuple[int, int], what: str) -> None:
+    """Reject a declared transform no image could satisfy."""
+    height, width = size
+    for side in size:
+        if not MIN_TRANSFORM_SIDE <= side <= MAX_TRANSFORM_SIDE:
+            raise ContractError(
+                f"{what} size {size} is outside "
+                f"[{MIN_TRANSFORM_SIDE}, {MAX_TRANSFORM_SIDE}]"
+            )
+    if height <= 0 or width <= 0:  # pragma: no cover - covered by the bounds above
+        raise ContractError(f"{what} size {size} is not positive")
+
+
 def _require_int(value: Any, what: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ContractError(f"{what} must be an int, got {value!r}")
@@ -117,18 +149,13 @@ def validate_info(raw: Any) -> ServerInfo:
     images = expected.get("image")
     if not isinstance(images, Mapping):
         raise ContractError("/info expected_keys.image is not an object")
-    if IMAGE_KEY not in images:
+    declared_keys = sorted(str(key) for key in images)
+    if len(declared_keys) != 1:
         raise ContractError(
-            f"/info does not declare image key {IMAGE_KEY!r}; declared: {sorted(images)}"
+            "/info must declare exactly one image key: this bridge sends one camera frame, so a "
+            f"checkpoint needing any other number of views cannot be served. Declared: {declared_keys}"
         )
-    # The bridge sends exactly one camera frame; a checkpoint that also requires
-    # another image key could never be served correctly, so refuse it up front.
-    extra_images = sorted(set(images) - {IMAGE_KEY})
-    if extra_images:
-        raise ContractError(
-            f"/info requires additional image keys {extra_images}; this bridge sends only "
-            f"{IMAGE_KEY!r}"
-        )
+    image_key = declared_keys[0]
 
     state_expected = expected.get("state")
     if not isinstance(state_expected, Mapping):
@@ -185,11 +212,16 @@ def validate_info(raw: Any) -> ServerInfo:
     resize = _transform_size(raw.get("transforms"), "resize")
     if resize is None:
         raise ContractError("/info declares no resize transform")
-    if resize != RESIZE_SIZE:
-        raise ContractError(f"resize must be {RESIZE_SIZE}, /info reports {resize}")
+    _require_sane_transform(resize, "resize")
     crop = _transform_size(raw.get("transforms"), "center_crop")
     if crop is None:
         raise ContractError("/info declares no center_crop transform")
+    _require_sane_transform(crop, "center_crop")
+    if crop != resize:
+        raise ContractError(
+            f"/info center_crop {crop} is not the served resize {resize}: this bridge feeds the "
+            "whole resized frame and cannot reproduce a narrower view"
+        )
 
     # The server can run with PSI_RTC_INIT_PREV=1, which makes the *client* seed
     # the first chunk by sending state.init_prev_action.  This bridge only sends
@@ -221,7 +253,7 @@ def validate_info(raw: Any) -> ServerInfo:
         action_exec_horizon=horizon,
         state_dim=state_dim,
         history_length=history_length,
-        image_key=IMAGE_KEY,
+        image_key=image_key,
         resize_size=resize,
         center_crop_size=crop,
         normalize_state=True,

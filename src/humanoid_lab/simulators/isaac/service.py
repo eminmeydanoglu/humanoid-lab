@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -24,15 +25,47 @@ from .camera_service import (
     HeadCameraEndpoint,
     ResetControlEndpoint,
 )
-from .contracts import ContractError, RunProfile, TimelineState, quaternion_up_z
+from .contracts import (
+    ContractError,
+    RunProfile,
+    TimelineState,
+    body_gravity_columns,
+    load_reset_pose,
+    quaternion_up_z,
+)
 from .maths import quat_to_rotation_vector
 
 PASSIVE = "passive"
 CONTROLLED = "controlled"
 HAND_FALLBACKS = ("passive",)
 
+#: Plants the joint dynamics can be aligned to.  ``sonic_mujoco`` mirrors the
+#: compiled deployment MJCF (one flat armature and friction family);
+#: ``sonic_training`` mirrors the training rig's per-group armature, which
+#: differs by joint family (see :meth:`SimulatorService._align_joint_dynamics`).
+JOINT_DYNAMICS_ALIGNMENT_MODES: tuple[str, ...] = ("sonic_mujoco", "sonic_training")
+
+#: The pinned training config the ``sonic_training`` dynamics mode reads its
+#: per-group armature from.  Kept as a module constant so the path is declared
+#: once and a profile can still override it.
+DEFAULT_TRAINING_CFG = "/opt/src/sonic/gear_sonic/envs/manager_env/robots/g1.py"
+
 # Diffuse colors for the block-stacking scene materials.
 _CUBE_DIFFUSE_RGB = {"red": (0.80, 0.05, 0.05), "yellow": (0.85, 0.75, 0.05), "blue": (0.05, 0.20, 0.80)}
+
+
+def cube_diffuse_rgb(cube: Any) -> tuple[float, float, float]:
+    """The rendered material of one cube.
+
+    A profile may override it per cube; the cube's identity (``color``, prim
+    path, telemetry key), pose, size, mass and physics material are untouched by
+    such an override, so a scene variant can change how a cube looks without
+    changing what it is.
+    """
+    override = getattr(cube, "diffuse_rgb", None)
+    return tuple(float(value) for value in override) if override else _CUBE_DIFFUSE_RGB[cube.color]
+
+
 #: A matte black tape is a dielectric: no metallic lobe, and 2 % diffuse is the
 #: reflectance of real black gaffer tape.
 _TARGET_DIFFUSE_RGB = (0.02, 0.02, 0.02)
@@ -101,6 +134,24 @@ def _scalar_or_none(value: Any) -> float | None:
         return None
 
 
+# -- opt-in upper-limb reset pose -------------------------------------------
+#: The held pose is not written during the first seconds after a reset: the
+#: controller's own command is still settling from the episode before, and a
+#: release test against a moving reference would fire on that transient.
+ARM_HOLD_MIN_SECONDS = 24.0
+#: Window over which the controller's arm setpoint must stand still before it
+#: defines the reference the release test compares against.
+ARM_HOLD_STABLE_WINDOW_S = 2.0
+#: Setpoint spread inside that window that still counts as "standing still".
+ARM_HOLD_STABLE_RAD = 0.02
+#: Departure from the reference that counts as the controller taking the arms.
+#: A first policy action moves an arm setpoint by ~1 rad; the pre-policy hold
+#: stays inside 0.02 rad, so this sits five times above the quiet period.
+ARM_HOLD_RELEASE_RAD = 0.10
+#: How long that departure must persist before the hold lets go.
+ARM_HOLD_RELEASE_SUSTAIN_S = 0.20
+
+
 @dataclass(frozen=True)
 class AcceptanceThresholds:
     minimum_drop_m: float = 0.12
@@ -141,7 +192,12 @@ class SimulatorService:
         show_head_camera: bool,
         test_mode: str | None,
         controller_provider: str | None = None,
+        gravity_feedforward: bool = False,
+        reset_pose_file: Any | None = None,
+        reset_pose_hold: bool = False,
         record_video: Any | None = None,
+        video_timestamps_output: Path | None = None,
+        samples_output: Path | None = None,
         trajectory_reference: Any | None = None,
         kinematic_reference: Any | None = None,
         kinematic_label: str | None = None,
@@ -158,7 +214,28 @@ class SimulatorService:
         self.show_head_camera = show_head_camera
         self.test_mode = test_mode
         self.controller_provider = controller_provider
+        # Opt-in evaluation option, off by default: the loop keeps applying the
+        # controller's own torque law unless a run asks for the gravity term.
+        self.gravity_feedforward = gravity_feedforward
+        # Opt-in reset state, off by default: an upper-limb (arms + Dex3 hands)
+        # pose applied at every reset instead of the profile's standing pose.
+        # ``reset_pose_hold`` additionally holds those joints there until the
+        # controller's own arm target moves, i.e. until a policy takes over.
+        self.reset_pose_file = None if reset_pose_file is None else Path(reset_pose_file)
+        self.reset_pose_hold = bool(reset_pose_hold)
+        self._reset_pose: dict[str, float] | None = None
+        self._reset_pose_indices: list[int] = []
+        self._arm_target_indices: list[int] = []
+        self._arm_hold_active = False
+        self._arm_hold_reference: Any | None = None
+        self._arm_hold_history: Any = None
+        self._arm_hold_released_tick: int | None = None
+        self._arm_hold_release_reason: str | None = None
+        self._arm_hold_release_candidate: int | None = None
+        self._arm_hold_writes = 0
         self.record_video = record_video
+        self.video_timestamps_output = video_timestamps_output
+        self.samples_output = samples_output
         self.trajectory_reference = trajectory_reference
         self.kinematic_reference = kinematic_reference
         self.kinematic_label = kinematic_label or "kinematic"
@@ -183,6 +260,7 @@ class SimulatorService:
         self._control_window: Any = None
         self._head_camera_panel: Any = None
         self._pending_ui_reset = False
+        self._pending_shutdown = False
         self._reset_source: str | None = None
         self._head_camera: HeadCameraEndpoint | None = None
         self._reset_control: ResetControlEndpoint | None = None
@@ -209,15 +287,24 @@ class SimulatorService:
         self._video_process: subprocess.Popen[bytes] | None = None
         self._video_frames = 0
         self._video_error: str | None = None
+        self._video_timestamps: Any | None = None
         self._controller: ControllerSource | None = None
         self._controller_config: Mapping[str, Any] = profile.controller or {}
         self._body_layout: JointLayout | None = None
         self._hand_layouts: dict[str, JointLayout | None] = {"left": None, "right": None}
         self._body_effort_limits: tuple[float, ...] | None = None
         self._hand_effort_limits: dict[str, tuple[float, ...] | None] = {"left": None, "right": None}
+        self._gravity_offset: int | None = None
+        self._gravity_ticks = 0
+        self._gravity_sum_abs_nm = 0.0
+        self._gravity_max_abs_nm = 0.0
+        self._last_body_gravity_torque: list[float] | None = None
         self._hand_fallback = str(self._controller_config.get("hand_fallback", PASSIVE))
         self._mass_alignment: dict[str, Any] | None = None
         self._joint_dynamics_alignment: dict[str, Any] | None = None
+        #: Which plant's spawn height the declared pose is dropped from.  Only
+        #: meaningful when the profile names an initial pose.
+        self._initial_pose_model: str | None = None
         self._initial_joint_pos: Any = None
         self._support_active = False
         self._support_armed = False
@@ -339,6 +426,7 @@ class SimulatorService:
             self._prepare_kinematic()
         else:
             self._start_controller()
+            self._rearm_reset_pose_hold()
         self._timeline = get_timeline_interface()
         self._timeline.pause()
         self._set_debug_camera()
@@ -373,6 +461,7 @@ class SimulatorService:
         self._scene.reset()
         self._resolve_and_disable_actuators()
         self._resolve_initial_pose()
+        self._rearm_reset_pose_hold()
         self.episode_id += 1
         self.tick = 0
         self._wall_physics_elapsed = 0.0
@@ -695,12 +784,28 @@ class SimulatorService:
         import torch
 
         self._initial_joint_pos = self._robot.data.default_joint_pos.clone()
-        if self.profile.initial_pose is None:
-            return
-        from ...controllers.sonic import named_pose
-
-        pose, root_height = named_pose(self.profile.initial_pose)
         names = list(self._robot.joint_names)
+        if self.profile.initial_pose is None:
+            self._apply_reset_pose_to(self._initial_joint_pos, names)
+            return
+        from ...controllers.sonic import STANDING_POSE_MODELS, named_pose
+
+        # Which plant's spawn height the pose is dropped from.  Default stays
+        # "deploy" (the current behaviour); a profile that wants the training
+        # rig's 0.76 m must ask for it by name, because that height is authored
+        # for the training URDF's *capsule* feet converted with
+        # ``replace_cylinders_with_capsules=True`` while this asset keeps mesh
+        # soles -- so the same number is not automatically the same ground
+        # contact, and the profile contract's 1 mm spawn-height check is what
+        # refuses the combination rather than letting it pass silently.
+        pose_model = str(self._controller_config.get("initial_pose_model", "deploy"))
+        if pose_model not in STANDING_POSE_MODELS:
+            raise ContractError(
+                f"controller.initial_pose_model must be one of {tuple(STANDING_POSE_MODELS)}, "
+                f"got {pose_model!r}"
+            )
+        self._initial_pose_model = pose_model
+        pose, root_height = named_pose(self.profile.initial_pose, pose_model)
         unknown = sorted(set(pose) - set(names))
         if unknown:
             raise ContractError(f"initial pose names joints this asset does not have: {unknown}")
@@ -708,6 +813,7 @@ class SimulatorService:
         for name, angle in pose.items():
             values[0, names.index(name)] = float(angle)
         self._initial_joint_pos = values
+        self._apply_reset_pose_to(values, names)
         # The pose and the height it was authored for travel together: the same
         # pose dropped from a different height is a different, unsupported state.
         robot_spec = self.profile.robot
@@ -721,12 +827,180 @@ class SimulatorService:
                 {
                     "event": "isaac_g1_initial_pose",
                     "pose": self.profile.initial_pose,
+                    "pose_model": pose_model,
                     "root_height_m": root_height,
                     "joints": len(pose),
                 }
             ),
             flush=True,
         )
+
+    # --------------------------------------------------- opt-in reset pose
+
+    def _apply_reset_pose_to(self, values: Any, names: list[str]) -> None:
+        """Overwrite the upper-limb entries of a joint-position vector.
+
+        Only the joints the pose names are touched: the lower body and the waist
+        keep whatever the profile declared, which is what makes the upper-limb
+        reset state the single changed variable of a run that asks for it.
+        """
+        if self.reset_pose_file is None:
+            return
+        if self._reset_pose is None:
+            self._reset_pose = load_reset_pose(self.reset_pose_file)
+            unknown = sorted(set(self._reset_pose) - set(names))
+            if unknown:
+                raise ContractError(f"reset pose names joints this asset does not have: {unknown}")
+        for name, angle in self._reset_pose.items():
+            values[0, names.index(name)] = float(angle)
+
+    def _resolve_reset_pose_indices(self) -> None:
+        """Articulation indices of the held joints, resolved from the asset names."""
+        if self._reset_pose is None or self._reset_pose_indices:
+            return
+        names = list(self._robot.joint_names)
+        self._reset_pose_indices = [names.index(name) for name in self._reset_pose]
+        if self._body_layout is None:
+            return
+        held = set(self._reset_pose)
+        self._arm_target_indices = [
+            index for index, name in enumerate(self._body_layout.names) if name in held
+        ]
+
+    def _rearm_reset_pose_hold(self) -> None:
+        """Arm the hold again for the episode a reset just started."""
+        self._resolve_reset_pose_indices()
+        self._arm_hold_reference = None
+        self._arm_hold_release_candidate = None
+        self._arm_hold_released_tick = None
+        self._arm_hold_release_reason = None
+        self._arm_hold_writes = 0
+        self._arm_hold_history = None
+        hold_requested = (
+            self.reset_pose_file is not None
+            and self.reset_pose_hold
+            and bool(self._reset_pose_indices)
+            and bool(self._arm_target_indices)
+        )
+        if hold_requested:
+            import collections
+
+            self._arm_hold_history = collections.deque(maxlen=self._arm_hold_history_ticks())
+        self._arm_hold_active = hold_requested
+
+    def _arm_hold_history_ticks(self) -> int:
+        """Ticks in the stability window the release reference waits for."""
+        dt = max(self.profile.physics_dt, 1e-6)
+        return max(2, int(round(ARM_HOLD_STABLE_WINDOW_S / dt)))
+
+    def _update_reset_pose_hold(self, command: JointCommand) -> None:
+        """Decide whether the controller has taken the arms over from the hold.
+
+        The release is deliberately one-way and evidence-based: the hold survives
+        the pre-policy settle (whose commands wander) and ends only when the
+        controller asks for an arm setpoint that differs from the reference it
+        held for a full stable window.  That is the first policy action.
+        """
+        if not self._arm_hold_active or not self._arm_target_indices:
+            return
+        import numpy as np
+
+        target = np.asarray(command.q, dtype=float)[self._arm_target_indices]
+        simulate_seconds = self.tick * self.profile.physics_dt
+        if simulate_seconds < ARM_HOLD_MIN_SECONDS:
+            self._arm_hold_history.clear()
+            self._arm_hold_history.append(target)
+            return
+        if self._arm_hold_reference is None:
+            history = np.asarray(self._arm_hold_history)
+            if history.shape[0] >= self._arm_hold_history.maxlen:
+                if float(np.abs(history - history[0][None, :]).max()) <= ARM_HOLD_STABLE_RAD:
+                    self._arm_hold_reference = target.copy()
+                    self._arm_hold_release_candidate = None
+            self._arm_hold_history.append(target)
+            return
+        deviation = float(np.abs(target - self._arm_hold_reference).max())
+        if deviation <= ARM_HOLD_RELEASE_RAD:
+            self._arm_hold_release_candidate = None
+            return
+        if self._arm_hold_release_candidate is None:
+            self._arm_hold_release_candidate = self.tick
+            return
+        if self.tick - self._arm_hold_release_candidate >= self._arm_hold_release_ticks():
+            self._arm_hold_active = False
+            self._arm_hold_released_tick = self.tick
+            self._arm_hold_release_reason = (
+                f"controller arm setpoint moved {deviation:.3f} rad from the held reference"
+            )
+
+    def _arm_hold_release_ticks(self) -> int:
+        dt = max(self.profile.physics_dt, 1e-6)
+        return max(1, int(round(ARM_HOLD_RELEASE_SUSTAIN_S / dt)))
+
+    def _write_reset_pose_hold(self) -> None:
+        """Keep the held upper limb at its pose while the hold is armed."""
+        if not self._arm_hold_active or not self._reset_pose_indices or not self._arm_target_indices:
+            return
+        import torch
+
+        positions = self._robot.data.joint_pos.clone()
+        velocities = self._robot.data.joint_vel.clone()
+        for name, index in zip(self._reset_pose, self._reset_pose_indices):
+            positions[0, index] = float(self._reset_pose[name])
+            velocities[0, index] = 0.0
+        self._robot.write_joint_state_to_sim(positions, velocities)
+        if self._arm_hold_writes == 0:
+            # One record per episode: the pose that was written and the state the
+            # articulation reads back immediately after the write.  Without this
+            # the claim "the held pose is where the robot is" would rest on the
+            # difference between two files rather than on one measurement.
+            self._log_reset_pose_write()
+        self._arm_hold_writes += 1
+
+    def _log_reset_pose_write(self) -> None:
+        import numpy as np
+
+        realized = self._robot.data.joint_pos[0].detach().cpu().numpy()
+        print(
+            json.dumps(
+                {
+                    "event": "isaac_g1_reset_pose",
+                    "episode_id": self.episode_id,
+                    "tick": self.tick,
+                    "hold": bool(self.reset_pose_hold),
+                    "joints": list(self._reset_pose or {}),
+                    "intended_rad": [float(self._reset_pose[name]) for name in self._reset_pose],
+                    "realized_rad": [float(realized[index]) for index in self._reset_pose_indices],
+                    "max_abs_difference_rad": float(np.abs(
+                        np.asarray([self._reset_pose[name] for name in self._reset_pose])
+                        - realized[self._reset_pose_indices]).max()),
+                }
+            ),
+            flush=True,
+        )
+
+    def _reset_pose_status(self) -> dict[str, Any] | None:
+        if self.reset_pose_file is None:
+            return None
+        return {
+            "enabled": True,
+            "hold": bool(self.reset_pose_hold),
+            "pose_file": str(self.reset_pose_file),
+            "joints": sorted(self._reset_pose or {}),
+            "joints_held": len(self._reset_pose or {}),
+            "hold_active": self._arm_hold_active,
+            "hold_writes": self._arm_hold_writes,
+            "reference_rad": (
+                None if self._arm_hold_reference is None
+                else [float(v) for v in self._arm_hold_reference]
+            ),
+            "released_tick": self._arm_hold_released_tick,
+            "released_sim_s": (
+                None if self._arm_hold_released_tick is None
+                else self._arm_hold_released_tick * self.profile.physics_dt
+            ),
+            "release_reason": self._arm_hold_release_reason,
+        }
 
     def _request_reset_from_ui(self) -> None:
         """Queue reset work for the simulation-loop boundary."""
@@ -759,6 +1033,28 @@ class SimulatorService:
                     "event": "isaac_g1_reset_requested",
                     "source": source,
                     "control_mode": self._control_mode,
+                    "episode_id": self.episode_id,
+                }
+            ),
+            flush=True,
+        )
+        return True
+
+    def _request_shutdown_from_service(self) -> bool:
+        """End the run at the simulation-loop boundary, on the loop's own terms.
+
+        Called on the control service thread; the loop notices the flag at its
+        next iteration and leaves through the same path a ``--duration`` expiry
+        takes, so the video is finalized and the summary, tracking Parquet and
+        sample stream are written before the process exits.
+        """
+        self._pending_shutdown = True
+        print(
+            json.dumps(
+                {
+                    "event": "isaac_g1_shutdown_requested",
+                    "source": "control",
+                    "physics_tick": self.tick,
                     "episode_id": self.episode_id,
                 }
             ),
@@ -821,6 +1117,12 @@ class SimulatorService:
                 articulation_props=sim_utils.ArticulationRootPropertiesCfg(fix_root_link=False),
             )
         robot_cfg.spawn.articulation_props.fix_root_link = robot_spec.fixed_base
+        # An undeclared self-collision setting leaves G1_29DOF_CFG's own value
+        # (False) in place, so it is only overridden when the profile says so.
+        if robot_spec.self_collisions is not None:
+            robot_cfg.spawn.articulation_props.enabled_self_collisions = (
+                robot_spec.self_collisions
+            )
         robot_cfg.spawn.rigid_props.disable_gravity = (
             robot_spec.fixed_base if robot_spec.disable_gravity is None else robot_spec.disable_gravity
         )
@@ -841,7 +1143,7 @@ class SimulatorService:
                     rigid_props=sim_utils.RigidBodyPropertiesCfg(),
                     mass_props=sim_utils.MassPropertiesCfg(mass=cube.mass_kg),
                     collision_props=sim_utils.CollisionPropertiesCfg(),
-                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=_CUBE_DIFFUSE_RGB[cube.color]),
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=cube_diffuse_rgb(cube)),
                     physics_material=sim_utils.RigidBodyMaterialCfg(
                         friction_combine_mode="max",
                         restitution_combine_mode="min",
@@ -1215,14 +1517,54 @@ class SimulatorService:
         )
 
     def _align_joint_dynamics(self) -> None:
-        """Match the passive joint dynamics of the compiled SONIC MJCF."""
+        """Match the passive joint dynamics of the plant this run claims.
+
+        ``sonic_mujoco`` (historic default) mirrors the compiled deployment
+        MJCF: armature 0.01, viscous 0.05 N*m*s/rad, Coulomb 0.1-0.2 N*m, one
+        value per family across every joint.
+
+        ``sonic_training`` mirrors the training rig's own actuator config
+        instead, and that config is **per group, not one value**:
+
+        ==================  ==========================================
+        group               armature
+        ==================  ==========================================
+        hip pitch/roll/knee 0.025101925  (ARMATURE_7520_22)
+        hip yaw             0.010177520  (ARMATURE_7520_14)
+        ankle pitch/roll    0.007219450  (2 * ARMATURE_5020)
+        waist roll/pitch    0.007219450  (2 * ARMATURE_5020)
+        waist yaw           0.010177520  (ARMATURE_7520_14)
+        shoulder/elbow/
+          wrist roll        0.003609725  (ARMATURE_5020)
+        wrist pitch/yaw     0.004250000  (ARMATURE_4010)
+        ==================  ==========================================
+
+        The values are not typed here: :mod:`training_dynamics` evaluates the
+        same ``ARMATURE_*`` constants and per-group mapping out of the pinned
+        ``g1.py``, so the table above is documentation and the file is the
+        source of truth.  Writing one flat armature would mis-set the leg chain
+        by up to 2.5x (0.0251 vs 0.01), which is why this mode is per joint.
+
+        Friction: the training config sets no ``friction``, ``dynamic_friction``
+        or ``viscous_friction`` for any group, and the URDF authors no
+        ``<dynamics>``, so IsaacLab's zero defaults apply -- the friction terms
+        are genuinely zero in training.
+
+        Caveat, stated because it is unresolved: this aligns armature and
+        friction only.  The asset's joint *limits* and the actuator ``effort_limit``
+        path are not part of this mode, and the per-link inertia tensors are
+        covered by the mass alignment's own limitation (see
+        :meth:`_align_body_masses`).
+        """
         mode = self._controller_config.get("joint_dynamics_alignment")
         if mode is None:
             return
-        if mode != "sonic_mujoco":
+        if mode not in JOINT_DYNAMICS_ALIGNMENT_MODES:
             raise CommandError(
-                f"controller.joint_dynamics_alignment must be 'sonic_mujoco', got {mode!r}"
+                f"controller.joint_dynamics_alignment must be one of "
+                f"{JOINT_DYNAMICS_ALIGNMENT_MODES}, got {mode!r}"
             )
+        training = mode == "sonic_training"
 
         import torch
 
@@ -1244,19 +1586,67 @@ class SimulatorService:
             raise CommandError(f"MuJoCo joint dynamics do not cover asset joints: {missing}")
 
         joint_ids = list(range(len(names)))
-        armature = torch.full(
-            (1, len(names)), MUJOCO_JOINT_ARMATURE, device=self._robot.device
+        unresolved: list[str] = []
+        if training:
+            from .training_dynamics import (
+                TrainingDynamicsError,
+                load_training_joint_armature,
+                resolve_armature,
+            )
+
+            cfg_path = str(
+                self._controller_config.get("training_dynamics_model_path", DEFAULT_TRAINING_CFG)
+            )
+            try:
+                entries, _constants = load_training_joint_armature(cfg_path)
+            except TrainingDynamicsError as error:
+                # Fail closed: a partial armature would be a silently wrong plant.
+                raise CommandError(f"cannot read the training joint dynamics: {error}") from error
+            armature_values, unresolved = resolve_armature(names, entries)
+            # The training actuator config covers exactly the 29 body joints
+            # (legs 8, feet 4, waist 3, arms 14); it declares no hand group, and
+            # the URDF authors no <dynamics>, so a URDF->USD conversion leaves
+            # the 14 Dex3 joints at zero armature and zero friction.  That is a
+            # fact about the training plant, not a gap in the alignment.
+            hand_joint_names_set = {
+                name
+                for side in ("left", "right")
+                if self._hand_layouts[side] is not None
+                for name in self._hand_layouts[side].names
+            }
+            unresolved_body = [name for name in unresolved if name not in hand_joint_names_set]
+            if unresolved_body:
+                # A *body* joint the training config does not speak about means
+                # the parse missed a group.  Fail closed: a partial armature
+                # would be a silently wrong plant.
+                raise CommandError(
+                    f"the training config declares no armature for body joints "
+                    f"{unresolved_body}; refusing to claim a training-plant alignment"
+                )
+            unresolved_hands = [name for name in unresolved if name in hand_joint_names_set]
+            viscous_value = 0.0
+            coulomb_values = [0.0] * len(names)
+        else:
+            armature_values = [MUJOCO_JOINT_ARMATURE] * len(names)
+            viscous_value = MUJOCO_JOINT_VISCOUS_FRICTION
+            coulomb_values = [friction_by_name[name] for name in names]
+            unresolved_hands = []
+
+        armature = torch.tensor(
+            [armature_values], device=self._robot.device, dtype=torch.float32
         )
         coulomb = torch.tensor(
-            [[friction_by_name[name] for name in names]],
-            device=self._robot.device,
-            dtype=torch.float32,
+            [coulomb_values], device=self._robot.device, dtype=torch.float32
         )
         viscous = torch.full(
-            (1, len(names)), MUJOCO_JOINT_VISCOUS_FRICTION, device=self._robot.device
+            (1, len(names)), viscous_value, device=self._robot.device
         )
         before = self._robot.data.joint_armature[0].clone()
         self._robot.write_joint_armature_to_sim(armature, joint_ids=joint_ids)
+        # All four friction channels are written on both modes: Isaac Sim 5.x
+        # keeps dynamic and viscous friction as separate properties, so writing
+        # only the Coulomb pair would leave a viscous term alive on the dynamic
+        # channel.
         self._robot.write_joint_friction_coefficient_to_sim(
             coulomb,
             joint_dynamic_friction_coeff=coulomb,
@@ -1273,15 +1663,29 @@ class SimulatorService:
         self._robot.data.default_joint_viscous_friction_coeff = (
             self._robot.data.joint_viscous_friction_coeff.clone()
         )
+        armature_by_joint = {name: value for name, value in zip(names, armature_values)}
         self._joint_dynamics_alignment = {
             "mode": mode,
             "joints": len(names),
             "armature_before_min": round(float(before.min()), 6),
             "armature_before_max": round(float(before.max()), 6),
-            "armature_after": MUJOCO_JOINT_ARMATURE,
-            "viscous_friction_after": MUJOCO_JOINT_VISCOUS_FRICTION,
-            "coulomb_friction_min": min(friction_by_name.values()),
-            "coulomb_friction_max": max(friction_by_name.values()),
+            "armature_after": (
+                round(min(armature_values), 9)
+                if min(armature_values) == max(armature_values)
+                else {
+                    "min": round(min(armature_values), 9),
+                    "max": round(max(armature_values), 9),
+                }
+            ),
+            # The per-joint vector, so a run's plant is reconstructible without
+            # re-deriving it from the config file.
+            "armature_by_joint": armature_by_joint,
+            "viscous_friction_after": viscous_value,
+            "coulomb_friction_min": min(coulomb_values),
+            "coulomb_friction_max": max(coulomb_values),
+            # The Dex3 joints the training config does not actuate: zero armature
+            # and zero friction, reported rather than left implicit.
+            "hand_joints_unactuated_in_training": sorted(unresolved_hands),
         }
         print(
             json.dumps({"event": "isaac_g1_joint_dynamics_alignment", **self._joint_dynamics_alignment}),
@@ -1289,29 +1693,79 @@ class SimulatorService:
         )
 
     def _align_body_masses(self) -> None:
-        """Give the asset the masses of the model the controller was tuned for.
+        """Give the asset the masses of the plant this run claims to match.
 
-        The profile declares this explicitly because it changes the robot's
-        physics. The values come from the pinned MuJoCo model itself, so the
-        two sides cannot drift apart by someone retyping a table.
+        ``sonic_mujoco`` is the deployment simulator's MuJoCo model.  It is the
+        plant the *evaluation* controller was tuned against and the one the
+        historic runs used.
+
+        ``sonic_training`` is the plant the policy was trained on.  It is **not**
+        the URDF's raw per-link mass table: the training rig's ``UrdfFileCfg``
+        converts that URDF with ``merge_fixed_joints=True``, so the head, the
+        palms and the contour/logo shells are folded into their parents before
+        the robot is spawned.  Aligning to the raw table would both invent a
+        wrist/palm difference the trained plant does not have and drop the
+        merged-away mass entirely.  :func:`load_urdf_merged_body_masses` performs
+        the same merge, so the two plants are compared body-for-body.
+
+        The two are much closer than a raw-table comparison suggests, and what
+        remains is *not* uniform:
+
+        * the arms are resolved exactly -- the merged training ``wrist_yaw`` is
+          0.457415 kg against the MuJoCo model's 0.457415 kg (identical to 1e-8),
+          so there is **no arm mass mismatch at all**;
+        * ``torso_link`` is +1.781 kg heavier in the MuJoCo model, whose gravity
+          moment at ``waist_pitch`` is small -- the torso CoM sits ~0.003 m
+          forward of its origin, so of order 0.07 N*m;
+        * ``waist_yaw`` (+0.030) and ``waist_roll`` (-0.039) differ by small
+          amounts; and
+        * ``pelvis`` differs by +0.001 kg (the contour shell).
+
+        Net: the MuJoCo model totals 36.1652 kg against the training plant's
+        34.3942 kg, and the difference is a torso/waist redistribution rather
+        than an arm-load change.
+
+        The profile declares which plant it wants because the choice changes the
+        robot's physics; the values are read from the pinned files, never
+        transcribed, so the two sides cannot drift apart.
         """
         mode = self._controller_config.get("mass_alignment")
         if mode is None:
             return
-        if mode != "sonic_mujoco":
-            raise CommandError(f"controller.mass_alignment must be 'sonic_mujoco', got {mode!r}")
 
         from .masses import (
             DEFAULT_MUJOCO_MODEL,
+            DEFAULT_TRAINING_URDF,
+            MASS_ALIGNMENT_MODES,
             WELDED_BODY_MASS_KG,
             load_mujoco_body_masses,
+            load_urdf_merged_body_masses,
             plan_alignment,
         )
 
-        path = str(self._controller_config.get("mujoco_model_path", DEFAULT_MUJOCO_MODEL))
-        mujoco_masses = load_mujoco_body_masses(path)
+        if mode not in MASS_ALIGNMENT_MODES:
+            raise CommandError(
+                f"controller.mass_alignment must be one of {MASS_ALIGNMENT_MODES}, got {mode!r}"
+            )
+
+        training = mode == "sonic_training"
+        default_path = DEFAULT_TRAINING_URDF if training else DEFAULT_MUJOCO_MODEL
+        path = str(self._controller_config.get("mass_model_path", default_path))
+        merged_away: list[str] = []
+        if training:
+            # The merge is the training rig's own conversion step, so the
+            # comparison is against the plant it actually spawns.
+            model_masses, merged_away = load_urdf_merged_body_masses(path)
+        else:
+            model_masses = load_mujoco_body_masses(path)
         body_names = list(self._robot.body_names)
-        indices, values, welded = plan_alignment(body_names, mujoco_masses)
+        indices, values, welded = plan_alignment(
+            body_names,
+            model_masses,
+            # Both models are now welded, so an asset body neither names is a
+            # welded child and gets a negligible mass in both modes.
+            missing="weld",
+        )
 
         import torch
 
@@ -1321,7 +1775,7 @@ class SimulatorService:
             current[:, index] = float(value)
         self._robot.root_physx_view.set_masses(current, torch.arange(current.shape[0]))
         after = float(current.sum())
-        expected = sum(mujoco_masses[name] for name in body_names if name in mujoco_masses)
+        expected = sum(model_masses[name] for name in body_names if name in model_masses)
         self._robot.data.default_mass = current.clone()
         self._mass_alignment = {
             "mode": mode,
@@ -1332,6 +1786,9 @@ class SimulatorService:
             "total_mass_before_kg": round(before, 4),
             "total_mass_after_kg": round(after, 4),
             "model_total_kg": round(expected + len(welded) * WELDED_BODY_MASS_KG, 4),
+            # The links the training conversion folded into their parents.  Empty
+            # for the MuJoCo mode, which is welded in the file itself.
+            "merged_fixed_links": merged_away,
         }
         print(json.dumps({"event": "isaac_g1_mass_alignment", **self._mass_alignment}), flush=True)
 
@@ -1475,6 +1932,7 @@ class SimulatorService:
                 valid = False
             if valid:
                 self._apply_body_command(command.body)
+                self._update_reset_pose_hold(command.body)
                 self._apply_hand_command(command.left_hand, "left")
                 self._apply_hand_command(command.right_hand, "right")
                 if self.tick % 4 == 0:
@@ -1531,6 +1989,14 @@ class SimulatorService:
                 for value in self._robot.data.body_quat_w[0, self._torso_body_id].tolist()
             ],
         }
+        if self.gravity_feedforward:
+            # Only a run that asked for the feed-forward carries the column, so
+            # the default telemetry keeps the exact schema it had without it.
+            row["body_gravity_feedforward_torque"] = self._last_body_gravity_torque
+        if self.reset_pose_file is not None:
+            # Same rule for the opt-in reset pose: the column exists only when a
+            # run asked for the pose, and it says whether the hold was still on.
+            row["reset_pose_hold"] = bool(self._arm_hold_active)
         for side, hand_command in (("left", command.left_hand), ("right", command.right_hand)):
             row[f"{side}_hand_target"] = list(hand_command.q) if hand_command is not None else None
             row[f"{side}_hand_velocity_target"] = list(hand_command.dq) if hand_command is not None else None
@@ -1550,6 +2016,26 @@ class SimulatorService:
         if self._kinematic is not None:
             return self._kinematic_rows
         return self._tracking_rows
+
+    def tracking_columns(self) -> dict[str, Any] | None:
+        """Joint ordering behind the tracking rows, so the Parquet is self-describing.
+
+        The rows carry index-aligned vectors only; without this a later reader
+        would have to assume the asset's joint order and could silently read the
+        left arm as the right one.
+        """
+        if self._body_layout is None:
+            return None
+        return {
+            "body_joints": list(self._body_layout.names),
+            "left_hand_joints": (
+                list(self._hand_layouts["left"].names) if self._hand_layouts["left"] else []
+            ),
+            "right_hand_joints": (
+                list(self._hand_layouts["right"].names) if self._hand_layouts["right"] else []
+            ),
+        }
+
     def _apply_body_command(self, command: JointCommand) -> None:
         import torch
 
@@ -1566,6 +2052,11 @@ class SimulatorService:
         tau_ff = torch.tensor(command.tau, device=self._robot.device, dtype=torch.float32)
         # The parity formula the plan fixes, identical to the official MuJoCo loop.
         torque = tau_ff + kp * (q_command - measured_q) + kd * (dq_command - measured_dq)
+        if self.gravity_feedforward:
+            # Adding the term before the clamp keeps one torque law and one
+            # limit: the feed-forward is part of the commanded torque, not a
+            # second path around the safety checks.
+            torque = torque + self._body_gravity_torques()
         torque = torch.clamp(torque, -self._body_limit_tensor, self._body_limit_tensor)
         self._write_effort("body", layout.indices, torque)
         error = (q_command - measured_q).abs()
@@ -1592,6 +2083,59 @@ class SimulatorService:
             )
         if self.test_mode == "controlled-hold":
             self._record_tracking(measured_q, q_command)
+
+    def _body_gravity_torques(self) -> Any:
+        """PhysX's own generalized gravity torque for the body joints.
+
+        The query answers with the DOF forces that hold the articulation against
+        gravity at its *current* pose, computed from the solver's model -- the
+        masses this profile aligned to the pinned MuJoCo model and the gravity
+        the scene actually runs with -- so the feed-forward is the physics of
+        this run rather than a transcribed constant.  Sign is used as returned:
+        the vector is what *counteracts* gravity, which is why it is added to
+        the commanded torque.  Hands are left out: they are driven by their own
+        command path, and this term exists for the body chain the policy's
+        decoded targets move.
+        """
+        import torch
+
+        layout = self._body_layout
+        assert layout is not None
+        raw = self._robot.root_physx_view.get_gravity_compensation_forces()
+        offset, columns = body_gravity_columns(
+            int(raw.shape[-1]), len(self._robot.joint_names), layout.indices
+        )
+        self._gravity_offset = offset
+        # One instance: the returned rows are the envs of the physics view, and
+        # this service owns exactly one.  Keep the joint vector 1-D so it stays
+        # the same shape as the PD term it is added to.
+        values = raw[0, columns]
+        if not bool(torch.isfinite(values).all()):
+            # Same contract as a malformed command: refuse the tick and let the
+            # loop's own passive fallback deal with it, never stage a NaN.
+            raise CommandError("PhysX returned a non-finite generalized gravity torque")
+        self._gravity_ticks += 1
+        magnitude = float(values.abs().max())
+        self._gravity_max_abs_nm = max(self._gravity_max_abs_nm, magnitude)
+        self._gravity_sum_abs_nm += float(values.abs().mean())
+        self._last_body_gravity_torque = [float(value) for value in values.tolist()]
+        return values
+
+    def _gravity_feedforward_status(self) -> dict[str, Any]:
+        return {
+            "enabled": self.gravity_feedforward,
+            "source": "root_physx_view.get_gravity_compensation_forces()",
+            "applied_joints": (
+                list(self._body_layout.names) if self._body_layout is not None else []
+            ),
+            "dof_offset": self._gravity_offset,
+            "applied_ticks": self._gravity_ticks,
+            "mean_abs_nm": (
+                self._gravity_sum_abs_nm / self._gravity_ticks if self._gravity_ticks else None
+            ),
+            "max_abs_nm": self._gravity_max_abs_nm if self._gravity_ticks else None,
+            "last_term_nm": self._last_body_gravity_torque,
+        }
 
     def _record_tracking(self, measured_q: Any, q_command: Any) -> None:
         if self._hold_target_q is None:
@@ -1724,6 +2268,7 @@ class SimulatorService:
                 self.control_endpoint,
                 on_reset=self._request_reset_from_service,
                 status_provider=self._control_status,
+                on_shutdown=self._request_shutdown_from_service,
             )
             self._reset_control.start()
             if not self._reset_control.wait_ready() or self._reset_control.error is not None:
@@ -1802,9 +2347,19 @@ class SimulatorService:
             name: float(self._robot.data.body_pos_w[0, index, 2])
             for name, index in self._palm_body_ids.items()
         }
+        # The height alone cannot say where a hand is; the full world pose of
+        # each palm is what makes "the hand is held high" a measured statement.
+        poses = {
+            name: [
+                float(value) for value in self._robot.data.body_pos_w[0, index].tolist()
+            ]
+            + [float(value) for value in self._robot.data.body_quat_w[0, index].tolist()]
+            for name, index in self._palm_body_ids.items()
+        }
         surface = self.profile.scene.table.surface_height_m if self.profile.scene is not None else None
         return {
             "palm_z_m": heights,
+            "palm_pose_w": poses,
             "min_palm_z_m": min(heights.values()),
             "max_palm_z_m": max(heights.values()),
             "table_surface_height_m": surface,
@@ -1975,6 +2530,10 @@ class SimulatorService:
             entry: dict[str, Any] = {
                 "declared_center_z_m": cube.position_m[2],
                 "live_center_z_m": None,
+                # The full world pose, so a stack (one cube on another) is a
+                # measurement rather than an inference from the heights alone.
+                "live_center_xyz_m": None,
+                "live_quaternion_wxyz": None,
                 "expected_center_z_m": (
                     worktop + cube.size_m[2] / 2.0 if worktop is not None else None
                 ),
@@ -1986,6 +2545,10 @@ class SimulatorService:
                 rigid = self._scene[f"cube_{cube.color}"]
                 live = [float(value) for value in rigid.data.root_pos_w[0, :3]]
                 entry["live_center_z_m"] = live[2]
+                entry["live_center_xyz_m"] = live
+                entry["live_quaternion_wxyz"] = [
+                    float(value) for value in rigid.data.root_quat_w[0].tolist()
+                ]
                 entry["displacement_xy_m"] = (
                     (live[0] - cube.position_m[0]) ** 2 + (live[1] - cube.position_m[1]) ** 2
                 ) ** 0.5
@@ -2025,6 +2588,9 @@ class SimulatorService:
             ],
             stdin=subprocess.PIPE,
         )
+        if self.video_timestamps_output is not None:
+            self.video_timestamps_output.parent.mkdir(parents=True, exist_ok=True)
+            self._video_timestamps = self.video_timestamps_output.open("w", encoding="utf-8")
 
     def _record_video_frame(self) -> None:
         if self._video_process is None or self._video_process.stdin is None:
@@ -2042,12 +2608,36 @@ class SimulatorService:
             if image.shape != (720, 960, 3):
                 raise ValueError(f"validation camera shape is {image.shape}, expected (720, 960, 3)")
             self._video_process.stdin.write(image.tobytes())
+            self._write_video_timestamp()
             self._video_frames += 1
         except (BrokenPipeError, TypeError, ValueError) as exc:
             self._video_error = f"{type(exc).__name__}: {exc}"
 
+    def _write_video_timestamp(self) -> None:
+        """One line per recorded frame: the only exact video<->state mapping.
+
+        The frame index is the frame's position in the file, so a signal onset
+        expressed in ticks or simulation time converts to a video time by
+        looking its frame up here instead of assuming the file plays at the
+        declared rate (a render loop that runs slower than real time still
+        writes one frame per render, and ffmpeg then plays them back at fps).
+        """
+        if self._video_timestamps is None:
+            return
+        row = {
+            "frame": self._video_frames,
+            "tick": self.tick,
+            "sim_s": self.tick * self.profile.physics_dt,
+            "wall_time_ns": time.time_ns(),
+            "episode_id": self.episode_id,
+        }
+        self._video_timestamps.write(json.dumps(row, separators=(",", ":")) + "\n")
+
     def _finish_video_recording(self) -> None:
         process = self._video_process
+        if self._video_timestamps is not None:
+            self._video_timestamps.close()
+            self._video_timestamps = None
         if process is None:
             return
         if process.stdin is not None:
@@ -2069,9 +2659,15 @@ class SimulatorService:
         self._flush_effort()
         self._sim.step(render=False)
         self.tick += 1
+        # The held upper limb is authored after the step, so the next control
+        # tick, the published state and the tracking row all see the pose rather
+        # than a drive already pulling the arm away from it.
+        self._write_reset_pose_hold()
         if self.replay_clock_output is not None and self.tick % 4 == 0:
             self.replay_clock_output.parent.mkdir(parents=True, exist_ok=True)
-            self.replay_clock_output.write_text(f"{self.tick * self.profile.physics_dt:.6f}\n", encoding="ascii")
+            temporary = self.replay_clock_output.with_name(self.replay_clock_output.name + ".tmp")
+            temporary.write_text(f"{self.tick * self.profile.physics_dt:.6f}\n", encoding="ascii")
+            os.replace(temporary, self.replay_clock_output)
         render_interval = (
             self._kinematic["ticks_per_frame"] if self._kinematic is not None else self.profile.render_interval
         )
@@ -2200,12 +2796,23 @@ class SimulatorService:
         if self.profile.scene is not None:
             sample = self._palm_height_sample()
             if sample is not None:
-                print(
-                    json.dumps(
-                        {"event": "isaac_g1_palm_height", **sample, "scene": self._scene_probe()}
-                    ),
-                    flush=True,
-                )
+                record = {"event": "isaac_g1_palm_height", **sample, "scene": self._scene_probe()}
+                print(json.dumps(record), flush=True)
+                self._write_sample(record)
+
+    def _write_sample(self, record: dict[str, Any]) -> None:
+        """Append one timestamped sample to the machine-readable series file.
+
+        The per-second line in the log carries no wall clock, so a policy
+        campaign that has to align hand heights with actions, video frames and
+        bridge telemetry needs this file; the log line stays for operators.
+        """
+        if self.samples_output is None:
+            return
+        self.samples_output.parent.mkdir(parents=True, exist_ok=True)
+        with self.samples_output.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({**record, "wall_time_ns": time.time_ns()}, separators=(",", ":")))
+            handle.write("\n")
 
     def run(self) -> dict[str, Any]:
         self.start()
@@ -2217,7 +2824,7 @@ class SimulatorService:
             while self.app.is_running() and (
                 self.duration is None
                 or time.monotonic() - self._run_started < self.duration
-            ) and not self._kinematic_finished():
+            ) and not self._kinematic_finished() and not self._pending_shutdown:
                 if self._pending_ui_reset:
                     self._pending_ui_reset = False
                     # Match the official Isaac Lab reset order: write state,
@@ -2292,6 +2899,7 @@ class SimulatorService:
             "render_interval": self.profile.render_interval,
             "physics_pacing": "realtime" if self._controller is not None else "free",
             "pacing_overruns": self._pacing_overruns,
+            "shutdown_requested": self._pending_shutdown,
         }
 
     def _runtime_summary(self) -> dict[str, Any]:
@@ -2300,6 +2908,8 @@ class SimulatorService:
             "profile_id": self.profile.profile_id,
             **self._accounting(),
             "controller": self._controller_status(),
+            "gravity_feedforward": self._gravity_feedforward_status(),
+            "reset_pose": self._reset_pose_status(),
             "camera_service": (
                 self._camera_service_final
                 if self._camera_service_final is not None
@@ -2311,8 +2921,20 @@ class SimulatorService:
             "video": {
                 "path": str(self.record_video) if self.record_video is not None else None,
                 "frames": self._video_frames,
+                "fps": (
+                    self._video_fps or (1.0 / self.profile.camera_update_period)
+                    if self.record_video is not None
+                    else None
+                ),
+                "timestamps_path": (
+                    None if self.video_timestamps_output is None else str(self.video_timestamps_output)
+                ),
                 "error": self._video_error,
             },
+            "samples": {
+                "path": None if self.samples_output is None else str(self.samples_output),
+            },
+            "tracking_columns": self.tracking_columns(),
         }
         kinematic = self._kinematic_summary()
         if kinematic is not None:
@@ -2348,6 +2970,8 @@ class SimulatorService:
             "hand_fallback": self._hand_fallback,
             "mass_alignment": self._mass_alignment,
             "joint_dynamics_alignment": self._joint_dynamics_alignment,
+            "self_collisions": self.profile.robot.self_collisions,
+            "initial_pose_model": self._initial_pose_model,
             "support": self._support_status(),
             "effort_limits": self._effort_limit_checks,
         }

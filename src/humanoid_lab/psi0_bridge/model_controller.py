@@ -49,6 +49,9 @@ class ModelController:
         initial_id: str,
         reset_endpoint: str = "tcp://localhost:5559",
         keyboard_endpoint: str = "tcp://*:5580",
+        warmstart: Any | None = None,
+        warmstart_delay_s: float = 0.0,
+        initial_pose: Any | None = None,
         log: Callable[[str], None] = lambda message: None,
     ) -> None:
         import zmq
@@ -57,6 +60,13 @@ class ModelController:
         self.psi_server = psi_server
         self.groot = groot
         self.router = router
+        #: Opt-in demonstration-token warm start (``None`` unless asked for).
+        self.warmstart = warmstart
+        self.warmstart_delay_s = float(warmstart_delay_s)
+        #: Opt-in delivery of the VLA client's own initial-pose command over the
+        #: settle (``None`` unless asked for); mutually exclusive with the warm
+        #: start, which owns the same window.
+        self.initial_pose = initial_pose
         self.monitor = psi_session.monitor
         self.reset_endpoint = reset_endpoint
         self._verify_psi = verify_psi
@@ -111,6 +121,10 @@ class ModelController:
         else:
             if not self.groot.alive:
                 raise CheckpointError("GR00T backend is not running")
+            # Both settle commands end here for the same reason: the source
+            # switch below is the atomic generation change that hands the SONIC
+            # action port to the policy, so no settle token can follow it.
+            self._halt_settle()
             self.router.select("groot")
             self.router.resume()
             self._send_key("p")
@@ -120,6 +134,7 @@ class ModelController:
         return self.status()
 
     def stop(self) -> dict[str, Any]:
+        self._halt_settle()
         self.router.halt()
         active = self._active()
         if active.kind == "psi":
@@ -132,13 +147,14 @@ class ModelController:
         return self.status()
 
     def reset(self) -> dict[str, Any]:
+        clock_baseline = None if self.warmstart is None else self.warmstart.clock_sample()
         self.stop()
         active = self._active()
         if active.kind == "groot":
             self.groot.stop()
         time.sleep(0.3)
         try:
-            IsaacResetClient(self.reset_endpoint, timeout_ms=2000).request_reset()
+            self._request_reset()
         except ResetError as exc:
             with self._lock:
                 self._state = ERROR
@@ -157,7 +173,32 @@ class ModelController:
         with self._lock:
             self._state = IDLE
             self._error = None
+        self._arm_settle(active, clock_baseline=clock_baseline)
         return self.status()
+
+    def _request_reset(self) -> None:
+        """Apply the reset, waiting for the real boundary only when it matters.
+
+        The endpoint's ``reset_queued`` reply means the loop *accepted* the work,
+        not that it ran it: the callback sets a flag the simulation loop consumes
+        at its next iteration.  That is enough for a plain selection, whose next
+        ``Start`` waits for a fresh observation anyway, so the default stays the
+        legacy queue-acknowledged call and no existing run changes timing.
+
+        A session that publishes a *settle command* -- the opt-in initial-pose
+        handshake or warm start -- is different: that stream is aimed at the
+        controller's first post-reset decode, so firing it at the queue ack lets
+        the deployment reach SONIC before the scene moved, which is the race
+        ``hatalar.md`` A5 records.  With either one configured this waits for the
+        loop's ``episode_id`` to advance, so the settle always starts from the
+        applied reset.  A loop that never applies it fails the Reset closed.
+        """
+        client = IsaacResetClient(self.reset_endpoint, timeout_ms=2000)
+        if self.initial_pose is None and self.warmstart is None:
+            client.request_reset()
+            return
+        applied = client.request_reset_applied()
+        self._log(f"[reset] applied before the settle (episode_id {applied})")
 
     def switch(self, entry_id: str) -> dict[str, Any]:
         target = self.entry(entry_id)
@@ -211,6 +252,8 @@ class ModelController:
                 "endpoint": router["endpoint"], "last_time": _iso(router["last_time"]),
                 "last_index": router["source"], "sent": router["sent"],
             },
+            "warmstart": None if self.warmstart is None else self.warmstart.status(),
+            "initial_pose": None if self.initial_pose is None else self.initial_pose.status(),
             "model": active.brief(),
         }
 
@@ -245,6 +288,7 @@ class ModelController:
         return self.psi_session.preview_frame()
 
     def close(self) -> None:
+        self._halt_settle()
         self.router.halt()
         self.groot.stop()
         self.psi_server.stop()
@@ -256,7 +300,81 @@ class ModelController:
     def _active(self) -> ModelEntry:
         return self._entries[self.selected_id]
 
+    # -- opt-in settle commands --------------------------------------------
+
+    def _arm_settle(self, active: ModelEntry, *, clock_baseline: Any | None = None) -> None:
+        """Schedule whichever opt-in command owns this settle, if any.
+
+        The two are mutually exclusive by construction (the launcher refuses a
+        session configured with both): each one owns the whole window from the
+        end of the ``Reset`` to ``Start``, and each selects its own router source
+        so the deployment is driven by exactly one of them at a time.
+        """
+        if self._arm_initial_pose(active):
+            return
+        self._arm_warmstart(active, clock_baseline=clock_baseline)
+
+    def _arm_initial_pose(self, active: ModelEntry) -> bool:
+        """Deliver the VLA client's own initial-pose command over the settle.
+
+        Armed at the end of every ``Reset`` -- the start of the settle -- and
+        published at the deployment's control rate until ``Start`` halts it.  The
+        point of the handshake is that the *intended* initial-pose command is
+        what the deployment holds when the policy takes over, instead of whatever
+        token the previous rollout happened to leave behind.
+        """
+        if self.initial_pose is None:
+            return False
+        if active.kind != "groot":
+            self._log("[initial-pose] not armed: the selected backend is not GR00T")
+            return False
+        self.router.select("initial_pose")
+        self.router.resume()
+        self.initial_pose.arm(0.0)
+        self._log(
+            "[initial-pose] VLA client's initial-pose command armed for the settle "
+            f"(token sha256 {self.initial_pose.stream.source.get('token_sha256_f32', '')[:12]})"
+        )
+        return True
+
+    def _arm_warmstart(self, active: ModelEntry, *, clock_baseline: Any | None = None) -> None:
+        """Schedule the prepared token stream over the tail of the settle.
+
+        The router selects the warm-start source for the whole window, so the
+        settle's own commands (and nothing else) reach SONIC; the stream starts
+        after ``warmstart_delay_s`` and keeps publishing its last token until
+        ``Start`` stops it.  The GR00T backend is the only one this applies to:
+        a PSI selection is driven by this bridge's own client and never runs a
+        warm start.
+        """
+        if self.warmstart is None:
+            return
+        if active.kind != "groot":
+            self._log("[warmstart] not armed: the selected backend is not GR00T")
+            return
+        self.router.select("warmstart")
+        self.router.resume()
+        self.warmstart.arm(self.warmstart_delay_s, clock_baseline=clock_baseline)
+        self._log(
+            f"[warmstart] demo token stream armed for the settle tail "
+            f"(delay {self.warmstart_delay_s:.2f}s)"
+        )
+
+    def _halt_settle(self) -> None:
+        """Stop every opt-in settle command; safe to call at any transition."""
+        self._halt_initial_pose()
+        self._halt_warmstart()
+
+    def _halt_initial_pose(self) -> None:
+        if self.initial_pose is not None:
+            self.initial_pose.halt()
+
+    def _halt_warmstart(self) -> None:
+        if self.warmstart is not None:
+            self.warmstart.halt()
+
     def _stop_backend(self, entry: ModelEntry) -> None:
+        self._halt_settle()
         self.router.halt()
         if entry.kind == "psi":
             self.psi_session.stop()

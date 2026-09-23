@@ -323,14 +323,24 @@ def compare_reference_command_response(
         )
         feedforward = np.asarray(tracking["body_feedforward_torque"])[mask]
         applied = np.asarray(tracking["body_applied_torque"])[mask]
+        # A run that asked for the opt-in gravity feed-forward carries it as its
+        # own column; it is part of the commanded torque, so the identity has to
+        # include it or a real command would read as a reconstruction failure.
+        gravity = (
+            np.asarray(tracking["body_gravity_feedforward_torque"])[mask]
+            if "body_gravity_feedforward_torque" in tracking
+            else np.zeros_like(feedforward)
+        )
         action_components = {
             "left_arm_mean_abs_position_term_nm": float(np.abs(position_term[:, arm_indices]).mean()),
             "left_arm_mean_abs_velocity_term_nm": float(np.abs(velocity_term[:, arm_indices]).mean()),
             "left_arm_mean_abs_feedforward_nm": float(np.abs(feedforward[:, arm_indices]).mean()),
+            "left_arm_mean_abs_gravity_feedforward_nm": float(np.abs(gravity[:, arm_indices]).mean()),
             "left_arm_mean_abs_applied_nm": float(np.abs(applied[:, arm_indices]).mean()),
             "left_arm_mean_abs_torque_reconstruction_error_nm": float(
                 np.abs(position_term[:, arm_indices] + velocity_term[:, arm_indices]
-                       + feedforward[:, arm_indices] - applied[:, arm_indices]).mean()
+                       + feedforward[:, arm_indices] + gravity[:, arm_indices]
+                       - applied[:, arm_indices]).mean()
             ),
         }
     return {

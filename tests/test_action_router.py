@@ -73,6 +73,56 @@ class ActionRouterTest(unittest.TestCase):
         self.router.send_control(b"control")
         self.assertEqual(self.receive(), b"control")
 
+    def test_a_warm_start_stream_reaches_the_port_only_while_selected(self) -> None:
+        """The opt-in demo-token source is forwarded like any other, and the
+        hand-off to the policy is one atomic selection: nothing of the warm
+        start may follow it into the deployment."""
+        self.router.select("warmstart")
+        self.router.resume()
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            self.router.submit_warmstart(b"warm")
+            if self.output.poll(100):
+                break
+        self.assertEqual(self.receive(), b"warm")
+
+        self.router.select("groot")
+        self.router.resume()
+        time.sleep(0.1)
+        self.assertFalse(self.router.submit_warmstart(b"late-warm"))
+        self.groot.send(b"policy")
+        self.assertEqual(self.receive(), b"policy")
+        self.assertFalse(self.output.poll(100))
+
+    def test_halt_closes_the_warm_start_gate(self) -> None:
+        self.router.select("warmstart")
+        self.router.resume()
+        self.router.halt()
+        self.assertFalse(self.router.submit_warmstart(b"warm"))
+        with self.assertRaises(ValueError):
+            self.router.select("elsewhere")
+
+    def test_a_failing_recorder_cannot_stop_the_action_path(self) -> None:
+        """A recorder exception once killed this router thread on the first
+        GR00T message, and the whole episode ran with no commands at all."""
+        class Exploding:
+            def sample_frame(self, source: str) -> None:
+                raise IndexError("too many indices for array")
+
+            def applied_action(self, source: str, payload: bytes) -> None:
+                raise IndexError("too many indices for array")
+
+        self.router.telemetry = Exploding()
+        self.router.select("groot")
+        self.router.resume()
+        time.sleep(0.1)
+        self.groot.send(b"groot")
+        self.assertEqual(self.receive(), b"groot")
+        self.groot.send(b"groot-again")
+        self.assertEqual(self.receive(), b"groot-again")
+        self.assertIn("IndexError", self.router.status()["telemetry_error"] or "")
+        self.assertEqual(self.router.status()["sent"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

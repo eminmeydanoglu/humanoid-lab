@@ -85,7 +85,7 @@ def load_tracking(path: Path) -> dict[str, Any]:
         "rows": len(rows),
     }
     for name in ("body_velocity_target", "body_feedforward_torque", "body_kp", "body_kd",
-                 "body_applied_torque", "body_measured_velocity"):
+                 "body_applied_torque", "body_measured_velocity", "body_gravity_feedforward_torque"):
         if name in table.column_names:
             result[name] = stack(name)
     for side in ("left", "right"):

@@ -19,6 +19,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--profile", type=Path, required=True)
     parser.add_argument("--duration", type=float)
     parser.add_argument("--record-video", type=Path, help="record a fixed external validation camera to MP4")
+    parser.add_argument("--video-timestamps-output", type=Path,
+                        help="write one JSON line per recorded video frame (frame, tick, sim_s, wall_time_ns), "
+                             "the exact frame<->state mapping a cropped clip needs")
+    parser.add_argument("--samples-output", type=Path,
+                        help="append the per-second palm/scene sample to this JSONL file with a wall clock")
     parser.add_argument("--metrics-output", type=Path, help="write the final run summary as JSON")
     parser.add_argument("--tracking-output", type=Path, help="write 50 Hz body/hand command tracking as Parquet")
     parser.add_argument("--replay-clock-output", type=Path, help="publish simulation time for a paced offline latent replay")
@@ -30,6 +35,28 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--kinematic-label", default=None,
                         help="label recorded in the run summary for this kinematic replay")
     parser.add_argument("--test", choices=("passive-fall", "controlled-hold", "controller-hold"))
+    parser.add_argument(
+        "--gravity-feedforward",
+        action="store_true",
+        help="opt-in evaluation option: add PhysX's generalized gravity compensation torque of "
+        "the body joints to the commanded torque before the effort clamp. Off by default, which "
+        "keeps the pure PD loop of every existing run unchanged.",
+    )
+    parser.add_argument(
+        "--reset-pose-file",
+        type=Path,
+        default=None,
+        help="opt-in evaluation option: a JSON upper-limb (arms + Dex3 hands) joint->radians "
+        "pose applied at every reset in place of the profile's standing pose for exactly "
+        "those joints. Off by default; the lower body and the waist are never touched.",
+    )
+    parser.add_argument(
+        "--reset-pose-hold",
+        action="store_true",
+        help="with --reset-pose-file: hold the posed upper limb until the controller's own "
+        "arm setpoint moves (the first policy action) instead of letting the pre-policy "
+        "settle drive it away. Off by default.",
+    )
     parser.add_argument(
         "--controller",
         choices=("none",),
@@ -105,7 +132,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             show_head_camera=args.head_camera_window,
             test_mode=args.test,
             controller_provider=args.controller,
+            gravity_feedforward=args.gravity_feedforward,
+            reset_pose_file=args.reset_pose_file,
+            reset_pose_hold=args.reset_pose_hold,
             record_video=args.record_video,
+            video_timestamps_output=args.video_timestamps_output,
+            samples_output=args.samples_output,
             trajectory_reference=args.trajectory_reference,
             kinematic_reference=args.kinematic_reference,
             kinematic_label=args.kinematic_label,

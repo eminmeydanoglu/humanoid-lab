@@ -792,6 +792,7 @@ psi0_eval_on_signal() {
 
 psi0_isaac_eval() {
   local checkpoint_dir="" groot_checkpoint_dir="" base_run_dir="" checkpoint_step="" eval_args_str="" reason="" controller_rc=0
+  local policy_clock="simulation" policy_clock_file="" policy_clock_timeout_s="5.0"
   local bridge_index controller_job
   local -a eval_args=() isaac_args=()
   local profile_file=configs/profiles/isaac-g1-sonic-blockstacking-dex3.json
@@ -804,11 +805,64 @@ psi0_isaac_eval() {
       --checkpoint-step=*) checkpoint_step="${1#*=}"; shift ;;
       --groot-checkpoint-dir) groot_checkpoint_dir="${2:-}"; shift 2 ;;
       --groot-checkpoint-dir=*) groot_checkpoint_dir="${1#*=}"; shift ;;
+      # The released multi-task ψ-Dream checkpoint: a host-or-container path like
+      # --checkpoint-dir, mapped onto the mount the bridge reads from.
+      --psi-dream-checkpoint-dir) eval_args+=("$1" "$(psi0_eval_container_path "${2:-}")"); shift 2 ;;
+      --psi-dream-checkpoint-dir=*) eval_args+=("--psi-dream-checkpoint-dir=$(psi0_eval_container_path "${1#*=}")"); shift ;;
       --base-run-dir) base_run_dir="${2:-}"; shift 2 ;;
       --base-run-dir=*) base_run_dir="${1#*=}"; shift ;;
+      --policy-clock) policy_clock="${2:-}"; shift 2 ;;
+      --policy-clock=*) policy_clock="${1#*=}"; shift ;;
+      --policy-clock-file) policy_clock_file="${2:-}"; shift 2 ;;
+      --policy-clock-file=*) policy_clock_file="${1#*=}"; shift ;;
+      --policy-clock-timeout-s) policy_clock_timeout_s="${2:-}"; shift 2 ;;
+      --policy-clock-timeout-s=*) policy_clock_timeout_s="${1#*=}"; shift ;;
       --gui|--headless) isaac_args+=("$1"); shift ;;
       --duration) isaac_args+=("$1" "${2:-}"); shift 2 ;;
       --duration=*) isaac_args+=("$1"); shift ;;
+      # Isaac-side recording: the validation video, its frame<->state map, the
+      # per-second palm/scene samples, the 50 Hz tracking parquet and the run
+      # summary are what a rollout is analysed from, so they are named here
+      # instead of being swallowed by the bridge's own argument parser.
+      --record-video|--video-timestamps-output|--samples-output|--tracking-output|--metrics-output)
+        isaac_args+=("$1" "${2:-}"); shift 2 ;;
+      --record-video=*|--video-timestamps-output=*|--samples-output=*|--tracking-output=*|--metrics-output=*)
+        isaac_args+=("$1"); shift ;;
+      --replay-clock-output) isaac_args+=("$1" "${2:-}"); shift 2 ;;
+      --replay-clock-output=*) isaac_args+=("$1"); shift ;;
+      # Opt-in evaluation control change: the simulator adds PhysX's generalized
+      # gravity compensation torque of the body joints.  Off unless asked for.
+      --gravity-feedforward) isaac_args+=("$1"); shift ;;
+      # Opt-in evaluation reset change: an upper-limb pose (arms + Dex3 hands)
+      # applied at every reset, optionally held until the controller takes the
+      # arms over.  Off unless asked for, so every default command is unchanged.
+      --reset-pose-file) isaac_args+=("$1" "${2:-}"); shift 2 ;;
+      --reset-pose-file=*|--reset-pose-hold) isaac_args+=("$1"); shift ;;
+      # Opt-in evaluation warm start: a prepared demonstration token stream the
+      # bridge publishes to SONIC's action port over the settle tail, so the
+      # GR00T selection starts from a demonstration-supported upper limb without
+      # the deployment being reset.  Off unless asked for; the bridge owns both
+      # the file format's validation and the hand-off at Start.
+      --warmstart-tokens) eval_args+=("$1" "$(psi0_eval_container_path "${2:-}")"); shift 2 ;;
+      --warmstart-tokens=*) eval_args+=("$1"); shift ;;
+      --warmstart-delay-s) eval_args+=("$1" "${2:-}"); shift 2 ;;
+      --warmstart-delay-s=*) eval_args+=("$1"); shift ;;
+      --warmstart-clock-timeout-s) eval_args+=("$1" "${2:-}"); shift 2 ;;
+      --warmstart-clock-timeout-s=*) eval_args+=("$1"); shift ;;
+      --warmstart-sim-clock) eval_args+=("$1" "$(psi0_eval_container_path "${2:-}")"); shift 2 ;;
+      --warmstart-sim-clock=*) eval_args+=("$1"); shift ;;
+      --groot-capture-dir) eval_args+=("$1" "$(psi0_eval_container_path "${2:-}")"); shift 2 ;;
+      --groot-capture-dir=*) eval_args+=("--groot-capture-dir=$(psi0_eval_container_path "${1#*=}")"); shift ;;
+      # Opt-in settle handshake: on every Reset the bridge publishes the VLA
+      # client's own initial-pose command to SONIC's action port until Start,
+      # instead of depending on the client's own 'i' key reaching it.  Off
+      # unless asked for, so every default command is unchanged.
+      --initial-pose-handshake) eval_args+=("$1"); shift ;;
+      # Opt-in scene variant: a profile that differs from the shipped one only
+      # in how one cube is rendered.  The shipped profile stays the default, so
+      # every command without this flag runs the scene it ran before.
+      --scene-profile) profile_file="${2:-}"; shift 2 ;;
+      --scene-profile=*) profile_file="${1#*=}"; shift ;;
       *)
         # Everything else belongs to the bridge/UI launcher on the other side of
         # docker exec; it owns the flag's meaning and its validation.
@@ -816,13 +870,54 @@ psi0_isaac_eval() {
     esac
   done
   [ -n "$checkpoint_dir" ] && [ -n "$groot_checkpoint_dir" ] || {
-    echo "usage: $0 psi0-isaac-eval --checkpoint-dir PSI_RUN --checkpoint-step STEP --groot-checkpoint-dir GROOT_CHECKPOINT [--host H] [--port P] [--gui|--headless] [--duration S]" >&2
+    echo "usage: $0 psi0-isaac-eval --checkpoint-dir PSI_RUN --checkpoint-step STEP --groot-checkpoint-dir GROOT_CHECKPOINT [--psi-dream-checkpoint-dir PSI_DREAM_RUN] [--host H] [--port P] [--gui|--headless] [--duration S] [--record-video PATH] [--video-timestamps-output PATH] [--samples-output PATH] [--tracking-output PATH] [--metrics-output PATH] [--policy-clock simulation|wall] [--policy-clock-file PATH] [--policy-clock-timeout-s S] [--groot-left-hand-contract model-independent|compatibility|model-coupled] [--psi0-neck-policy error|discard] [--gravity-feedforward] [--reset-pose-file PATH] [--reset-pose-hold] [--warmstart-tokens PATH] [--warmstart-delay-s S] [--initial-pose-handshake] [--scene-profile PATH] [--telemetry-dir PATH]" >&2
     return 2
   }
   [[ "$checkpoint_step" =~ ^[0-9]+$ ]] || {
     echo "error: --checkpoint-step must be an integer (for example 40000); 'latest' is not accepted" >&2
     return 2
   }
+  case "$policy_clock" in
+    wall)
+      [ -z "$policy_clock_file" ] || {
+        echo "error: --policy-clock-file requires --policy-clock simulation" >&2
+        return 2
+      }
+      ;;
+    simulation)
+      # Each session owns a fresh clock. No operator-supplied file is needed;
+      # the same resolved path is sent to Isaac and both policy backends.
+      policy_clock_file="${policy_clock_file:-/outputs/psi0-isaac-eval-policy-clock-$$.json}"
+      policy_clock_file="$(psi0_eval_container_path "$policy_clock_file")"
+      case "$policy_clock_file" in /*) ;; *)
+        echo "error: --policy-clock-file must resolve to an absolute container path" >&2
+        return 2 ;;
+      esac
+      isaac_args+=("--replay-clock-output" "$policy_clock_file")
+      eval_args+=("--policy-clock-file" "$policy_clock_file")
+      ;;
+    *)
+      echo "error: --policy-clock must be wall or simulation" >&2
+      return 2 ;;
+  esac
+  python3 - "$policy_clock_timeout_s" <<'PY' || {
+import sys
+try:
+    valid = float(sys.argv[1]) > 0
+except ValueError:
+    valid = False
+raise SystemExit(0 if valid else 1)
+PY
+    echo "error: --policy-clock-timeout-s must be positive" >&2
+    return 2
+  }
+  eval_args+=("--policy-clock" "$policy_clock" "--policy-clock-timeout-s" "$policy_clock_timeout_s")
+  # Isaac receives the profile prefixed with the repository's mount point, so a
+  # host path inside the checkout is rewritten to the checkout's own spelling
+  # first; a path that already is container-spelled is left as it is.
+  case "$profile_file" in
+    "$PWD"/*) profile_file="${profile_file#"$PWD"/}" ;;
+  esac
   [ -f "$profile_file" ] || {
     echo "error: the BlockStacking profile is missing: $profile_file" >&2
     return 2
@@ -845,6 +940,12 @@ psi0_isaac_eval() {
   up_once
   local container_id
   container_id="$(psi0_eval_container_id)" || return 1
+  if [ "$policy_clock" = simulation ]; then
+    docker exec "$container_id" rm -f -- "$policy_clock_file" || {
+      echo "error: cannot remove stale simulation clock: $policy_clock_file" >&2
+      return 2
+    }
+  fi
   # Fail before Isaac and the policy server spend minutes loading: the bridge
   # re-validates the same directory against the served /info anyway.
   docker exec "$container_id" test -f "$container_ckpt/run_config.json" || {
@@ -901,13 +1002,14 @@ psi0_isaac_eval() {
   PSI0_EVAL_HEARTBEAT=$!
 
   # 1. Isaac BlockStacking scene (WebRTC by default, like every isaac-g1 entry).
-  local isaac_flags=""
-  if [ "${#G1_ARGS[@]}" -gt 0 ]; then
-    printf -v isaac_flags ' %q' "${G1_ARGS[@]}"
-  fi
-  if [ "${#isaac_args[@]}" -gt 0 ]; then
-    printf -v isaac_flags '%s %q' "$isaac_flags" "${isaac_args[@]}"
-  fi
+  # Each argument is quoted on its own: `printf -v flags '%s %q' "$flags" "${args[@]}"`
+  # cycles its format string and silently interleaves flag/value pairs once more
+  # than two arguments need to travel this way.
+  local isaac_flags="" isaac_flag quoted
+  for isaac_flag in "${G1_ARGS[@]}" "${isaac_args[@]}"; do
+    printf -v quoted '%q' "$isaac_flag"
+    isaac_flags+=" $quoted"
+  done
   local isaac_index="${#PSI0_EVAL_JOBS[@]}"
   psi0_eval_bg_start isaac "run-isaac-g1.py" \
     "source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && export DISPLAY='${DISPLAY:-:0}' && export PUBLIC_IP='${ISAAC_LIVESTREAM_ENDPOINT:-}' && mkdir -p /tmp/humanoid-lab-kit-cwd && cd /tmp/humanoid-lab-kit-cwd && { exec 9>/tmp/humanoid-lab-isaac-g1.lock; flock -n 9 || { echo 'error: another Isaac G1 simulation is already running' >&2; exit 3; }; } && exec python /workspace/humanoid-lab/scripts/run-isaac-g1.py --profile /workspace/humanoid-lab/$profile_file --sonic-camera-endpoint='tcp://*:5555'$isaac_flags"
@@ -1091,7 +1193,9 @@ case "${1:-}" in
     ;;
   psi0-smoke)
     up_once
-    DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-psi0 && exec /opt/humanoid-lab/psi0-env-smoke.sh "$@"' psi0-smoke "${@:2}"
+    # The image carries a copy, but the bind-mounted workspace is authoritative:
+    # a change to the smoke's own checks is runnable without an image rebuild.
+    DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-psi0 && cd /workspace/humanoid-lab && exec bash scripts/psi0-env-smoke.sh "$@"' psi0-smoke "${@:2}"
     ;;
   psi0-dex3-dataset-split)
     # Kapı 0: freeze the episode-level train/validation split. Writes

@@ -24,6 +24,7 @@ from humanoid_lab.simulators.isaac.camera_service import (  # noqa: E402
     GET_FRAME_REQUEST,
     IR_PLACEHOLDER,
     RESET_REQUEST,
+    SHUTDOWN_REQUEST,
     STATUS_REQUEST,
     HeadCameraBuffer,
     HeadCameraEndpoint,
@@ -135,6 +136,18 @@ class ResetControlPayloadTests(unittest.TestCase):
         self.assertEqual(endpoint.handle(RESET_REQUEST), [b"reset_refused"])
         self.assertEqual(json.loads(endpoint.handle(STATUS_REQUEST)[0]), {"physics_tick": 7})
         self.assertTrue(endpoint.handle(b"nope")[0].startswith(b"error:"))
+
+    def test_a_shutdown_request_is_queued_or_refused_but_never_executed_here(self) -> None:
+        # The endpoint must only queue the request: ending the run has to happen
+        # on the simulation loop, exactly like a reset, or the video is never
+        # finalized and the run summary never written.
+        calls: list[str] = []
+        endpoint = ResetControlEndpoint("inproc://unused", on_shutdown=lambda: (calls.append("stop"), True)[1])
+        self.assertEqual(endpoint.handle(SHUTDOWN_REQUEST), [b"shutdown_queued"])
+        self.assertEqual(calls, ["stop"])
+
+        unhandled = ResetControlEndpoint("inproc://unused")
+        self.assertEqual(unhandled.handle(SHUTDOWN_REQUEST), [b"shutdown_refused"])
 
 
 @unittest.skipUnless(_ZMQ, "pyzmq is not importable in this interpreter")

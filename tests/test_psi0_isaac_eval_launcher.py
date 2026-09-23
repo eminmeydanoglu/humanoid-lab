@@ -38,10 +38,13 @@ def load_launcher():
 
 
 def run_config(*, action_dim: int = 80, resize=(240, 320), pad_state_dim: int = 45,
-               num_past_frames: int | None = 0) -> dict:
+               num_past_frames: int | None = 0,
+               image_keys=("observation.images.egocentric",)) -> dict:
     repack: dict = {"dataset_name": "sonic"}
     if num_past_frames is not None:
         repack["num_past_frames"] = num_past_frames
+    if image_keys is not None:
+        repack["image_keys"] = list(image_keys)
     return {
         "model": {"action_dim": action_dim, "action_chunk_size": 30, "action_exec_horizon": 30},
         "data": {
@@ -77,6 +80,20 @@ class RunDirectoryValidationTest(unittest.TestCase):
         self.assertEqual(summary["resize"], [240, 320])
         self.assertEqual(summary["state_dim"], 45)
         self.assertEqual(summary["num_past_frames"], 0)
+        self.assertEqual(summary["image_key"], "observation.images.egocentric")
+
+    def test_a_released_run_declares_its_own_camera_and_transform(self) -> None:
+        # The released multi-task ψ-Dream run names its camera
+        # observation.images.head and resizes to 270x480.  Both are the run's own
+        # declaration; the launcher carries them so the /info identity check can
+        # hold the served server to this run rather than to a global pin.
+        self.write_config(run_config(
+            resize=(270, 480), image_keys=("observation.images.head",),
+        ))
+        summary = self.launcher.validate_run_dir(self.run_dir, 40000)
+        self.assertEqual(summary["resize"], [270, 480])
+        self.assertEqual(summary["center_crop"], [270, 480])
+        self.assertEqual(summary["image_key"], "observation.images.head")
 
     def test_state_history_is_derived_from_the_run_config(self) -> None:
         # The bridge sends one state frame, so a run packed with a past-frame
@@ -96,8 +113,12 @@ class RunDirectoryValidationTest(unittest.TestCase):
             "missing step": (self.run_dir, 12345, {}),
             "zero step": (self.run_dir, 0, {}),
             "wrong action width": (self.run_dir, 40000, {"action_dim": 77}),
-            "wrong resize": (self.run_dir, 40000, {"resize": (128, 128)}),
+            "absurd resize": (self.run_dir, 40000, {"resize": (8, 8)}),
             "wrong state pad": (self.run_dir, 40000, {"pad_state_dim": 64}),
+            "no image key": (self.run_dir, 40000, {"image_keys": ()}),
+            "two image keys": (self.run_dir, 40000, {
+                "image_keys": ("observation.images.egocentric", "observation.images.wrist_left"),
+            }),
         }
         for name, (run_dir, step, overrides) in cases.items():
             with self.subTest(case=name):
@@ -117,7 +138,7 @@ class RunDirectoryValidationTest(unittest.TestCase):
         with self.assertRaises(self.launcher.LaunchError):
             self.launcher.validate_run_dir(self.run_dir, 40000)
 
-    def test_center_crop_must_be_the_pinned_size(self) -> None:
+    def test_center_crop_must_match_the_run_s_own_resize(self) -> None:
         config = run_config()
         config["data"]["transform"]["model"]["center_crop"] = {"size": [128, 128]}
         self.write_config(config)
@@ -135,6 +156,64 @@ class RunDirectoryValidationTest(unittest.TestCase):
     def test_checkpoint_step_must_be_an_integer(self) -> None:
         with self.assertRaises(SystemExit):
             self.launcher.parse_args(["--checkpoint-dir", str(self.run_dir), "--checkpoint-step", "latest"])
+
+    def test_policy_clock_defaults_and_validation(self) -> None:
+        args = self.launcher.parse_args([
+            "--checkpoint-dir", str(self.run_dir), "--checkpoint-step", "40000",
+        ])
+        self.assertEqual(args.policy_clock, "simulation")
+        self.assertEqual(args.policy_clock_file, Path("/outputs/psi0-isaac-eval-policy-clock.json"))
+        self.assertEqual(args.groot_left_hand_contract, "model-independent")
+        self.assertEqual(args.policy_clock_timeout_s, 5.0)
+        invalid = (
+            ["--policy-clock", "wall", "--policy-clock-file", "/tmp/clock.txt"],
+            ["--policy-clock-timeout-s", "0"],
+        )
+        for extra in invalid:
+            with self.subTest(extra=extra), self.assertRaises(SystemExit):
+                self.launcher.parse_args([
+                    "--checkpoint-dir", str(self.run_dir), "--checkpoint-step", "40000", *extra,
+                ])
+        simulation = self.launcher.parse_args([
+            "--checkpoint-dir", str(self.run_dir), "--checkpoint-step", "40000",
+            "--policy-clock", "simulation", "--policy-clock-file", "/tmp/clock.txt",
+        ])
+        self.assertEqual(simulation.policy_clock_file, Path("/tmp/clock.txt"))
+        self.assertEqual(simulation.groot_left_hand_contract, "model-independent")
+        legacy = self.launcher.parse_args([
+            "--checkpoint-dir", str(self.run_dir), "--checkpoint-step", "40000",
+            "--policy-clock", "wall", "--groot-left-hand-contract", "compatibility",
+        ])
+        self.assertIsNone(legacy.policy_clock_file)
+        self.assertEqual(legacy.groot_left_hand_contract, "compatibility")
+        configured = self.launcher.parse_args([
+            "--checkpoint-dir", str(self.run_dir), "--checkpoint-step", "40000",
+            "--groot-capture-dir", "/tmp/capture", "--groot-capture-max-requests", "4",
+            "--groot-left-hand-contract", "model-independent",
+        ])
+        self.assertEqual(configured.groot_capture_dir, Path("/tmp/capture"))
+        self.assertEqual(configured.groot_capture_max_requests, 4)
+        self.assertEqual(configured.groot_left_hand_contract, "model-independent")
+
+    def test_neck_padding_discard_is_explicit_and_invalid_modes_fail(self) -> None:
+        base = ["--checkpoint-dir", str(self.run_dir), "--checkpoint-step", "40000"]
+        self.assertEqual(self.launcher.parse_args(base).psi0_neck_policy, "error")
+        with self.assertRaises(SystemExit):
+            self.launcher.parse_args(base + ["--psi0-neck-policy", "discard"])
+        self.assertEqual(
+            self.launcher.parse_args(base + ["--telemetry-dir", "/tmp/session", "--psi0-neck-policy", "discard"]).psi0_neck_policy,
+            "discard",
+        )
+        with self.assertRaises(SystemExit):
+            self.launcher.parse_args(base + ["--psi0-neck-policy", "ignore"])
+
+    def test_devsh_generates_one_session_clock_for_both_processes(self) -> None:
+        text = DEV_SH.read_text(encoding="utf-8")
+        self.assertIn('local policy_clock="simulation" policy_clock_file=""', text)
+        self.assertIn('policy_clock_file="${policy_clock_file:-/outputs/psi0-isaac-eval-policy-clock-$$.json}"', text)
+        self.assertIn('isaac_args+=("--replay-clock-output" "$policy_clock_file")', text)
+        self.assertIn('eval_args+=("--policy-clock-file" "$policy_clock_file")', text)
+        self.assertIn('docker exec "$container_id" rm -f -- "$policy_clock_file"', text)
 
     def test_missing_run_directory_exits_two_with_a_reason(self) -> None:
         proc = subprocess.run(
@@ -356,6 +435,92 @@ class PolicyDeviceRemovalTest(unittest.TestCase):
         # recv-timeout/port style flags travel to the bridge through the
         # launcher's own argument passthrough.
         self.assertIn("$eval_args_str", DEV_SH.read_text(encoding="utf-8"))
+
+    def test_devsh_shares_one_absolute_policy_clock_path(self) -> None:
+        text = DEV_SH.read_text(encoding="utf-8")
+        self.assertIn('policy_clock_file="$(psi0_eval_container_path "$policy_clock_file")"', text)
+        self.assertIn('isaac_args+=("--replay-clock-output" "$policy_clock_file")', text)
+        self.assertIn('eval_args+=("--policy-clock-file" "$policy_clock_file")', text)
+        self.assertIn('docker exec "$container_id" rm -f -- "$policy_clock_file"', text)
+
+    def test_devsh_forwards_the_isaac_recording_flags(self) -> None:
+        # A rollout's evidence (validation video, its frame map, the per-second
+        # palm/scene samples, the 50 Hz tracking Parquet and the run summary) is
+        # produced by the Isaac process, so those flags must reach its argv
+        # instead of being swallowed by the bridge's own parser.
+        text = DEV_SH.read_text(encoding="utf-8")
+        for flag in ("--record-video", "--video-timestamps-output", "--samples-output",
+                     "--tracking-output", "--metrics-output"):
+            self.assertIn(flag, text)
+        self.assertIn("--record-video|--video-timestamps-output|--samples-output|--tracking-output|--metrics-output)",
+                      text)
+        # Quoted one argument at a time: a `printf -v flags '%s %q' "$flags" "${args[@]}"`
+        # cycles its format string and interleaves flag/value pairs once more than
+        # two arguments travel this way (which is how the recording flags first
+        # arrived at Isaac glued together).
+        self.assertIn('for isaac_flag in "${G1_ARGS[@]}" "${isaac_args[@]}"; do', text)
+        self.assertNotIn("printf -v isaac_flags '%s %q'", text)
+        self.assertIn("$isaac_flags", text)
+
+    def test_the_launcher_records_telemetry_only_when_asked(self) -> None:
+        launcher = load_launcher()
+        base = ["--checkpoint-dir", "/tmp/run", "--checkpoint-step", "40000"]
+        args = launcher.parse_args(base)
+        self.assertIsNone(args.telemetry_dir)
+        self.assertEqual(args.telemetry_camera_every, 5)
+        enabled = launcher.parse_args(base + ["--telemetry-dir", "/outputs/x/telemetry",
+                                              "--telemetry-camera-every", "2"])
+        self.assertEqual(str(enabled.telemetry_dir), "/outputs/x/telemetry")
+        self.assertEqual(enabled.telemetry_camera_every, 2)
+
+    def test_the_warm_start_is_opt_in(self) -> None:
+        """Without the stream file the bridge takes exactly the path it took
+        before: no warm start is built and the delay is inert."""
+        launcher = load_launcher()
+        base = ["--checkpoint-dir", "/tmp/run", "--checkpoint-step", "40000"]
+        args = launcher.parse_args(base)
+        self.assertIsNone(args.warmstart_tokens)
+        self.assertEqual(args.warmstart_delay_s, 0.0)
+        enabled = launcher.parse_args(base + ["--warmstart-tokens", "/outputs/w/tokens.json",
+                                              "--warmstart-delay-s", "9"])
+        self.assertEqual(str(enabled.warmstart_tokens), "/outputs/w/tokens.json")
+        self.assertEqual(enabled.warmstart_delay_s, 9.0)
+
+    def test_devsh_forwards_the_warm_start_flags_to_the_bridge(self) -> None:
+        text = DEV_SH.read_text(encoding="utf-8")
+        self.assertIn("--warmstart-tokens) eval_args+=(", text)
+        self.assertIn("--warmstart-delay-s)", text)
+        self.assertIn('--warmstart-tokens) eval_args+=("$1" "$(psi0_eval_container_path "${2:-}")")',
+                      text)
+        self.assertIn("--warmstart", text.split("usage: $0 psi0-isaac-eval", 1)[1].splitlines()[0])
+
+    def test_the_initial_pose_handshake_is_opt_in(self) -> None:
+        """Without the flag the settle takes exactly the path it took before."""
+        launcher = load_launcher()
+        base = ["--checkpoint-dir", "/tmp/run", "--checkpoint-step", "40000"]
+        self.assertFalse(launcher.parse_args(base).initial_pose_handshake)
+        self.assertTrue(launcher.parse_args(base + ["--initial-pose-handshake"])
+                        .initial_pose_handshake)
+        text = DEV_SH.read_text(encoding="utf-8")
+        self.assertIn("--initial-pose-handshake)", text)
+        self.assertIn("--initial-pose-handshake",
+                      text.split("usage: $0 psi0-isaac-eval", 1)[1].splitlines()[0])
+
+    def test_the_scene_profile_is_opt_in_and_keeps_the_shipped_default(self) -> None:
+        """Only the flag names another scene; every other launch stays canonical."""
+        text = DEV_SH.read_text(encoding="utf-8")
+        self.assertIn("--scene-profile) profile_file=", text)
+        # The default is still the shipped BlockStacking profile: the flag
+        # replaces the initial value, it does not add a second profile.
+        self.assertIn(
+            "local profile_file=configs/profiles/isaac-g1-sonic-blockstacking-dex3.json", text
+        )
+        self.assertIn("--scene-profile",
+                      text.split("usage: $0 psi0-isaac-eval", 1)[1].splitlines()[0])
+        # The file is validated before Isaac starts and is passed to the runner
+        # through the checkout's own mount point, like the default profile.
+        self.assertIn('[ -f "$profile_file" ]', text)
+        self.assertIn('--profile /workspace/humanoid-lab/$profile_file', text)
 
 
 class DevShEntrypointTest(unittest.TestCase):

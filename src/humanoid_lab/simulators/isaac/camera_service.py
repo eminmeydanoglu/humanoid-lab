@@ -34,6 +34,11 @@ DEFAULT_CONTROL_ENDPOINT = "tcp://*:5559"
 GET_FRAME_REQUEST = b"get_frame"
 RESET_REQUEST = b"reset"
 STATUS_REQUEST = b"status"
+#: Ask the simulation loop to end its run on its own terms.  A caller that
+#: kills the process instead tears down mid-frame: the validation video never
+#: gets its trailer and the run summary with the tracking series is never
+#: written, so a recorded campaign needs this to end cleanly.
+SHUTDOWN_REQUEST = b"shutdown"
 
 #: Sent in place of a real frame until those sensors are enabled.  A JSON
 #: sentinel rather than an empty frame so a consumer cannot mistake "not
@@ -261,11 +266,11 @@ class HeadCameraEndpoint(_RepServer):
 
 
 class ResetControlEndpoint(_RepServer):
-    """Accepts ``reset`` and ``status`` without ever calling an Isaac API.
+    """Accepts ``reset``, ``status`` and ``shutdown`` without calling an Isaac API.
 
-    ``on_reset`` runs on this service thread.  It must only queue work for the
-    simulation loop (the service's reset callback sets a flag) and return
-    whether the request was accepted.
+    ``on_reset`` and ``on_shutdown`` run on this service thread.  They must only
+    queue work for the simulation loop (the service's callbacks set flags) and
+    return whether the request was accepted.
     """
 
     def __init__(
@@ -273,10 +278,12 @@ class ResetControlEndpoint(_RepServer):
         endpoint: str = DEFAULT_CONTROL_ENDPOINT,
         on_reset: Callable[[], bool] | None = None,
         status_provider: Callable[[], dict[str, Any]] | None = None,
+        on_shutdown: Callable[[], bool] | None = None,
     ) -> None:
         super().__init__(endpoint)
         self._on_reset = on_reset
         self._status_provider = status_provider
+        self._on_shutdown = on_shutdown
 
     def handle(self, payload: bytes) -> list[bytes]:
         if payload == RESET_REQUEST:
@@ -285,7 +292,10 @@ class ResetControlEndpoint(_RepServer):
         if payload == STATUS_REQUEST:
             provider = self._status_provider
             return [json.dumps(provider() if provider is not None else {}, sort_keys=True).encode()]
-        return [ERROR_PREFIX + b" expected reset or status"]
+        if payload == SHUTDOWN_REQUEST:
+            accepted = bool(self._on_shutdown()) if self._on_shutdown is not None else False
+            return [b"shutdown_queued" if accepted else b"shutdown_refused"]
+        return [ERROR_PREFIX + b" expected reset, status or shutdown"]
 
 
 def request_reply(endpoint: str, payload: bytes, *, timeout_ms: int = 2000) -> list[bytes]:

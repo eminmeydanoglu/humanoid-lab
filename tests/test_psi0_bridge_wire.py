@@ -122,6 +122,21 @@ class InfoContractTest(unittest.TestCase):
         self.assertEqual(info.resize_size, (240, 320))
         self.assertEqual(info.image_key, IMAGE_KEY)
 
+    def test_a_released_checkpoint_names_its_own_camera_and_transform(self) -> None:
+        # A served run may call its single camera something else and resize to its
+        # own size; the bridge sends its frame under the declared key, and the
+        # launcher holds the server to the selected run's run_config.
+        raw = valid_info()
+        raw["expected_keys"]["image"] = {"observation.images.head": "HxWx3 uint8 image array"}
+        raw["transforms"] = [
+            {"name": "resize", "size": [270, 480]},
+            {"name": "center_crop", "size": [270, 480]},
+        ]
+        info = validate_info(raw)
+        self.assertEqual(info.image_key, "observation.images.head")
+        self.assertEqual(info.resize_size, (270, 480))
+        self.assertEqual(info.center_crop_size, (270, 480))
+
     def test_43d_server_state_is_accepted(self) -> None:
         raw = valid_info()
         raw["expected_keys"]["state"]["states"] = "1x43 unnormalized state vector"
@@ -136,7 +151,8 @@ class InfoContractTest(unittest.TestCase):
             "normalize": lambda raw: raw["observation"].update({"normalize_state": False}),
             "action_dim": lambda raw: raw["action"].update({"action_dim": 79}),
             "chunk": lambda raw: raw["action"].update({"action_exec_horizon": 31}),
-            "resize": lambda raw: raw["transforms"][0].update({"size": [128, 128]}),
+            "absurd_resize": lambda raw: raw["transforms"][0].update({"size": [8, 8]}),
+            "crop_differs_from_resize": lambda raw: raw["transforms"][1].update({"size": [128, 128]}),
             "crop_missing": lambda raw: raw["transforms"].pop(1),
             "run_dir_missing": lambda raw: raw.pop("run_dir"),
             "run_dir_empty": lambda raw: raw.update({"run_dir": "  "}),

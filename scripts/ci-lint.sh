@@ -33,12 +33,14 @@ fi
 echo "== python/yaml =="
 python3 -m py_compile scripts/render-lock-env.py scripts/doctor-report.py \
   scripts/verify-psi0-unitree-dex3-sonic-v1.py scripts/psi0-isaac-eval.py \
-  scripts/psi0-token-match.py \
+  scripts/psi0-token-match.py scripts/blockstacking-rollout.py \
+  scripts/analyze-blockstacking-rollout.py \
   src/humanoid_lab/psi0_bridge/*.py \
   src/humanoid_lab/datasets/psi0/contract.py src/humanoid_lab/datasets/psi0/__init__.py \
   tests/test_psi0_training_contract.py tests/test_psi0_loader_fixture.py \
   tests/test_psi0_bridge_actions.py tests/test_psi0_bridge_camera.py \
   tests/test_psi0_bridge_wire.py tests/test_psi0_isaac_eval_launcher.py \
+  tests/test_psi0_bridge_telemetry.py tests/test_blockstacking_analysis.py \
   && echo "  render-lock-env.py + doctor-report.py + psi0 gate scripts compiled"
 python3 -c "import yaml; yaml.safe_load(open('versions.lock.yaml')); print('  versions.lock.yaml: valid YAML')"
 

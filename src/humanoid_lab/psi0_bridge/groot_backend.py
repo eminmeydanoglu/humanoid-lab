@@ -35,6 +35,12 @@ class GrootProcessGroup:
         server_port: int = 5550,
         action_port: int = 5560,
         ready_timeout_s: float = 300.0,
+        policy_clock: str = "simulation",
+        policy_clock_file: Path | None = None,
+        policy_clock_timeout_s: float = 5.0,
+        capture_dir: Path | None = None,
+        capture_max_requests: int = 32,
+        left_hand_contract: str = "model-independent",
     ) -> None:
         self.checkpoint = Path(checkpoint)
         self.prompt = prompt
@@ -42,6 +48,20 @@ class GrootProcessGroup:
         self.server_port = int(server_port)
         self.action_port = int(action_port)
         self.ready_timeout_s = float(ready_timeout_s)
+        if policy_clock not in ("wall", "simulation"):
+            raise ValueError(f"unknown policy clock {policy_clock!r}")
+        if policy_clock == "simulation" and policy_clock_file is None:
+            raise ValueError("simulation policy clock requires policy_clock_file")
+        self.policy_clock = policy_clock
+        self.policy_clock_file = None if policy_clock_file is None else Path(policy_clock_file)
+        self.policy_clock_timeout_s = float(policy_clock_timeout_s)
+        if capture_max_requests <= 0:
+            raise ValueError("capture_max_requests must be positive")
+        self.capture_dir = None if capture_dir is None else Path(capture_dir)
+        self.capture_max_requests = int(capture_max_requests)
+        if left_hand_contract not in ("compatibility", "model-independent", "model-coupled"):
+            raise ValueError(f"unknown GR00T left-hand contract {left_hand_contract!r}")
+        self.left_hand_contract = left_hand_contract
         self._server: subprocess.Popen | None = None
         self._vla: subprocess.Popen | None = None
         self._logs: list[Any] = []
@@ -71,9 +91,19 @@ class GrootProcessGroup:
         self._wait_server()
         vla_cmd = (
             "source /opt/humanoid-lab/entrypoint.sh && use-sonic-sim && "
-            "export PYTHONPATH=/opt/src/sonic:/opt/src/isaac-groot && cd /opt/src/sonic && "
-            "exec python gear_sonic/scripts/run_vla_inference.py "
-            f"--host=127.0.0.1 --port={self.server_port} "
+            "export PYTHONPATH=/workspace/humanoid-lab/src:/opt/src/sonic:/opt/src/isaac-groot && "
+            f"export HUMANOID_GROOT_CHECKPOINT={shlex.quote(str(self.checkpoint))} && "
+            "cd /workspace/humanoid-lab && exec python scripts/run-groot-vla.py "
+            f"--policy-clock={self.policy_clock} "
+            + (f"--policy-clock-file={shlex.quote(str(self.policy_clock_file))} "
+               if self.policy_clock_file is not None else "")
+            + f"--policy-clock-timeout-s={self.policy_clock_timeout_s:g} "
+            + (f"--left-hand-contract={self.left_hand_contract} "
+               if self.left_hand_contract != "compatibility" else "")
+            + (f"--capture-dir={shlex.quote(str(self.capture_dir))} "
+               f"--capture-max-requests={self.capture_max_requests} "
+               if self.capture_dir is not None else "")
+            + f"--host=127.0.0.1 --port={self.server_port} "
             "--camera-host=127.0.0.1 --camera-port=5555 "
             "--state-zmq-host=127.0.0.1 --state-zmq-port=5557 "
             f"--action-zmq-host=0.0.0.0 --action-zmq-port={self.action_port} "

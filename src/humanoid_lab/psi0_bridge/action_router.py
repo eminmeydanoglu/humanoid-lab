@@ -39,25 +39,44 @@ class PsiSink:
 
 
 class ActionRouter:
-    """Forward only the selected policy source to SONIC's public action port."""
+    """Forward only the selected policy source to SONIC's public action port.
+
+    Four sources can reach that port: ``psi`` (this bridge's own client), the
+    upstream VLA client's stream on ``groot``, ``warmstart`` (opt-in, the
+    demonstration-token warm start) and ``initial_pose`` (opt-in, the VLA
+    client's own initial-pose command republished over the settle).  The
+    selection is the only switch, so a hand-off between them is one atomic
+    generation change and the SONIC deployment is never reset by it.
+    """
+
+    #: Everything that may be selected; a source that is not selected has its
+    #: messages dropped before they can reach the socket.
+    SOURCES = ("psi", "groot", "warmstart", "initial_pose")
 
     def __init__(
         self,
         *,
         public_endpoint: str = "tcp://*:5556",
         groot_endpoint: str = "tcp://127.0.0.1:5560",
+        telemetry: Any | None = None,
     ) -> None:
         self.public_endpoint = public_endpoint
         self.groot_endpoint = groot_endpoint
+        #: Opt-in recorder of every message that reaches the SONIC action port,
+        #: for both sources (see :mod:`humanoid_lab.psi0_bridge.telemetry`).
+        self.telemetry = telemetry
         self._lock = threading.Lock()
         self._source = "psi"
         self._gate = False
         self._closed = False
         self._error: str | None = None
+        self._telemetry_error: str | None = None
         self._last_time: float | None = None
         self._sent = 0
         self._generation = 0
         self._psi: queue.Queue[tuple[int, bytes]] = queue.Queue(maxsize=2)
+        self._warmstart: queue.Queue[tuple[int, bytes]] = queue.Queue(maxsize=2)
+        self._initial_pose: queue.Queue[tuple[int, bytes]] = queue.Queue(maxsize=2)
         self._control: queue.Queue[bytes] = queue.Queue(maxsize=4)
         self._stop = threading.Event()
         self._ready = threading.Event()
@@ -70,13 +89,15 @@ class ActionRouter:
         self.psi_sink = PsiSink(self)
 
     def select(self, source: str) -> None:
-        if source not in {"psi", "groot"}:
+        if source not in self.SOURCES:
             raise ValueError(f"unknown action source: {source}")
         with self._lock:
             self._source = source
             self._gate = False
             self._generation += 1
         self._drain_psi()
+        self._drain_warmstart()
+        self._drain_initial_pose()
 
     def resume(self) -> None:
         with self._lock:
@@ -89,21 +110,44 @@ class ActionRouter:
             self._gate = False
             self._generation += 1
         self._drain_psi()
+        self._drain_warmstart()
+        self._drain_initial_pose()
 
     def submit_psi(self, payload: bytes) -> bool:
+        return self._submit(self._psi, "psi", payload)
+
+    def submit_warmstart(self, payload: bytes) -> bool:
+        """Offer one message of the opt-in demonstration-token warm start.
+
+        Accepted only while ``warmstart`` is the selected source and the gate is
+        open, so a warm-start publisher that is still running after ``Start``
+        cannot put a token between the policy's own messages.
+        """
+        return self._submit(self._warmstart, "warmstart", payload)
+
+    def submit_initial_pose(self, payload: bytes) -> bool:
+        """Offer one message of the opt-in initial-pose command stream.
+
+        Same gate as every other source: accepted only while ``initial_pose`` is
+        selected, so a handshake that is still running when the policy starts
+        cannot put an initial-pose token into the GR00T stream.
+        """
+        return self._submit(self._initial_pose, "initial_pose", payload)
+
+    def _submit(self, queue_: "queue.Queue[tuple[int, bytes]]", source: str, payload: bytes) -> bool:
         with self._lock:
-            accepted = self._gate and self._source == "psi" and not self._closed
+            accepted = self._gate and self._source == source and not self._closed
             generation = self._generation
         if not accepted:
             return False
         try:
-            self._psi.put_nowait((generation, bytes(payload)))
+            queue_.put_nowait((generation, bytes(payload)))
         except queue.Full:
             try:
-                self._psi.get_nowait()
+                queue_.get_nowait()
             except queue.Empty:
                 pass
-            self._psi.put_nowait((generation, bytes(payload)))
+            queue_.put_nowait((generation, bytes(payload)))
         return True
 
     def send_control(self, payload: bytes) -> None:
@@ -123,6 +167,7 @@ class ActionRouter:
                 "last_time": self._last_time,
                 "sent": self._sent,
                 "error": self._error,
+                "telemetry_error": self._telemetry_error,
             }
 
     def close(self) -> None:
@@ -164,9 +209,11 @@ class ActionRouter:
                     payload = groot.recv()
                     if self._accept("groot"):
                         output.send(payload)
-                        self._record()
+                        self._record("groot", payload)
                 self._forward_control(output)
                 self._forward_psi(output)
+                self._forward_warmstart(output)
+                self._forward_initial_pose(output)
         finally:
             output.close()
             groot.close()
@@ -190,20 +237,79 @@ class ActionRouter:
                 accepted = self._gate and self._source == "psi" and generation == self._generation
             if accepted:
                 output.send(payload)
-                self._record()
+                self._record("psi", payload)
+
+    def _forward_warmstart(self, output: Any) -> None:
+        while True:
+            try:
+                generation, payload = self._warmstart.get_nowait()
+            except queue.Empty:
+                return
+            with self._lock:
+                accepted = (
+                    self._gate and self._source == "warmstart"
+                    and generation == self._generation
+                )
+            if accepted:
+                output.send(payload)
+                self._record("warmstart", payload)
+
+    def _forward_initial_pose(self, output: Any) -> None:
+        while True:
+            try:
+                generation, payload = self._initial_pose.get_nowait()
+            except queue.Empty:
+                return
+            with self._lock:
+                accepted = (
+                    self._gate and self._source == "initial_pose"
+                    and generation == self._generation
+                )
+            if accepted:
+                output.send(payload)
+                self._record("initial_pose", payload)
 
     def _accept(self, source: str) -> bool:
         with self._lock:
             return self._gate and self._source == source and not self._closed
 
-    def _record(self) -> None:
+    def _record(self, source: str, payload: bytes) -> None:
         with self._lock:
             self._last_time = time.time()
             self._sent += 1
+        if self.telemetry is None:
+            return
+        # Recording is best effort and must never stop the action path: an
+        # exception here once killed this router thread, which silently left a
+        # GR00T episode with no commands at all.
+        try:
+            if source == "groot":
+                # NVIDIA's VLA client owns this stream; the bridge can only
+                # report the camera snapshot it holds next to the action.
+                self.telemetry.sample_frame("groot")
+            self.telemetry.applied_action(source, payload)
+        except Exception as exc:  # noqa: BLE001 - the router outlives the recorder
+            if self._telemetry_error is None:
+                self._telemetry_error = f"{type(exc).__name__}: {exc}"
+                print(f"[action-router] telemetry disabled: {self._telemetry_error}", flush=True)
 
     def _drain_psi(self) -> None:
         while True:
             try:
                 self._psi.get_nowait()
+            except queue.Empty:
+                return
+
+    def _drain_warmstart(self) -> None:
+        while True:
+            try:
+                self._warmstart.get_nowait()
+            except queue.Empty:
+                return
+
+    def _drain_initial_pose(self) -> None:
+        while True:
+            try:
+                self._initial_pose.get_nowait()
             except queue.Empty:
                 return

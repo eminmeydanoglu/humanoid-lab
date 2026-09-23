@@ -103,6 +103,43 @@ SOURCE_ARM_HAND_FIELDS: tuple[str, ...] = tuple(
 )
 
 
+#: Path (repo-relative) of the pinned joint position limits extracted from the
+#: SONIC deployment MuJoCo model; see ``scripts/extract-g1-joint-limits.py``.
+JOINT_LIMITS_PATH = "configs/datasets/sonic/g1_joint_limits.json"
+
+#: A single-revolution revolute joint on this robot cannot be commanded past the
+#: largest absolute position limit in the model (``left_shoulder_pitch`` /
+#: ``right_shoulder_pitch`` at 3.0892 rad).  A measured sample outside
+#: ``(-PHYSICAL_HAND_SAMPLE_BOUND_RAD, +PHYSICAL_HAND_SAMPLE_BOUND_RAD)`` is
+#: therefore not a pose the robot can occupy, whatever the joint.
+#:
+#: This is deliberately the *robot-wide* bound and not each channel's own
+#: limit: measured data legitimately overshoots a channel's nominal limit (the
+#: right Dex3 fingers reach 2.93 rad against a 1.5708 rad URDF limit, and 21-29%
+#: of frames sit outside their nominal range on those channels), so a per-joint
+#: guard would flag normal teleoperation.  The 3.0 rad value is the round
+#: conservative form of the 3.0892 rad model bound and is the same threshold the
+#: GR00T conversion of this corpus recorded as ``threshold_rad``.
+PHYSICAL_HAND_SAMPLE_BOUND_RAD = 3.0
+
+
+def _physical_bound() -> float:
+    """Assert the declared bound stays inside the pinned model's own limits."""
+    path = ROOT / JOINT_LIMITS_PATH
+    limits = json.loads(path.read_text(encoding="utf-8"))["joints"]
+    worst = max(
+        max(abs(float(entry["lower"])), abs(float(entry["upper"])))
+        for entry in limits.values()
+    )
+    if PHYSICAL_HAND_SAMPLE_BOUND_RAD > worst:
+        raise ValueError(
+            f"the physical sample bound {PHYSICAL_HAND_SAMPLE_BOUND_RAD} rad exceeds the "
+            f"pinned model's largest absolute joint limit {worst:.4f} rad; a value between "
+            "the two would be simultaneously impossible and accepted"
+        )
+    return worst
+
+
 def standing_lower_body() -> np.ndarray:
     """The 15D synthetic legs+waist proxy in canonical order.
 
@@ -271,6 +308,7 @@ class ConversionConfig:
             if not instruction or not instruction[0].isupper() or not instruction.endswith("."):
                 raise ValueError(f"task instruction {instruction!r} is not a canonical sentence")
         assert_state_layout()
+        _physical_bound()
 
 
 def _as_slice(value: Any, key: str) -> slice:

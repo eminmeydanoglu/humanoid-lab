@@ -9,7 +9,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
-from humanoid_lab.simulators.isaac.contracts import ContractError, RunProfile  # noqa: E402
+from humanoid_lab.simulators.isaac.contracts import (  # noqa: E402
+    UPPER_LIMB_JOINT_NAMES,
+    ContractError,
+    RunProfile,
+    body_gravity_columns,
+    load_reset_pose,
+)
 
 SERVICE = ROOT / "src/humanoid_lab/simulators/isaac/service.py"
 
@@ -286,9 +292,148 @@ class IsaacG1SourceInvariantTests(unittest.TestCase):
         self.assertIn("enable_dl_denoiser=True", source)
         self.assertIn("update_period=self.profile.camera_update_period", source)
 
+
+class IsaacG1GravityFeedforwardTests(unittest.TestCase):
+    """The opt-in gravity feed-forward: routing, mapping, sign and parity."""
+
+    CLI = ROOT / "src/humanoid_lab/simulators/isaac/cli.py"
+
+    @staticmethod
+    def _section(source: str, start: str, stop: str) -> str:
+        return source[source.index(start) : source.index(stop)]
+
+    def test_the_option_is_opt_in_and_off_by_default(self) -> None:
+        cli = self.CLI.read_text()
+        service = SERVICE.read_text()
+        self.assertIn('"--gravity-feedforward"', cli)
+        self.assertIn('action="store_true"', cli)
+        self.assertIn("gravity_feedforward=args.gravity_feedforward", cli)
+        self.assertIn("gravity_feedforward: bool = False", service)
+        self.assertIn("self.gravity_feedforward = gravity_feedforward", service)
+
+    def test_the_term_is_added_before_the_one_effort_clamp(self) -> None:
+        """One torque law, one limit: the feed-forward may not bypass the clamp."""
+        service = SERVICE.read_text()
+        body = self._section(service, "    def _apply_body_command", "    def _body_gravity_torques")
+        self.assertEqual(body.count("torch.clamp"), 1)
+        self.assertIn("if self.gravity_feedforward:", body)
+        self.assertLess(body.index("self._body_gravity_torques()"), body.index("torch.clamp"))
+        # The term reaches the solver through the body command path only.
+        self.assertEqual(service.count("self._body_gravity_torques()"), 1)
+
+    def test_the_term_comes_from_physx_at_the_live_pose(self) -> None:
+        service = SERVICE.read_text()
+        body = self._section(service, "    def _body_gravity_torques", "    def _gravity_feedforward_status")
+        self.assertIn("root_physx_view.get_gravity_compensation_forces()", body)
+        self.assertIn("body_gravity_columns(", body)
+        self.assertIn("torch.isfinite", body)
+        # A width the contract does not describe (or a non-finite value) is
+        # refused like a malformed command: passive fallback, never a NaN.
+        self.assertIn("raise CommandError", body)
+
+    def test_body_gravity_columns_selects_the_body_joints_of_a_floating_base(self) -> None:
+        body = (3, 12, 29)  # arbitrary body indices in the asset's joint order
+        self.assertEqual(body_gravity_columns(43, 43, body), (0, [3, 12, 29]))
+        self.assertEqual(body_gravity_columns(49, 43, body), (6, [9, 18, 35]))
+        with self.assertRaises(ContractError):
+            body_gravity_columns(48, 43, body)
+
+    def test_body_gravity_columns_preserves_the_requested_order(self) -> None:
+        """A mapping test with a vector whose values are their own column index."""
+        raw = list(range(49))
+        _, columns = body_gravity_columns(49, 43, [15, 0, 28])
+        self.assertEqual([raw[index] for index in columns], [21, 6, 34])
+
+    def test_the_recorded_gravity_columns_are_only_written_when_enabled(self) -> None:
+        """The default run keeps the exact tracking schema it had without the flag."""
+        service = SERVICE.read_text()
+        tracking = self._section(service, "    def _append_tracking_row", "    def tracking_rows")
+        guarded = tracking[tracking.index("if self.gravity_feedforward:") :]
+        self.assertIn('row["body_gravity_feedforward_torque"]', guarded)
+        head = tracking[: tracking.index("if self.gravity_feedforward:")]
+        self.assertNotIn("body_gravity_feedforward_torque", head)
+
+
+class IsaacG1ResetPoseTests(unittest.TestCase):
+    """The opt-in upper-limb reset pose: scope, default and hold semantics."""
+
+    CLI = ROOT / "src/humanoid_lab/simulators/isaac/cli.py"
+
+    @staticmethod
+    def _section(source: str, start: str, stop: str) -> str:
+        return source[source.index(start) : source.index(stop)]
+
+    def test_the_option_is_opt_in_and_off_by_default(self) -> None:
+        cli = self.CLI.read_text()
+        service = SERVICE.read_text()
+        self.assertIn('"--reset-pose-file"', cli)
+        self.assertIn('"--reset-pose-hold"', cli)
+        self.assertIn("reset_pose_file=args.reset_pose_file", cli)
+        self.assertIn("reset_pose_hold=args.reset_pose_hold", cli)
+        self.assertIn("reset_pose_file: Any | None = None", service)
+        self.assertIn("reset_pose_hold: bool = False", service)
+        self.assertIn("self.reset_pose_file = None if reset_pose_file is None else Path(reset_pose_file)",
+                      service)
+
+    def test_only_upper_limb_joints_can_be_named(self) -> None:
+        groups = {
+            "left_arm": [0.1] * 7, "right_arm": [-0.1] * 7,
+            "left_hand": [0.0] * 7, "right_hand": [0.2] * 7,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pose.json"
+            path.write_text(json.dumps(groups))
+            pose = load_reset_pose(path)
+            self.assertEqual(sorted(pose), sorted(UPPER_LIMB_JOINT_NAMES))
+            path.write_text(json.dumps({"left_knee_joint": 0.4}))
+            with self.assertRaises(ContractError):
+                load_reset_pose(path)
+            path.write_text(json.dumps({"waist_yaw_joint": 0.4}))
+            with self.assertRaises(ContractError):
+                load_reset_pose(path)
+            path.write_text(json.dumps({"left_arm": [0.1] * 6}))
+            with self.assertRaises(ContractError):
+                load_reset_pose(path)
+            path.write_text(json.dumps({}))
+            with self.assertRaises(ContractError):
+                load_reset_pose(path)
+
+    def test_the_held_joints_are_written_after_the_step_and_not_before_it(self) -> None:
+        service = SERVICE.read_text()
+        step = self._section(service, "    def _step_physics", "    def _step_kinematic")
+        self.assertIn("self._write_reset_pose_hold()", step)
+        self.assertLess(step.index("self._sim.step(render=False)"), step.index("self._write_reset_pose_hold()"))
+        self.assertLess(step.index("self._write_reset_pose_hold()"), step.index("self._publish_robot_state()"))
+        write = self._section(service, "    def _write_reset_pose_hold", "    def _reset_pose_status")
+        self.assertIn("write_joint_state_to_sim", write)
+        self.assertIn("if not self._arm_hold_active", write)
+
+    def test_the_release_needs_a_stable_reference_and_a_sustained_departure(self) -> None:
+        service = SERVICE.read_text()
+        update = self._section(service, "    def _update_reset_pose_hold", "    def _arm_hold_release_ticks")
+        self.assertIn("ARM_HOLD_MIN_SECONDS", update)
+        self.assertIn("ARM_HOLD_STABLE_RAD", update)
+        self.assertIn("ARM_HOLD_RELEASE_RAD", update)
+        self.assertIn("self._arm_hold_release_candidate", update)
+        # One-way: once released, the hold does not come back inside an episode.
+        release = update[update.index("self._arm_hold_active = False") :]
+        self.assertNotIn("self._arm_hold_active = True", release)
+
+    def test_the_settings_are_only_recorded_when_the_pose_is_enabled(self) -> None:
+        service = SERVICE.read_text()
+        tracking = self._section(service, "    def _append_tracking_row", "    def tracking_rows")
+        guarded = tracking[tracking.index("if self.reset_pose_file is not None:") :]
+        self.assertIn('row["reset_pose_hold"]', guarded)
+        head = tracking[: tracking.index("if self.reset_pose_file is not None:")]
+        self.assertNotIn("reset_pose_hold", head)
+        self.assertIn('"reset_pose": self._reset_pose_status(),', service)
+        status = self._section(service, "    def _reset_pose_status", "    def _request_reset_from_ui")
+        self.assertIn("released_tick", status)
+        self.assertIn("hold_active", status)
+
+
 class IsaacG1BlockStackingSceneTests(unittest.TestCase):
     """The optional scene schema plus the head-camera service wiring."""
-
     SONIC = ROOT / "configs/profiles/isaac-g1-sonic-dex3.json"
     BLOCKS = ROOT / "configs/profiles/isaac-g1-sonic-blockstacking-dex3.json"
 
@@ -390,6 +535,92 @@ class IsaacG1BlockStackingSceneTests(unittest.TestCase):
             with self.assertRaisesRegex(ContractError, "declared table surface"):
                 RunProfile.load(path)
 
+    def _variant(self, cube: dict):
+        """The third cube of a profile that differs from the shipped scene only by ``cube``."""
+        source = json.loads(self.BLOCKS.read_text())
+        source["scene"]["cubes"][2] = {**source["scene"]["cubes"][2], **cube}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "variant.json"
+            path.write_text(json.dumps(source))
+            variant = RunProfile.load(path)
+        scene = variant.scene
+        assert scene is not None
+        return scene.cubes[2]
+
+    def test_a_cube_may_override_its_rendered_material_only(self) -> None:
+        """A scene variant changes how one cube looks and nothing about what it is."""
+        variant = self._variant({
+            "diffuse_rgb": [0.044, 0.147, 0.113],
+            "diffuse_rgb_provenance": "measured on the demonstration frames",
+        })
+        shipped_scene = RunProfile.load(self.BLOCKS).scene
+        assert shipped_scene is not None
+        shipped = shipped_scene.cubes[2]
+        # The identity (colour key, prim name, telemetry key) is what the prompt
+        # and the telemetry speak in, so it does not move with the material.
+        self.assertEqual(variant.color, "blue")
+        self.assertEqual(variant.diffuse_rgb, (0.044, 0.147, 0.113))
+        self.assertTrue(variant.diffuse_rgb_provenance)
+        self.assertEqual(variant.size_m, shipped.size_m)
+        self.assertEqual(variant.mass_kg, shipped.mass_kg)
+        self.assertEqual(variant.position_m, shipped.position_m)
+        self.assertEqual(variant.rotation_wxyz, shipped.rotation_wxyz)
+
+    def test_the_other_cubes_and_the_target_keep_the_shipped_material(self) -> None:
+        source = json.loads(self.BLOCKS.read_text())
+        source["scene"]["cubes"][2]["diffuse_rgb"] = [0.044, 0.147, 0.113]
+        source["scene"]["cubes"][2]["diffuse_rgb_provenance"] = "measured"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "variant.json"
+            path.write_text(json.dumps(source))
+            variant = RunProfile.load(path)
+        for cube in variant.scene.cubes[:2]:
+            self.assertIsNone(cube.diffuse_rgb)
+            self.assertIsNone(cube.diffuse_rgb_provenance)
+        self.assertEqual(variant.scene.target.color, "black")
+
+    def test_rejects_a_material_override_that_is_not_a_unit_rgb_or_has_no_provenance(self) -> None:
+        for bad, message in (
+            ([1.4, 0.0, 0.0], "diffuse_rgb values must be in \\[0, 1\\]"),
+            ([0.0, 0.0], "cube.diffuse_rgb must contain exactly 3 values"),
+        ):
+            with self.assertRaisesRegex(ContractError, message):
+                self._variant({"diffuse_rgb": bad, "diffuse_rgb_provenance": "measured"})
+        with self.assertRaisesRegex(ContractError, "diffuse_rgb_provenance"):
+            self._variant({"diffuse_rgb": [0.1, 0.2, 0.3]})
+        with self.assertRaisesRegex(ContractError, "diffuse_rgb_provenance"):
+            self._variant({"diffuse_rgb": [0.1, 0.2, 0.3], "diffuse_rgb_provenance": "  "})
+
+    def test_the_rendered_material_is_the_cube_s_own_value(self) -> None:
+        source = SERVICE.read_text()
+        self.assertIn("def cube_diffuse_rgb(", source)
+        self.assertIn(
+            "visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=cube_diffuse_rgb(cube))", source
+        )
+        probe = (ROOT / "src/humanoid_lab/simulators/isaac/pose_probe.py").read_text()
+        # The calibration probe renders the same scene, so it resolves the same way.
+        self.assertIn("diffuse_color=cube_diffuse_rgb(cube)", probe)
+
+    def test_the_opt_in_scene_variant_touches_one_cube_material_only(self) -> None:
+        """The variant profile is the shipped scene plus the third cube's material.
+
+        The whole point of the variant is that the scene it renders differs in
+        exactly one visible respect, so any second difference is a defect.
+        """
+        variant_path = ROOT / "configs/profiles/isaac-g1-sonic-blockstacking-dex3-green-third.json"
+        self.assertTrue(variant_path.is_file())
+        variant = json.loads(variant_path.read_text())
+        shipped = json.loads(self.BLOCKS.read_text())
+        third = variant["scene"]["cubes"][2]
+        # The identity stays "blue" -- that is what the prompt and the telemetry
+        # name -- and only the rendered material becomes green-dominant.
+        self.assertEqual(third["color"], "blue")
+        self.assertGreater(third["diffuse_rgb"][1], third["diffuse_rgb"][0])
+        self.assertGreater(third["diffuse_rgb"][1], third["diffuse_rgb"][2])
+        self.assertTrue(third.pop("diffuse_rgb_provenance"))
+        third.pop("diffuse_rgb")
+        self.assertEqual(variant, shipped)
+
     def test_camera_service_is_independent_of_test_window_and_video(self) -> None:
         source = SERVICE.read_text()
         # The camera scene is created whenever the service is enabled, not only
@@ -452,6 +683,40 @@ class IsaacG1BlockStackingSceneTests(unittest.TestCase):
         # rather than reproducing the gray in its frames.
         probe = (ROOT / "src/humanoid_lab/simulators/isaac/pose_probe.py").read_text()
         self.assertIn("flatten_tape_specular", probe)
+
+    def test_the_recorded_video_carries_its_own_frame_to_state_map(self) -> None:
+        """A clip cut at a measured onset needs the frame<->time relation from
+        the run that produced it, not from an assumed frame rate."""
+        source = SERVICE.read_text()
+        cli = (ROOT / "src/humanoid_lab/simulators/isaac/cli.py").read_text()
+        self.assertIn("def _write_video_timestamp", source)
+        for field in ('"frame": self._video_frames', '"tick": self.tick', '"sim_s"', '"wall_time_ns"'):
+            self.assertIn(field, source)
+        self.assertIn("--video-timestamps-output", cli)
+        self.assertIn("video_timestamps_output=args.video_timestamps_output", cli)
+
+    def test_the_timestamped_sample_stream_and_tracking_columns_are_written(self) -> None:
+        """The per-second line has no wall clock, and the 50 Hz Parquet carries
+        index-aligned vectors only: analysis needs both made explicit."""
+        source = SERVICE.read_text()
+        cli = (ROOT / "src/humanoid_lab/simulators/isaac/cli.py").read_text()
+        self.assertIn("def _write_sample", source)
+        self.assertIn('{**record, "wall_time_ns": time.time_ns()}', source)
+        self.assertIn("def tracking_columns", source)
+        self.assertIn('"tracking_columns": self.tracking_columns()', source)
+        self.assertIn("--samples-output", cli)
+        self.assertIn("samples_output=args.samples_output", cli)
+        # The palm world pose travels with the height it is read from.
+        self.assertIn('"palm_pose_w": poses', source)
+
+    def test_a_shutdown_request_ends_the_run_on_the_loops_own_terms(self) -> None:
+        """A killed process leaves a truncated video and no summary/tracking, so
+        a recorded campaign ends the run through the control endpoint."""
+        source = SERVICE.read_text()
+        self.assertIn("def _request_shutdown_from_service", source)
+        self.assertIn("on_shutdown=self._request_shutdown_from_service", source)
+        self.assertIn("not self._pending_shutdown", source)
+        self.assertIn('"shutdown_requested": self._pending_shutdown', source)
 
 
 if __name__ == "__main__":

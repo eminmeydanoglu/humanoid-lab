@@ -62,6 +62,7 @@ count=$(wc -l < "$LOG_ROOT/.queue")
 [[ "$count" -gt 0 ]] || fail "no datasets selected from $SOURCES_FILE"
 echo "downloading $count datasets with $JOBS parallel jobs into $DATASET_ROOT"
 
+# shellcheck disable=SC2329 # invoked through the exported function in the parallel loop below
 download_one() {
   local name="$1" repo="$2"
   local log="$LOG_ROOT/$name.log"

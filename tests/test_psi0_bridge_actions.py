@@ -100,6 +100,51 @@ class ProtocolPackingTest(unittest.TestCase):
         with self.assertRaises(ActionAdapterError):
             ActionAdapter().adapt(action)
 
+    def test_default_policy_is_still_fail_closed(self) -> None:
+        """An out-of-tolerance neck must never be dropped without an explicit opt-in."""
+        with self.assertRaises(ActionAdapterError):
+            ActionAdapter(neck_policy="error").adapt(self._meaningful_neck())
+        with self.assertRaises(ActionAdapterError):
+            ActionAdapter().adapt(self._meaningful_neck())
+        with self.assertRaises(ActionAdapterError):
+            ActionAdapter(neck_policy="silently-ignore")
+
+    def test_discard_policy_drops_the_block_and_reports_it(self) -> None:
+        adapter = ActionAdapter(neck_policy="discard")
+        adapted = adapter.adapt(self._meaningful_neck())
+        # The command is gone from the payload...
+        self.assertIsNone(adapted.neck)
+        self.assertTrue(adapted.neck_discarded)
+        np.testing.assert_allclose(
+            adapted.discarded_neck, np.array([-0.0334, -0.3422], dtype=np.float32), atol=1e-4
+        )
+        self.assertEqual(adapter.neck_discards, 1)
+        # ...but the body token and hands are untouched, so the frame is still usable.
+        self.assertEqual(adapted.source_dim, 80)
+        packed = adapter.pack(self._meaningful_neck())
+        header, _ = parse_packed(packed)
+        self.assertNotIn("neck", field_map(header))
+        self.assertEqual(adapter.neck_discards, 2)
+        # adapt() consumes no index; this is the adapter's first packed frame.
+        self.assertEqual(frame_index(packed), 0)
+
+    def test_discard_policy_keeps_an_in_tolerance_neck_as_a_no_op(self) -> None:
+        """A genuine no-op is not a discard, even under the opt-in policy."""
+        adapter = ActionAdapter(neck_policy="discard")
+        action = np.zeros(80, dtype=np.float32)
+        action[78:80] = 0.04
+        adapted = adapter.adapt(action)
+        self.assertIsNotNone(adapted.neck)
+        self.assertFalse(adapted.neck_discarded)
+        self.assertEqual(adapter.neck_discards, 0)
+
+    @staticmethod
+    def _meaningful_neck() -> np.ndarray:
+        """The live 80D first chunk that tripped the check (dream-smoke telemetry)."""
+        action = np.zeros(80, dtype=np.float32)
+        action[78:80] = (-0.033415913581848145, -0.34215211868286133)
+        return action
+
 
 class ActionValidationTest(unittest.TestCase):
     def test_wrong_widths_are_rejected(self) -> None:

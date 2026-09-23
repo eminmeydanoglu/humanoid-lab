@@ -125,13 +125,23 @@ class TableSpec:
 
 @dataclass(frozen=True)
 class CubeSpec:
-    """One dynamic cube resting on the declared table surface."""
+    """One dynamic cube resting on the declared table surface.
+
+    ``color`` is the cube's identity: it names the prim, the profile entry and
+    every telemetry key.  ``diffuse_rgb`` is an opt-in override of the *rendered*
+    material only, for a scene variant that must change how a cube looks without
+    changing what it is -- its pose, size, mass, physics material, prim name and
+    telemetry key all stay exactly as declared.  Absent means the shipped
+    colour-keyed material.
+    """
 
     color: str
     size_m: tuple[float, float, float]
     mass_kg: float
     position_m: tuple[float, float, float]
     rotation_wxyz: tuple[float, float, float, float]
+    diffuse_rgb: tuple[float, float, float] | None = None
+    diffuse_rgb_provenance: str | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any], surface_height_m: float) -> "CubeSpec":
@@ -154,7 +164,19 @@ class CubeSpec:
                 f"{color} cube rests at z={position[2]} but the declared table surface "
                 f"{surface_height_m} puts a {size[2]} m cube center at {expected_z}"
             )
-        return cls(color=color, size_m=size, mass_kg=mass, position_m=position, rotation_wxyz=rotation)
+        override = data.get("diffuse_rgb")
+        diffuse_rgb = None
+        if override is not None:
+            diffuse_rgb = _tuple(override, 3, "cube.diffuse_rgb")
+            if not all(0.0 <= value <= 1.0 for value in diffuse_rgb):
+                raise ContractError("cube.diffuse_rgb values must be in [0, 1]")
+            provenance = str(data.get("diffuse_rgb_provenance", "")).strip()
+            if not provenance:
+                raise ContractError("cube.diffuse_rgb_provenance must state how the value was derived")
+        return cls(color=color, size_m=size, mass_kg=mass, position_m=position, rotation_wxyz=rotation,
+                   diffuse_rgb=diffuse_rgb,
+                   diffuse_rgb_provenance=(str(data["diffuse_rgb_provenance"]).strip()
+                                           if diffuse_rgb is not None else None))
 
 
 @dataclass(frozen=True)
@@ -260,6 +282,14 @@ class RobotSpec:
     #: kinematic replay writes every joint each tick, so gravity would otherwise
     #: make the joints sag between the write and the measurement.
     disable_gravity: bool | None = None
+    #: PhysX self-collision for the articulation.  ``None`` leaves the USD
+    #: asset's own authored value in place, which is what every historic profile
+    #: did.  It is declared because the training rig sets it explicitly
+    #: (``enabled_self_collisions=True`` in ``G1_CYLINDER_MODEL_12_DEX_CFG``)
+    #: and because ``UsdFileCfg`` here is built from ``G1_29DOF_CFG``, whose own
+    #: value is ``False`` -- so an undeclared evaluation runs the opposite of the
+    #: training setting rather than an unset one.
+    self_collisions: bool | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "RobotSpec":
@@ -280,6 +310,9 @@ class RobotSpec:
             fixed_base=bool(data.get("fixed_base", False)),
             disable_gravity=(
                 None if data.get("disable_gravity") is None else bool(data["disable_gravity"])
+            ),
+            self_collisions=(
+                None if data.get("self_collisions") is None else bool(data["self_collisions"])
             ),
         )
 
@@ -432,6 +465,7 @@ class RunProfile:
                 },
                 "fixed_base": self.robot.fixed_base,
                 "disable_gravity": self.robot.disable_gravity,
+                "self_collisions": self.robot.self_collisions,
             },
             "camera": {
                 "name": self.camera.name,
@@ -483,3 +517,116 @@ class RunProfile:
 def quaternion_up_z(rotation_wxyz: Sequence[float]) -> float:
     _, x, y, _ = _tuple(rotation_wxyz, 4, "root rotation")
     return 1.0 - 2.0 * (x * x + y * y)
+
+
+#: PhysX prefixes the joint DOFs of a floating-base articulation with the six
+#: DOFs of its free base in every generalized-force vector.
+FLOATING_BASE_DOF_COUNT = 6
+
+
+def body_gravity_columns(
+    values_width: int, joint_count: int, body_indices: Sequence[int]
+) -> tuple[int, list[int]]:
+    """Columns of a PhysX generalized-force row that belong to the body joints.
+
+    The vector holds one entry per DOF in the articulation's own order: the six
+    free-base DOFs first when the root is not fixed, then the joints.  The width
+    therefore says which of the two layouts is in front of us, and anything else
+    is refused instead of indexed on an assumption -- a wrong offset would apply
+    another joint's gravity torque with a perfectly plausible magnitude.
+    """
+    if values_width == joint_count:
+        offset = 0
+    elif values_width == joint_count + FLOATING_BASE_DOF_COUNT:
+        offset = FLOATING_BASE_DOF_COUNT
+    else:
+        raise ContractError(
+            f"generalized force width {values_width} matches neither {joint_count} joint DOFs "
+            f"(fixed base) nor {joint_count + FLOATING_BASE_DOF_COUNT} (floating base)"
+        )
+    return offset, [offset + int(index) for index in body_indices]
+
+
+#: The upper-limb joints an opt-in reset pose may name.  The pose never touches
+#: the lower body or the waist: those channels are a single synthetic constant
+#: across every demonstration, so changing them would change more than the one
+#: variable such an experiment is about.
+UPPER_LIMB_JOINT_NAMES: tuple[str, ...] = (
+    "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint",
+    "left_elbow_joint", "left_wrist_roll_joint", "left_wrist_pitch_joint",
+    "left_wrist_yaw_joint",
+    "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint",
+    "right_elbow_joint", "right_wrist_roll_joint", "right_wrist_pitch_joint",
+    "right_wrist_yaw_joint",
+    "left_hand_thumb_0_joint", "left_hand_thumb_1_joint", "left_hand_thumb_2_joint",
+    "left_hand_middle_0_joint", "left_hand_middle_1_joint",
+    "left_hand_index_0_joint", "left_hand_index_1_joint",
+    "right_hand_thumb_0_joint", "right_hand_thumb_1_joint", "right_hand_thumb_2_joint",
+    "right_hand_index_0_joint", "right_hand_index_1_joint",
+    "right_hand_middle_0_joint", "right_hand_middle_1_joint",
+)
+
+
+def load_reset_pose(path: Path) -> dict[str, float]:
+    """Read an opt-in upper-limb reset pose from a JSON joint->radians file.
+
+    Flat ``{joint_name: radians}`` and the experiment's grouped
+    ``{"left_arm": [...], "right_arm": [...], ...}`` spelling are both accepted.
+    Every named joint must be an upper-limb joint this contract knows; a pose
+    that names a leg or waist joint is refused rather than silently applied.
+    """
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise ContractError(f"reset pose file does not exist: {path}") from None
+    except json.JSONDecodeError as error:
+        raise ContractError(f"reset pose file {path} is not JSON: {error}") from None
+    if not isinstance(raw, dict):
+        raise ContractError(f"reset pose file {path} must hold a JSON object")
+
+    groups = {
+        "left_arm": ("left_shoulder_pitch_joint", "left_shoulder_roll_joint",
+                     "left_shoulder_yaw_joint", "left_elbow_joint", "left_wrist_roll_joint",
+                     "left_wrist_pitch_joint", "left_wrist_yaw_joint"),
+        "right_arm": ("right_shoulder_pitch_joint", "right_shoulder_roll_joint",
+                      "right_shoulder_yaw_joint", "right_elbow_joint", "right_wrist_roll_joint",
+                      "right_wrist_pitch_joint", "right_wrist_yaw_joint"),
+        "left_hand": ("left_hand_thumb_0_joint", "left_hand_thumb_1_joint",
+                      "left_hand_thumb_2_joint", "left_hand_middle_0_joint",
+                      "left_hand_middle_1_joint", "left_hand_index_0_joint",
+                      "left_hand_index_1_joint"),
+        "right_hand": ("right_hand_thumb_0_joint", "right_hand_thumb_1_joint",
+                       "right_hand_thumb_2_joint", "right_hand_index_0_joint",
+                       "right_hand_index_1_joint", "right_hand_middle_0_joint",
+                       "right_hand_middle_1_joint"),
+    }
+    pose: dict[str, float] = {}
+    for key, value in raw.items():
+        if key in groups:
+            if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+                raise ContractError(f"reset pose group {key!r} must be a list of radians")
+            if len(value) != len(groups[key]):
+                raise ContractError(
+                    f"reset pose group {key!r} must hold exactly {len(groups[key])} values"
+                )
+            for name, angle in zip(groups[key], value):
+                pose[name] = _angle(angle, name)
+            continue
+        if key not in UPPER_LIMB_JOINT_NAMES:
+            raise ContractError(
+                f"reset pose names {key!r}, which is not an upper-limb joint; the "
+                "opt-in reset pose only ever moves the arms and the hands"
+            )
+        pose[key] = _angle(value, key)
+    if not pose:
+        raise ContractError(f"reset pose file {path} names no joints")
+    return pose
+
+
+def _angle(value: Any, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ContractError(f"reset pose value for {name} must be a number, got {value!r}")
+    angle = float(value)
+    if not math.isfinite(angle):
+        raise ContractError(f"reset pose value for {name} is not finite: {value!r}")
+    return angle

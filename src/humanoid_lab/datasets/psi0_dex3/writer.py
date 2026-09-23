@@ -28,7 +28,9 @@ from .contract import (
     CANONICAL_STATE_NAMES,
     HAND_DIM,
     INSTRUCTION_KEY,
+    LEGS_WAIST_SLICE,
     MASK_KEY,
+    PHYSICAL_HAND_SAMPLE_BOUND_RAD,
     STATE_MODEL_DIM,
     ConversionConfig,
 )
@@ -187,6 +189,9 @@ class _EpisodeRecord:
     parquet: Path
     video: Path
     stats: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: Record of any physically impossible measured sample that was replaced
+    #: while reading this episode (see ``convert.repair_nonphysical_samples``).
+    repair: dict[str, Any] = field(default_factory=dict)
 
 
 class SplitWriter:
@@ -261,6 +266,7 @@ class SplitWriter:
             parquet=parquet_path,
             video=video_path,
             stats=episode_stats,
+            repair=episode.raw.repair.as_dict(),
         )
         self.episodes.append(record)
         self.total_frames += frames
@@ -345,6 +351,7 @@ class SplitWriter:
                     "anchors_valid": record.anchors_valid,
                     "video_start_s": record.video_start_s,
                     "video_stop_s": record.video_stop_s,
+                    "hand_repair": record.repair,
                 }
                 for record in self.episodes
             ],
@@ -354,6 +361,7 @@ class SplitWriter:
             [{"episode_index": record.episode_index, "stats": record.stats} for record in self.episodes],
         )
         psi0_stats = {name: stats[name] for name in STAT_FEATURES}
+        physical = verify_stats_are_physical(psi0_stats, self.config)
         (self.root / "meta/stats_psi0.json").write_text(
             json.dumps(psi0_stats, indent=4) + "\n", encoding="utf-8"
         )
@@ -389,6 +397,15 @@ class SplitWriter:
                 for name in self.config.collection_names
             },
             "stats_source": "this split",
+            "stats_physical": physical,
+            "hand_repair": {
+                "episodes_repaired": sum(
+                    1 for record in self.episodes if record.repair.get("invalid_source_samples")
+                ),
+                "invalid_source_samples": sum(
+                    int(record.repair.get("invalid_source_samples", 0)) for record in self.episodes
+                ),
+            },
         }
 
     def summary(self) -> dict[str, Any]:
@@ -424,6 +441,62 @@ def enumerate_stats(config: ConversionConfig, episode: ConvertedEpisode):
     yield config.state_field, episode.state
     yield config.action_field, episode.hand_action
     yield config.body_token_field, episode.body_token
+
+
+def verify_stats_are_physical(
+    stats: dict[str, dict[str, Any]],
+    config: ConversionConfig,
+    *,
+    bound_rad: float = PHYSICAL_HAND_SAMPLE_BOUND_RAD,
+) -> dict[str, Any]:
+    """Fail closed if a state statistic is not a pose the robot can hold.
+
+    The state normaliser divides by ``max - min``, so a single non-physical
+    sample silently rescales a whole channel towards a constant -- which is how
+    upstream spikes of up to 3363 rad collapsed four Dex3 channels to ~0.02% of
+    their usable range.  ``repair_nonphysical_samples`` removes those samples at
+    read time; this check is the independent guarantee that no burst reaching
+    the statistics escaped it (a new source file, a changed reader, a future
+    collector regression).
+
+    The bound is applied to ``observation.state`` only: the 64D body token is a
+    latent action with no physical constraint, and the 14D hand action is
+    already bounded by the SONIC encoder contract.
+    """
+    block = stats.get(config.state_field)
+    if not isinstance(block, dict):
+        raise ValueError(f"statistics carry no {config.state_field!r} block")
+    low = np.asarray(block["min"], dtype=np.float64)
+    high = np.asarray(block["max"], dtype=np.float64)
+    if low.shape != (len(CANONICAL_STATE_NAMES),) or high.shape != low.shape:
+        raise ValueError(
+            f"{config.state_field} statistics are {low.shape}/{high.shape}, "
+            f"expected ({len(CANONICAL_STATE_NAMES)},)"
+        )
+    # The 15 synthetic legs/waist channels are a constant standing pose; the
+    # measured channels are the remaining 28.
+    offset = LEGS_WAIST_SLICE.stop
+    measured = slice(offset, len(CANONICAL_STATE_NAMES))
+    low_measured, high_measured = low[measured], high[measured]
+    worst = float(np.abs(np.concatenate([low_measured, high_measured])).max())
+    if worst > bound_rad:
+        # ``offset`` maps a position in either concatenated half back to its
+        # canonical channel name.
+        half = low_measured.size
+        offenders = sorted(
+            {
+                CANONICAL_STATE_NAMES[offset + int(index) % half]
+                for index in np.flatnonzero(
+                    np.abs(np.concatenate([low_measured, high_measured])) > bound_rad
+                )
+            }
+        )
+        raise ValueError(
+            f"{config.state_field} statistics reach {worst:.4f} rad, beyond the physical "
+            f"bound {bound_rad} rad, on {offenders}; a non-physical sample reached the "
+            "normaliser, which would collapse those channels"
+        )
+    return {"state_abs_max_rad": worst, "bound_rad": bound_rad}
 
 
 def source_instruction(config: ConversionConfig, collection: str) -> str:

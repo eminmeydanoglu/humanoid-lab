@@ -172,6 +172,20 @@ models:
     # /hfm/cache/checkpoints symlink described in the Dockerfile.
     local_dir: checkpoints
     required_files: [config.json, model.safetensors, action_header.safetensors]
+  psi0_sonic_dream:
+    # Released multi-task Psi0 SONIC policy, shipped as a complete run directory
+    # (run_config.json, argv.txt, checkpoints/ckpt_40000/model.safetensors with
+    # the deploy loader's vlm_model./action_header. keys), so the unified
+    # evaluation UI serves it directly as an extra ψ option.  Its own config
+    # names one camera (observation.images.head) and a 270x480 transform; the
+    # launcher reads both from that config and the bridge sends its frame under
+    # the declared key, so the identity check still holds per entry.
+    repo: USC-PSI-Lab/psi-model
+    revision: 4c6f9776fc5b18d87945254175e38bb74b9d7748
+    variant: psi0/sonic-checkpoints/multi-task.psi-dream.2609092156
+    gated: false
+    local_dir: checkpoints
+    required_files: [run_config.json, argv.txt, checkpoints/ckpt_40000/model.safetensors]
   groot_n17_base:
     repo: nvidia/GR00T-N1.7-3B
     revision: 2fc962b973bccdd5d8ce4f67cc63b264d6886495

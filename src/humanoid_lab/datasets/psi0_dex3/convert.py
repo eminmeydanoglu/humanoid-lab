@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -27,11 +27,116 @@ from .contract import (
     CANONICAL_STATE_NAMES,
     HAND_DIM,
     ACTION_MODEL_DIM,
+    PHYSICAL_HAND_SAMPLE_BOUND_RAD,
     SOURCE_STATE_DIM,
     ConversionConfig,
     source_state_permutation,
     standing_lower_body,
 )
+
+
+@dataclass(frozen=True)
+class HandRepair:
+    """Which physically impossible measured samples were replaced, and how.
+
+    ``channels`` maps a canonical joint name to how many of that episode's
+    frames were repaired; ``invalid_source_samples`` is their total.  The raw
+    values are never lost: they stay in the frozen source parquet and this
+    record is carried into the conversion manifest next to the episode, so a
+    repaired frame is always attributable.
+    """
+
+    policy: str
+    threshold_rad: float
+    channels: dict[str, int]
+
+    @property
+    def invalid_source_samples(self) -> int:
+        return int(sum(self.channels.values()))
+
+    @property
+    def repaired(self) -> bool:
+        return bool(self.channels)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "policy": self.policy,
+            "threshold_rad": self.threshold_rad,
+            "channels": dict(sorted(self.channels.items())),
+            "invalid_source_samples": self.invalid_source_samples,
+        }
+
+
+#: Fail closed rather than impute: a measured sample this far outside the model
+#: is non-physical, and a corpus that suddenly contains many of them is a
+#: collector regression, not something a converter should quietly paper over.
+#: The observed rate over the frozen corpus is 314 samples in 2,587,515 frames.
+MAX_REPAIRABLE_SAMPLES_PER_EPISODE = 256
+
+
+def repair_nonphysical_samples(
+    state: np.ndarray,
+    names: tuple[str, ...],
+    *,
+    bound_rad: float = PHYSICAL_HAND_SAMPLE_BOUND_RAD,
+) -> tuple[np.ndarray, HandRepair]:
+    """Replace physically impossible samples by interpolation over valid ones.
+
+    A single-revolution joint cannot hold a position beyond the model's largest
+    absolute limit, so a value outside ``±bound_rad`` is a recording artefact
+    (the frozen corpus contains isolated spikes up to 3363 rad).  Such samples
+    are replaced per channel by linear interpolation between the nearest valid
+    samples, which keeps the episode on its own timeline and preserves the
+    temporal structure the action chunk depends on.
+
+    Leading/trailing invalid runs have no valid sample on one side; they are
+    filled with the nearest valid value.  A channel that is invalid everywhere
+    is refused, because there is nothing left to interpolate from.
+
+    ``names`` labels each channel so the repair record is readable and stable
+    against a future reordering of the source layout.
+    """
+    measured = np.asarray(state, dtype=np.float64)
+    if measured.ndim != 2:
+        raise ValueError(f"measured state must be [T, D], got {measured.shape}")
+    if len(names) != measured.shape[1]:
+        raise ValueError(
+            f"{len(names)} channel names for {measured.shape[1]} measured columns"
+        )
+    invalid = np.abs(measured) > bound_rad
+    channels: dict[str, int] = {}
+    if not invalid.any():
+        return measured, HandRepair("none", float(bound_rad), channels)
+
+    total = int(invalid.sum())
+    if total > MAX_REPAIRABLE_SAMPLES_PER_EPISODE:
+        raise ValueError(
+            f"{total} measured samples exceed the physical bound {bound_rad} rad in one "
+            f"episode (limit {MAX_REPAIRABLE_SAMPLES_PER_EPISODE}); refusing to impute a "
+            "corpus-scale defect"
+        )
+
+    repaired = measured.copy()
+    positions = np.arange(measured.shape[0], dtype=np.float64)
+    for channel in range(measured.shape[1]):
+        bad = invalid[:, channel]
+        if not bad.any():
+            continue
+        good = ~bad
+        if not good.any():
+            raise ValueError(
+                f"measured channel {names[channel]!r} is outside {bound_rad} rad on every "
+                "frame; there is no valid sample to interpolate from"
+            )
+        # np.interp clamps outside the sampled range, which fills a leading or
+        # trailing invalid run with the nearest valid value.
+        repaired[bad, channel] = np.interp(
+            positions[bad], positions[good], measured[good, channel]
+        )
+        channels[names[channel]] = int(bad.sum())
+
+    policy = "linear_interpolation_over_valid_source_samples"
+    return repaired, HandRepair(policy, float(bound_rad), channels)
 
 
 @dataclass(frozen=True)
@@ -47,6 +152,16 @@ class RawEpisode:
     video_file: Path
     video_start_s: float
     video_stop_s: float
+    #: Absolute path of the frozen source parquet these rows were read from, so
+    #: an auditor can re-read the untouched values without re-deriving layout.
+    data_path: Path | None = None
+    #: Row range ``[from, to)`` of this episode inside ``data_path``; one source
+    #: parquet holds every episode of its collection.
+    data_slice: tuple[int, int] | None = None
+    #: Which physically impossible samples were replaced before this episode was
+    #: used.  Empty for the 99.9% of episodes that need no repair; the raw
+    #: values remain in the frozen source parquet, referenced by ``data_file``.
+    repair: HandRepair = field(default_factory=lambda: HandRepair("none", PHYSICAL_HAND_SAMPLE_BOUND_RAD, {}))
 
     @property
     def frames(self) -> int:
@@ -272,16 +387,21 @@ def read_raw_episode(config: ConversionConfig, collection: str, episode_index: i
     key = f"videos/{config.camera_source_key}"
     if f"{key}/chunk_index" not in row:
         raise ValueError(f"{collection}/{episode_index}: the metadata has no {config.camera_source_key} segment")
+    measured = np.asarray([record["observation.state"] for record in records], dtype=np.float64)
+    repaired, repair = repair_nonphysical_samples(measured, state_names)
     return RawEpisode(
         collection=collection,
         episode_index=episode_index,
-        state=np.asarray([record["observation.state"] for record in records], dtype=np.float32),
+        state=repaired.astype(np.float32),
         timestamp=np.asarray([record["timestamp"] for record in records], dtype=np.float64),
         state_names=state_names,
         data_file=str(data_file.relative_to(dataset)),
         video_file=dataset / f"{key}/chunk-{int(row[key + '/chunk_index']):03d}/file-{int(row[key + '/file_index']):03d}.mp4",
         video_start_s=float(row[key + "/from_timestamp"]),
         video_stop_s=float(row[key + "/to_timestamp"]),
+        data_path=data_file,
+        data_slice=(start, stop),
+        repair=repair,
     )
 
 
@@ -310,6 +430,7 @@ __all__ = [
     "CANONICAL_HAND_NAMES",
     "CANONICAL_STATE_NAMES",
     "ConvertedEpisode",
+    "HandRepair",
     "RawEpisode",
     "action_mask",
     "anchor_validity",
@@ -320,4 +441,5 @@ __all__ = [
     "mapping_error",
     "nearest_indices",
     "read_raw_episode",
+    "repair_nonphysical_samples",
 ]

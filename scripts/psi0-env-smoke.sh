@@ -9,6 +9,7 @@ readonly SOURCE_DIR="${PSI0_SOURCE_DIR:-/workspace/humanoid-lab/third_party/Psi0
 readonly PYTHON_BIN="${PSI0_PYTHON:-/opt/venvs/psi0/bin/python}"
 readonly PSI_HOME_DIR="${PSI_HOME:-/hfm}"
 readonly CKPT_DIR="${PSI0_CKPT_DIR:-$PSI_HOME_DIR/cache/checkpoints/psi0/postpre.sonic1.0.unifolm.2609092156.40k}"
+readonly DREAM_DIR="${PSI0_DREAM_DIR:-$PSI_HOME_DIR/cache/checkpoints/psi0/sonic-checkpoints/multi-task.psi-dream.2609092156}"
 readonly LOG_DIR="${PSI0_SMOKE_LOG_DIR:-/outputs/psi0-env-smoke}"
 readonly CONFIG_MODULE="${PSI0_CONFIG_MODULE:-finetune_real_psi0_config}"
 
@@ -137,6 +138,42 @@ PY
   echo "[ok] ckpt     $CKPT_DIR"
 }
 
+# The released multi-task checkpoint the unified evaluation UI can serve as its
+# ψ-Dream option.  It is a graded artifact: absent means "not downloaded", which
+# is a note, and a present-but-broken tree is a failure.
+check_dream_checkpoint() {
+  if [[ ! -d "$DREAM_DIR" ]]; then
+    echo "[--] dream    not downloaded (./dev.sh fetch-psi0-ckpt psi0_sonic_dream)"
+    return 0
+  fi
+  local f
+  for f in run_config.json argv.txt checkpoints/ckpt_40000/model.safetensors; do
+    require_file "$DREAM_DIR/$f" "ψ-Dream run file"
+  done
+  "$PYTHON_BIN" - "$DREAM_DIR" <<'PY'
+import json
+import os
+import sys
+
+from safetensors import safe_open
+
+root = sys.argv[1]
+config = json.load(open(os.path.join(root, "run_config.json"), encoding="utf-8"))
+repack = config["data"]["transform"]["repack"]
+image_keys = repack["image_keys"]
+assert len(image_keys) == 1, f"the bridge serves one camera; run declares {image_keys}"
+resize = config["data"]["transform"]["model"]["resize"]["size"]
+ckpt = os.path.join(root, "checkpoints", "ckpt_40000", "model.safetensors")
+with safe_open(ckpt, framework="pt") as handle:
+    names = list(handle.keys())
+prefixes = {name.split(".")[0] for name in names}
+assert {"vlm_model", "action_header"} <= prefixes, f"deploy loader prefixes missing: {sorted(prefixes)}"
+print(f"[ok] ckpt     ψ-Dream: {len(names)} tensors, {os.path.getsize(ckpt) / 1e9:.2f} GB, "
+      f"camera {image_keys[0]}, resize {resize}")
+PY
+  echo "[ok] ckpt     $DREAM_DIR"
+}
+
 mkdir -p "$LOG_DIR"
 echo "psi0 environment smoke -> $LOG_DIR"
 check_source
@@ -144,4 +181,5 @@ check_interpreter
 check_stack
 check_config_cli
 check_checkpoint
-echo "PASS: psi0 environment and warm-start checkpoint are usable"
+check_dream_checkpoint
+echo "PASS: psi0 environment and released checkpoints are usable"
