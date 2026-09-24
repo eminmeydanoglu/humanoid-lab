@@ -795,7 +795,11 @@ psi0_isaac_eval() {
   local policy_clock="simulation" policy_clock_file="" policy_clock_timeout_s="5.0"
   local bridge_index controller_job
   local -a eval_args=() isaac_args=()
-  local profile_file=configs/profiles/isaac-g1-sonic-blockstacking-dex3.json
+  # The training caption says "blue", but the demonstrated third cube renders
+  # green.  Keep the exact trained prompt and match the evaluation image to the
+  # demonstrations by default; --scene-profile still selects another profile.
+  local profile_file=configs/profiles/isaac-g1-sonic-blockstacking-dex3-green-third.json
+  local eval_task=BlockStacking explicit_scene=0
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -803,6 +807,8 @@ psi0_isaac_eval() {
       --checkpoint-dir=*) checkpoint_dir="${1#*=}"; shift ;;
       --checkpoint-step) checkpoint_step="${2:-}"; shift 2 ;;
       --checkpoint-step=*) checkpoint_step="${1#*=}"; shift ;;
+      --task) eval_task="${2:-}"; shift 2 ;;
+      --task=*) eval_task="${1#*=}"; shift ;;
       --groot-checkpoint-dir) groot_checkpoint_dir="${2:-}"; shift 2 ;;
       --groot-checkpoint-dir=*) groot_checkpoint_dir="${1#*=}"; shift ;;
       # The released multi-task ψ-Dream checkpoint: a host-or-container path like
@@ -858,17 +864,23 @@ psi0_isaac_eval() {
       # instead of depending on the client's own 'i' key reaching it.  Off
       # unless asked for, so every default command is unchanged.
       --initial-pose-handshake) eval_args+=("$1"); shift ;;
-      # Opt-in scene variant: a profile that differs from the shipped one only
-      # in how one cube is rendered.  The shipped profile stays the default, so
-      # every command without this flag runs the scene it ran before.
-      --scene-profile) profile_file="${2:-}"; shift 2 ;;
-      --scene-profile=*) profile_file="${1#*=}"; shift ;;
+      # Explicit scene selection, including the original blue rendering for
+      # controlled comparisons with previous evaluation runs.
+      --scene-profile) profile_file="${2:-}"; explicit_scene=1; shift 2 ;;
+      --scene-profile=*) profile_file="${1#*=}"; explicit_scene=1; shift ;;
       *)
         # Everything else belongs to the bridge/UI launcher on the other side of
         # docker exec; it owns the flag's meaning and its validation.
         eval_args+=("$1"); shift ;;
     esac
   done
+  case "$eval_task" in
+    BlockStacking) ;;
+    PickApple) [ "$explicit_scene" -eq 1 ] || profile_file=configs/profiles/isaac-g1-sonic-pickapple-dex3.json ;;
+    PickGum) [ "$explicit_scene" -eq 1 ] || profile_file=configs/profiles/isaac-g1-sonic-pickgum-dex3.json ;;
+    *) echo "error: --task must be BlockStacking, PickApple or PickGum" >&2; return 2 ;;
+  esac
+  eval_args+=("--task" "$eval_task")
   [ -n "$checkpoint_dir" ] && [ -n "$groot_checkpoint_dir" ] || {
     echo "usage: $0 psi0-isaac-eval --checkpoint-dir PSI_RUN --checkpoint-step STEP --groot-checkpoint-dir GROOT_CHECKPOINT [--psi-dream-checkpoint-dir PSI_DREAM_RUN] [--host H] [--port P] [--gui|--headless] [--duration S] [--record-video PATH] [--video-timestamps-output PATH] [--samples-output PATH] [--tracking-output PATH] [--metrics-output PATH] [--policy-clock simulation|wall] [--policy-clock-file PATH] [--policy-clock-timeout-s S] [--groot-left-hand-contract model-independent|compatibility|model-coupled] [--psi0-neck-policy error|discard] [--gravity-feedforward] [--reset-pose-file PATH] [--reset-pose-hold] [--warmstart-tokens PATH] [--warmstart-delay-s S] [--initial-pose-handshake] [--scene-profile PATH] [--telemetry-dir PATH]" >&2
     return 2

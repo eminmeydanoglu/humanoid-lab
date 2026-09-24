@@ -183,6 +183,7 @@ class Session:
         self._last_action_time: Optional[float] = None
         self._last_action_index: Optional[int] = None
         self._sent_count = 0
+        self._neck_discard_count = 0
 
         self._policy_frame: Optional[np.ndarray] = None
         self._policy_frame_time: Optional[float] = None
@@ -340,6 +341,7 @@ class Session:
             self._last_action_time = None
             self._last_action_index = None
             self._sent_count = 0
+            self._neck_discard_count = 0
             self._policy_frame = None
             self._policy_frame_time = None
             self._error = reset_error
@@ -360,6 +362,7 @@ class Session:
             last_action_time = self._last_action_time
             last_index = self._last_action_index
             sent = self._sent_count
+            neck_discards = self._neck_discard_count
 
         monitor_status = self.monitor.status() if self.monitor is not None else {}
         now = time.time()
@@ -381,6 +384,7 @@ class Session:
                 "last_age_s": None if last_action_time is None else now - last_action_time,
                 "last_index": last_index,
                 "sent": sent,
+                "neck_padding_discards": neck_discards,
             },
         }
 
@@ -519,6 +523,9 @@ class Session:
             if not self._is_current(generation):
                 break
             packed = adapter.pack(reply.action)  # raises on a bad width/neck/NaN
+            if adapter.last_adapted is not None and adapter.last_adapted.neck_discarded:
+                with self._lock:
+                    self._neck_discard_count += 1
             published = False
             if self._send_gate.is_set() and self._is_current(generation):
                 published = bool(self._publisher.publish(packed))
@@ -589,6 +596,9 @@ class Session:
                     continue
                 last_version = reply.version
                 packed = adapter.pack(reply.action)
+                if adapter.last_adapted is not None and adapter.last_adapted.neck_discarded:
+                    with self._lock:
+                        self._neck_discard_count += 1
                 published = False
                 if self._send_gate.is_set() and self._is_current(generation):
                     published = bool(self._publisher.publish(packed))

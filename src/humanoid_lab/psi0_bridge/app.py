@@ -133,7 +133,10 @@ def create_app(
         instruction = body.get("instruction", "") if isinstance(body, dict) else ""
         if require_canonical_prompt:
             try:
-                require_canonical(str(instruction))
+                if prompt == CANONICAL_PROMPT:
+                    require_canonical(str(instruction))
+                elif str(instruction) != prompt:
+                    raise PromptMismatch(f"instruction must equal the selected task prompt: {prompt}")
             except PromptMismatch as exc:
                 return JSONResponse({"detail": str(exc), "canonical_prompt": prompt}, status_code=400)
         try:

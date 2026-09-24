@@ -195,15 +195,14 @@ class RunDirectoryValidationTest(unittest.TestCase):
         self.assertEqual(configured.groot_capture_max_requests, 4)
         self.assertEqual(configured.groot_left_hand_contract, "model-independent")
 
-    def test_neck_padding_discard_is_explicit_and_invalid_modes_fail(self) -> None:
+    def test_masked_neck_padding_is_discarded_by_default_and_strict_mode_remains(self) -> None:
         base = ["--checkpoint-dir", str(self.run_dir), "--checkpoint-step", "40000"]
-        self.assertEqual(self.launcher.parse_args(base).psi0_neck_policy, "error")
-        with self.assertRaises(SystemExit):
-            self.launcher.parse_args(base + ["--psi0-neck-policy", "discard"])
+        self.assertEqual(self.launcher.parse_args(base).psi0_neck_policy, "discard")
         self.assertEqual(
-            self.launcher.parse_args(base + ["--telemetry-dir", "/tmp/session", "--psi0-neck-policy", "discard"]).psi0_neck_policy,
+            self.launcher.parse_args(base + ["--psi0-neck-policy", "discard"]).psi0_neck_policy,
             "discard",
         )
+        self.assertEqual(self.launcher.parse_args(base + ["--psi0-neck-policy", "error"]).psi0_neck_policy, "error")
         with self.assertRaises(SystemExit):
             self.launcher.parse_args(base + ["--psi0-neck-policy", "ignore"])
 
@@ -506,14 +505,14 @@ class PolicyDeviceRemovalTest(unittest.TestCase):
         self.assertIn("--initial-pose-handshake",
                       text.split("usage: $0 psi0-isaac-eval", 1)[1].splitlines()[0])
 
-    def test_the_scene_profile_is_opt_in_and_keeps_the_shipped_default(self) -> None:
-        """Only the flag names another scene; every other launch stays canonical."""
+    def test_the_default_scene_matches_demonstration_color_and_can_be_overridden(self) -> None:
+        """The default scene matches the videos; the flag can select another."""
         text = DEV_SH.read_text(encoding="utf-8")
         self.assertIn("--scene-profile) profile_file=", text)
-        # The default is still the shipped BlockStacking profile: the flag
-        # replaces the initial value, it does not add a second profile.
+        # The dataset caption calls the third cube blue, while the videos show
+        # it green.  The default scene must use the demonstration-matched look.
         self.assertIn(
-            "local profile_file=configs/profiles/isaac-g1-sonic-blockstacking-dex3.json", text
+            "local profile_file=configs/profiles/isaac-g1-sonic-blockstacking-dex3-green-third.json", text
         )
         self.assertIn("--scene-profile",
                       text.split("usage: $0 psi0-isaac-eval", 1)[1].splitlines()[0])
@@ -531,7 +530,7 @@ class DevShEntrypointTest(unittest.TestCase):
         self.assertIn("psi0-isaac-eval)", text)
         self.assertIn("psi0_isaac_eval", text)
         self.assertIn("scripts/psi0-isaac-eval.py", text)
-        self.assertIn("configs/profiles/isaac-g1-sonic-blockstacking-dex3.json", text)
+        self.assertIn("configs/profiles/isaac-g1-sonic-blockstacking-dex3-green-third.json", text)
         # One unattended manager remains alive while the UI switches PSI/GR00T.
         self.assertIn("run_sonic_controller zmq_manager", text)
         self.assertIn("SONIC zmq_manager ready", text)

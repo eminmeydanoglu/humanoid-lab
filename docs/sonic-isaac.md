@@ -11,6 +11,11 @@ robotun Unitree DDS topiklerini konuşur.
 ./dev.sh sonic-controller             # 2. terminal: resmî SONIC (planner + klavye)
 ```
 
+Hedef eklem iskeletini görmek için Isaac'in Stage panelinde
+`/World/SonicTargetSkeleton` öğesinin göz simgesini aç. Başlangıçta gizlidir;
+SONIC geçerli komut gönderdiğinde sarı eklem noktaları ve camgöbeği bağlar
+robotun üzerinde güncellenir. `Joints` ve `Bones` için ayrı bir kontrol gerekmez.
+
 Isaac komutu varsayılan olarak süresiz çalışır; pencere veya terminal
 kapatılıncaya kadar açık kalır. Yalnız süreli bir koşu istendiğinde örneğin
 `--duration 60` verilir. `--test` koşulları, açıkça süre verilmezse otomatik

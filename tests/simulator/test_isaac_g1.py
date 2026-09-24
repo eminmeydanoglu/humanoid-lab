@@ -609,7 +609,11 @@ class IsaacG1BlockStackingSceneTests(unittest.TestCase):
         """
         variant_path = ROOT / "configs/profiles/isaac-g1-sonic-blockstacking-dex3-green-third.json"
         self.assertTrue(variant_path.is_file())
-        variant = json.loads(variant_path.read_text())
+        raw_variant = json.loads(variant_path.read_text())
+        self.assertEqual(raw_variant["base_profile"], self.BLOCKS.name)
+        self.assertNotIn("camera", raw_variant)
+        self.assertNotIn("robot", raw_variant)
+        variant = RunProfile._load_data(variant_path, set())
         shipped = json.loads(self.BLOCKS.read_text())
         third = variant["scene"]["cubes"][2]
         # The identity stays "blue" -- that is what the prompt and the telemetry

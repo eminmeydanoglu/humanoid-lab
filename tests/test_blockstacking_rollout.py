@@ -149,12 +149,12 @@ class WarmStartCommandTest(unittest.TestCase):
         command = self.driver.build_launcher_command(args, paths)
         self.assertEqual(command[command.index("--policy-clock-file") + 1], paths["policy_clock"])
 
-    def test_masked_neck_discard_must_be_explicit_and_reaches_the_launcher(self) -> None:
+    def test_masked_neck_discard_is_default_and_strict_mode_reaches_launcher(self) -> None:
         canonical = self.driver.build_launcher_command(base_args(self.driver, []), self.paths)
-        self.assertNotIn("--psi0-neck-policy", canonical)
-        args = base_args(self.driver, ["--psi0-neck-policy", "discard"])
+        self.assertEqual(canonical[canonical.index("--psi0-neck-policy") + 1], "discard")
+        args = base_args(self.driver, ["--psi0-neck-policy", "error"])
         command = self.driver.build_launcher_command(args, self.paths)
-        self.assertEqual(command[command.index("--psi0-neck-policy") + 1], "discard")
+        self.assertEqual(command[command.index("--psi0-neck-policy") + 1], "error")
 
     def test_capture_hand_contract_and_psi_rtc_flags_reach_the_launcher(self) -> None:
         args = base_args(self.driver, [

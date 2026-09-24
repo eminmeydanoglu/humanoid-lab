@@ -66,7 +66,7 @@ from humanoid_lab.psi0_bridge.contracts import (  # noqa: E402
     ContractError,
 )
 from humanoid_lab.psi0_bridge.policy_server import PolicyServerError, PolicyServerProcess, probe_info  # noqa: E402
-from humanoid_lab.psi0_bridge.prompt import CANONICAL_PROMPT  # noqa: E402
+from humanoid_lab.psi0_bridge.prompt import CANONICAL_PROMPT, TASK_PROMPTS  # noqa: E402
 from humanoid_lab.psi0_bridge.policy_clock import PolicyClock  # noqa: E402
 from humanoid_lab.psi0_bridge.psi0_client import Psi0ClientError, fetch_info  # noqa: E402
 from humanoid_lab.psi0_bridge.session import Session, SessionConfig, SessionError  # noqa: E402
@@ -89,6 +89,8 @@ class LaunchError(RuntimeError):
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Psi0-SONIC bridge + web UI")
+    parser.add_argument("--task", choices=tuple(TASK_PROMPTS), default="BlockStacking",
+                        help="evaluation task; selects its exact training caption")
     parser.add_argument("--checkpoint-dir", type=Path, required=True,
                         help="Psi0 run directory inside this container "
                              "(run_config.json, argv.txt, checkpoints/ckpt_<step>)")
@@ -127,10 +129,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="model-independent (default) matches training observations/actions; compatibility preserves legacy upstream behavior; model modes map live thumb/middle/index "
              "to trained thumb/index/middle observations and map actions back",
     )
-    parser.add_argument("--psi0-neck-policy", choices=("error", "discard"), default="error",
-                        help="error (default) rejects nonzero 80D neck padding; discard explicitly "
-                             "drops unsupported neck channels and records their values in telemetry "
-                             "(only use when the checkpoint's neck labels are masked padding)")
+    parser.add_argument("--psi0-neck-policy", choices=("error", "discard"), default="discard",
+                        help="discard (default) ignores the two unsupervised neck padding values "
+                             "in this SONIC 80D pack; error restores strict rejection. "
+                             "NaN/Inf and wrong action widths are always rejected")
     parser.add_argument("--psi0-rtc-off", action="store_true",
                         help="opt in to unguided independent psi0 chunks; guided test-time RTC "
                              "remains the compatibility default")
@@ -202,8 +204,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--policy-clock-timeout-s must be positive")
     if args.groot_capture_max_requests <= 0:
         parser.error("--groot-capture-max-requests must be positive")
-    if args.psi0_neck_policy == "discard" and args.telemetry_dir is None:
-        parser.error("--psi0-neck-policy discard requires --telemetry-dir to audit dropped values")
     if args.policy_clock_file is not None:
         args.policy_clock_file = args.policy_clock_file.resolve()
     return args
@@ -592,7 +592,7 @@ def main(argv: list[str] | None = None) -> int:
             camera_endpoint=args.camera_endpoint,
             action_endpoint=args.action_endpoint,
             reset_endpoint=args.isaac_control_endpoint,
-            instruction=CANONICAL_PROMPT,
+            instruction=TASK_PROMPTS[args.task],
             control_hz=args.control_hz,
             recv_timeout_s=args.recv_timeout,
             reset_timeout_ms=args.reset_timeout_ms,
@@ -763,7 +763,7 @@ def main(argv: list[str] | None = None) -> int:
         finetuned_entry_detail = dict(fine_entry.detail)
         groot = GrootProcessGroup(
             args.groot_checkpoint_dir,
-            prompt=CANONICAL_PROMPT,
+            prompt=TASK_PROMPTS[args.task],
             log_dir=(args.policy_log.parent if args.policy_log else Path("/tmp/groot-eval")),
             policy_clock=args.policy_clock,
             policy_clock_file=args.policy_clock_file,
@@ -791,16 +791,17 @@ def main(argv: list[str] | None = None) -> int:
 
         app = create_app(
             controller, webrtc=_webrtc_info(args), checkpoints=controller,
+            prompt=TASK_PROMPTS[args.task], task=args.task,
             subtitle="PSI / GR00T → NVIDIA SONIC → Isaac G1 + Dex3",
             policy_label="Policy backend",
         )
         labels = [entry.label for entry in entries] + ["GR00T"]
         print(f"[psi0-isaac-eval] UI on http://{args.host}:{args.port}/  "
-              f"(prompt: {CANONICAL_PROMPT!r}); models: {', '.join(labels)}", flush=True)
+              f"(prompt: {TASK_PROMPTS[args.task]!r}); models: {', '.join(labels)}", flush=True)
         if telemetry is not None:
             telemetry.event(
                 "policy",
-                prompt=CANONICAL_PROMPT,
+                prompt=TASK_PROMPTS[args.task],
                 fine_tuned=finetuned_entry_detail,
                 groot_checkpoint=str(args.groot_checkpoint_dir),
                 control_hz=args.control_hz,

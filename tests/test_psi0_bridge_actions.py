@@ -99,6 +99,8 @@ class ProtocolPackingTest(unittest.TestCase):
         action[78] = np.nan
         with self.assertRaises(ActionAdapterError):
             ActionAdapter().adapt(action)
+        with self.assertRaises(ActionAdapterError):
+            ActionAdapter(neck_policy="discard").adapt(action)
 
     def test_default_policy_is_still_fail_closed(self) -> None:
         """An out-of-tolerance neck must never be dropped without an explicit opt-in."""

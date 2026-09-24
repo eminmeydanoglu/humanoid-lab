@@ -233,8 +233,7 @@ def build_launcher_command(args: argparse.Namespace, paths: dict[str, str]) -> l
         command.extend(["--groot-capture-dir", paths["groot_capture"]])
         command.extend(["--groot-capture-max-requests", str(args.groot_capture_max_requests)])
     command.extend(["--groot-left-hand-contract", args.groot_left_hand_contract])
-    if args.psi0_neck_policy != "error":
-        command.extend(["--psi0-neck-policy", args.psi0_neck_policy])
+    command.extend(["--psi0-neck-policy", args.psi0_neck_policy])
     if args.psi0_rtc_off:
         command.append("--psi0-rtc-off")
     if args.headless:
@@ -439,8 +438,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=("compatibility", "model-independent", "model-coupled"),
         default="model-independent",
     )
-    parser.add_argument("--psi0-neck-policy", choices=("error", "discard"), default="error",
-                        help="explicitly discard masked 80D neck padding; default rejects it")
+    parser.add_argument("--psi0-neck-policy", choices=("error", "discard"), default="discard",
+                        help="discard masked 80D neck padding (default); error restores strict rejection")
     parser.add_argument("--psi0-rtc-off", action="store_true",
                         help="run psi0 with independent unguided chunks instead of guided RTC")
     parser.add_argument("--model", choices=("psi", "groot"), default="psi",

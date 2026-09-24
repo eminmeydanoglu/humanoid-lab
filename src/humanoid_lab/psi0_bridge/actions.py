@@ -11,13 +11,12 @@ finite and inside :data:`~humanoid_lab.psi0_bridge.contracts.NECK_NOOP_TOLERANCE
 of zero (a genuine no-op), and otherwise raises so the session transitions to
 ERROR and stops publishing.
 
-That fail-closed default is wrong for this repo's own 80D pack: ``action.neck``
-is unsupervised padding (``action.mask`` is zero on those two columns for every
-frame), so the served model emits arbitrary values there and a real run trips
-the check on its first chunk.  ``neck_policy="discard"`` is the explicit opt-in
-that drops the block and records what it dropped; it is never the default,
-because a genuinely neck-bearing embodiment must not have its command silently
-thrown away.
+That generic fail-closed default is wrong for this repo's own 80D pack:
+``action.neck`` is unsupervised padding (``action.mask`` is zero on those two
+columns for every frame), so the served model may emit arbitrary finite values
+there. The SONIC evaluation launcher selects ``neck_policy="discard"`` by
+default; the generic adapter retains ``error`` for unknown action contracts.
+The discarded values are available in telemetry when enabled.
 
 The first 64 dims are snapped onto the WBC's FSQ grid
 (``[-0.625, 0.625]`` step ``0.0625``) before publishing, exactly like every live

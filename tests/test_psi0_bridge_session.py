@@ -145,6 +145,7 @@ class FakeConnection:
 
     instances: list["FakeConnection"] = []
     action_width = 80
+    neck_values = (0.0, 0.0)
     messages_sent = 0
 
     def __init__(self, url: str, **_kwargs) -> None:
@@ -168,6 +169,8 @@ class FakeConnection:
         # A valid action: token on the FSQ grid, hands zero, neck a no-op zero.
         action = np.zeros((1, FakeConnection.action_width), dtype=np.float32)
         action[0, : min(64, FakeConnection.action_width)] = 0.1
+        if FakeConnection.action_width == 80:
+            action[0, 78:80] = FakeConnection.neck_values
         self._queue.put_nowait(_action_message(action, self._version))
 
     async def recv(self) -> str:
@@ -268,6 +271,7 @@ class SessionLifecycleTest(unittest.TestCase):
         FakePublisher.instances = []
         FakeResetClient.instances = []
         FakeConnection.action_width = 80
+        FakeConnection.neck_values = (0.0, 0.0)
         fail_flag[0] = False
         events.clear()
         self.monitor = FakeMonitor()
@@ -355,6 +359,17 @@ class SessionLifecycleTest(unittest.TestCase):
         # Only the service shutdown releases the socket.
         self.session.close()
         self.assertTrue(publisher.closed)
+
+    def test_masked_neck_values_do_not_stop_sonic_session(self) -> None:
+        from dataclasses import replace
+
+        FakeConnection.neck_values = (-0.03, -0.34)
+        self.session.config = replace(self.session.config, neck_policy="discard")
+        self.session.start()
+        self.assertTrue(self._wait_for(lambda: self.session.status()["action"]["sent"] >= 1))
+        status = self.session.status()
+        self.assertEqual(status["state"], RUNNING)
+        self.assertGreaterEqual(status["action"]["neck_padding_discards"], 1)
 
     def test_a_bad_action_width_moves_to_error_without_a_stale_repeat(self) -> None:
         FakeConnection.action_width = 77  # neither 78 nor 80

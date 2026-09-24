@@ -80,7 +80,35 @@ class CameraSpec:
 
 #: The three dynamic cube colors the block-stacking scene contract requires.
 SCENE_CUBE_COLORS = ("red", "yellow", "blue")
-SCENE_TARGET_KINDS = ("tape",)
+SCENE_TARGET_KINDS = ("tape", "plate")
+
+
+@dataclass(frozen=True)
+class ObjectSpec:
+    """A single primitive prop for the two plate-placement evaluations."""
+
+    name: str
+    shape: str
+    size_m: tuple[float, float, float]
+    mass_kg: float
+    position_m: tuple[float, float, float]
+    diffuse_rgb: tuple[float, float, float]
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any], surface_height_m: float) -> "ObjectSpec":
+        name = str(data["name"])
+        shape = str(data["shape"])
+        if (name, shape) not in {("apple", "sphere"), ("gum", "cuboid")}:
+            raise ContractError("scene.object requires an apple sphere or gum cuboid")
+        size = _tuple(data["size_m"], 3, "object.size_m")
+        position = _tuple(data["position_m"], 3, "object.position_m")
+        rgb = _tuple(data["diffuse_rgb"], 3, "object.diffuse_rgb")
+        mass = float(data["mass_kg"])
+        if not all(value > 0 for value in size) or not all(0 <= value <= 1 for value in rgb) or not math.isfinite(mass) or mass <= 0:
+            raise ContractError("scene.object size, mass or color is invalid")
+        if abs(position[2] - surface_height_m - size[2] / 2) > 1e-3:
+            raise ContractError("scene.object must rest on the declared table surface")
+        return cls(name, shape, size, mass, position, rgb)
 
 
 @dataclass(frozen=True)
@@ -195,11 +223,13 @@ class TargetSpec:
         if kind not in SCENE_TARGET_KINDS:
             raise ContractError(f"target.kind must be one of {SCENE_TARGET_KINDS}")
         color = str(data["color"])
-        if color != "black":
-            raise ContractError("target.color must be black")
+        if (kind == "tape" and color != "black") or (kind == "plate" and color not in {"pink", "teal"}):
+            raise ContractError("target color does not match its kind")
         size = _tuple(data["size_m"], 3, "target.size_m")
         if not all(value > 0.0 for value in size):
             raise ContractError("target.size_m must be positive")
+        if kind == "plate" and abs(size[0] - size[1]) > 1e-6:
+            raise ContractError("plate target diameter must be equal in x and y")
         position = _tuple(data["position_m"], 3, "target.position_m")
         rotation = _tuple(data.get("rotation_wxyz", (1.0, 0.0, 0.0, 0.0)), 4, "target.rotation_wxyz")
         if abs(sum(value * value for value in rotation) - 1.0) > 1e-5:
@@ -223,6 +253,7 @@ class SceneSpec:
 
     table: TableSpec
     cubes: tuple[CubeSpec, ...]
+    object: ObjectSpec | None
     target: TargetSpec
     camera_enabled: bool
     ground_plane: bool
@@ -230,19 +261,23 @@ class SceneSpec:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "SceneSpec":
         table = TableSpec.from_dict(data["table"])
-        raw_cubes = data["cubes"]
-        if not isinstance(raw_cubes, list) or len(raw_cubes) != len(SCENE_CUBE_COLORS):
-            raise ContractError(f"scene.cubes must list exactly {len(SCENE_CUBE_COLORS)} cubes")
+        raw_cubes = data.get("cubes", [])
+        if not isinstance(raw_cubes, list) or len(raw_cubes) not in {0, len(SCENE_CUBE_COLORS)}:
+            raise ContractError("scene.cubes must list zero or exactly three cubes")
         cubes = tuple(CubeSpec.from_dict(entry, table.surface_height_m) for entry in raw_cubes)
         colors = [cube.color for cube in cubes]
-        if sorted(colors) != sorted(SCENE_CUBE_COLORS):
+        if colors and sorted(colors) != sorted(SCENE_CUBE_COLORS):
             raise ContractError(f"scene.cubes colors must be exactly {SCENE_CUBE_COLORS}")
         if len(set(colors)) != len(colors):
             raise ContractError("scene.cubes colors must be unique")
         target = TargetSpec.from_dict(data["target"], table.surface_height_m)
+        obj = ObjectSpec.from_dict(data["object"], table.surface_height_m) if "object" in data else None
+        if (bool(cubes), obj is not None, target.kind) not in {(True, False, "tape"), (False, True, "plate")}:
+            raise ContractError("scene requires either three cubes and tape or one object and plate")
         return cls(
             table=table,
             cubes=cubes,
+            object=obj,
             target=target,
             camera_enabled=bool(data.get("camera_enabled", False)),
             ground_plane=bool(data.get("ground_plane", True)),
@@ -383,10 +418,7 @@ class RunProfile:
 
     @classmethod
     def load(cls, path: Path) -> "RunProfile":
-        try:
-            data = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ContractError(f"cannot load profile {path}: {exc}") from exc
+        data = cls._load_data(path, set())
         if int(data.get("schema_version", 0)) != 1:
             raise ContractError("unsupported Isaac G1 profile schema_version")
         dt = float(data["simulation"]["physics_dt"])
@@ -420,6 +452,26 @@ class RunProfile:
             support=SupportSpec.from_dict(support) if support is not None else None,
             scene=SceneSpec.from_dict(data["scene"]) if data.get("scene") is not None else None,
         )
+
+    @classmethod
+    def _load_data(cls, path: Path, seen: set[Path]) -> dict[str, Any]:
+        """Inherit shared plant and camera fields; task scenes replace whole scenes."""
+        path = path.resolve()
+        if path in seen:
+            raise ContractError(f"cyclic Isaac G1 profile inheritance at {path}")
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ContractError(f"cannot load profile {path}: {exc}") from exc
+        if not isinstance(data, dict):
+            raise ContractError(f"profile {path} must be a JSON object")
+        base_name = data.pop("base_profile", None)
+        if base_name is None:
+            return data
+        if not isinstance(base_name, str) or Path(base_name).name != base_name:
+            raise ContractError("base_profile must be a filename beside the profile")
+        base = cls._load_data(path.parent / base_name, seen | {path})
+        return {**base, **data}
 
     @property
     def camera_service_enabled(self) -> bool:
@@ -501,6 +553,11 @@ class RunProfile:
                         {"color": cube.color, "size_m": list(cube.size_m), "position_m": list(cube.position_m)}
                         for cube in self.scene.cubes
                     ],
+                    "object": (
+                        {"name": self.scene.object.name, "shape": self.scene.object.shape,
+                         "size_m": list(self.scene.object.size_m), "position_m": list(self.scene.object.position_m)}
+                        if self.scene.object is not None else None
+                    ),
                     "target": {
                         "kind": self.scene.target.kind,
                         "color": self.scene.target.color,

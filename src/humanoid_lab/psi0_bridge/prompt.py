@@ -12,6 +12,12 @@ CANONICAL_PROMPT = (
     "Stack the three cubic blocks on the black tape in the order red, yellow, blue."
 )
 
+TASK_PROMPTS = {
+    "BlockStacking": CANONICAL_PROMPT,
+    "PickApple": "Put the apple into the plate.",
+    "PickGum": "Put the gum into the plate.",
+}
+
 #: The literal contract the backend enforces: `text == CANONICAL_PROMPT`.
 PROMPT_CONTRACT = "text must equal CANONICAL_PROMPT exactly (no case, spacing or punctuation changes)"
 

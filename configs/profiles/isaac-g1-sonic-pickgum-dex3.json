@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "base_profile": "isaac-g1-sonic-blockstacking-dex3-green-third.json",
+  "profile_id": "isaac-g1-29dof-dex3-sonic-pickgum",
+  "scene": {
+    "camera_enabled": true,
+    "ground_plane": true,
+    "table": {
+      "asset_reference": "/data/models/unitree-sim-assets/assets/objects/PackingTable_2/PackingTable.usd",
+      "asset_provenance": "Same pinned packing table as BlockStacking; single-object plate placement approximates the Unitree demonstration table.",
+      "position_m": [
+        0.6,
+        0.0,
+        -0.1582904
+      ],
+      "rotation_wxyz": [
+        0.7071067812,
+        0.0,
+        0.0,
+        0.7071067812
+      ],
+      "surface_height_m": 0.8357609,
+      "surface_height_provenance": "Inherited from the measured BlockStacking profile; live scene probe verifies the same table asset and placement."
+    },
+    "target": {
+      "kind": "plate",
+      "color": "teal",
+      "size_m": [
+        0.18,
+        0.18,
+        0.012
+      ],
+      "position_m": [
+        0.48,
+        0.2,
+        0.8417609
+      ]
+    },
+    "object": {
+      "name": "gum",
+      "shape": "cuboid",
+      "size_m": [
+        0.061,
+        0.038,
+        0.015
+      ],
+      "mass_kg": 0.035,
+      "position_m": [
+        0.67,
+        0.35,
+        0.8432609
+      ],
+      "diffuse_rgb": [
+        0.005,
+        0.006,
+        0.01
+      ]
+    }
+  }
+}

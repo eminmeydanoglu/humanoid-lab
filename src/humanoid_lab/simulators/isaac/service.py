@@ -217,6 +217,10 @@ class SimulatorService:
         # Opt-in evaluation option, off by default: the loop keeps applying the
         # controller's own torque law unless a run asks for the gravity term.
         self.gravity_feedforward = gravity_feedforward
+        self._target_show_hands = profile.robot.hand.kind == "dex3"
+        self._target_overlay: Any | None = None
+        self._target_q: dict[str, float] | None = None
+        self._target_first_update_logged = False
         # Opt-in reset state, off by default: an upper-limb (arms + Dex3 hands)
         # pose applied at every reset instead of the profile's standing pose.
         # ``reset_pose_hold`` additionally holds those joints there until the
@@ -401,12 +405,21 @@ class SimulatorService:
                 ),
                 flush=True,
             )
-        if self.profile.scene is not None:
+        if self.profile.scene is not None and self.profile.scene.target.kind == "tape":
             # The declared black tape must render black, and the renderer
             # translates a material on first use: author the fix before any
             # reset or render rather than after the scene has been drawn once.
             material = flatten_tape_specular(self._sim.stage)
             print(json.dumps({"event": "isaac_g1_target_tape_material", **material}), flush=True)
+        elif self.profile.scene is not None and self.profile.scene.target.kind == "plate":
+            # The intense evaluation lights otherwise wash dark plastic into
+            # pale cyan and navy into light blue in the policy camera.
+            paths = ["/World/envs/env_0/TargetPlate"]
+            if self.profile.scene.object is not None and self.profile.scene.object.name == "gum":
+                paths.append("/World/envs/env_0/TaskObject")
+            for path in paths:
+                material = flatten_tape_specular(self._sim.stage, path)
+                print(json.dumps({"event": "isaac_g1_plate_scene_material", "prim_path": path, **material}), flush=True)
         # Mirror DirectRLEnv: rendering is only needed for a GUI or an RTX sensor.
         self._is_rendering = self._sim.has_gui() or self._sim.has_rtx_sensors()
         print('{"event":"isaac_g1_start","stage":"free_base"}', flush=True)
@@ -415,6 +428,21 @@ class SimulatorService:
         print('{"event":"isaac_g1_start","stage":"hard_reset"}', flush=True)
         self._sim.reset()  # The sole hard reset, after all topology exists.
         self._robot = self._scene["robot"]
+        if self._controller_config.get("provider") == "sonic_dds":
+            from .target_skeleton import TargetSkeletonOverlay
+            from ...controllers.sonic import BODY_JOINT_ORDER, hand_joint_names
+
+            self._target_overlay = TargetSkeletonOverlay(
+                self._sim.stage, include_palms=self._target_show_hands
+            )
+            visual_joints = set(BODY_JOINT_ORDER)
+            if self._target_show_hands:
+                visual_joints.update(hand_joint_names("left"))
+                visual_joints.update(hand_joint_names("right"))
+            missing = visual_joints - self._target_overlay.kinematics.actuated
+            if missing:
+                raise RuntimeError(f"SONIC target URDF lacks Isaac joints: {sorted(missing)}")
+            print(json.dumps({"event": "isaac_g1_target_skeleton", "joints": len(visual_joints), "stage_visibility": "invisible"}), flush=True)
         print('{"event":"isaac_g1_start","stage":"passive_actuators"}', flush=True)
         self._resolve_and_disable_actuators()
         self._resolve_initial_pose()
@@ -459,6 +487,7 @@ class SimulatorService:
         should_resume = was_playing if resume is None else resume
         default_root = self._write_initial_state_to_sim()
         self._scene.reset()
+        self._reset_scene_objects()
         self._resolve_and_disable_actuators()
         self._resolve_initial_pose()
         self._rearm_reset_pose_hold()
@@ -485,6 +514,9 @@ class SimulatorService:
         # declared start-up support goes back up for exactly that window: a
         # reset robot that no controller has claimed yet must not fall over.
         self._control_mode = PASSIVE
+        self._target_q = None
+        if self._target_overlay is not None:
+            self._target_overlay.clear()
         if self._support_active:
             self._start_support()
         self._transition(TimelineState.PLAYING if should_resume else TimelineState.PAUSED)
@@ -505,6 +537,21 @@ class SimulatorService:
             self._initial_joint_pos, self._robot.data.default_joint_vel.clone().zero_()
         )
         return default_root
+
+    def _reset_scene_objects(self) -> None:
+        """Restore dynamic task props when Reset starts a new evaluation."""
+        if self.profile.scene is None:
+            return
+        import torch
+
+        names = ([f"cube_{cube.color}" for cube in self.profile.scene.cubes]
+                 if self.profile.scene.object is None else ["task_object"])
+        for name in names:
+            rigid = self._scene[name]
+            root = rigid.data.default_root_state.clone()
+            root[:, :3] += self._scene.env_origins
+            rigid.write_root_pose_to_sim(root[:, :7])
+            rigid.write_root_velocity_to_sim(torch.zeros((1, 6), device=rigid.device))
 
     # ------------------------------------------------------------- kinematic
 
@@ -1086,11 +1133,11 @@ class SimulatorService:
             if self._head_camera_panel is None:
                 raise RuntimeError("failed to create the GPU-backed head-camera viewport")
         self._control_window = ui.Window(
-            "G1 Simulator", width=300, height=110, position_x=1090, position_y=120
+            "G1 Simulator", width=300, height=110, position_x=20, position_y=120
         )
         with self._control_window.frame:
             with ui.VStack(spacing=8, height=0):
-                ui.Label("Passive robot: motors disabled")
+                ui.Label(f"Controller: {self._controller_config.get('provider', 'none')}")
                 ui.Button("Reset Robot", height=36, clicked_fn=self._request_reset_from_ui)
                 ui.Label("Reset restores the initial pose; physics keeps running.")
 
@@ -1157,6 +1204,23 @@ class SimulatorService:
         # Built outside the configclass body so the intermediate mapping is not
         # auto-annotated into a config field.
         scene_cubes = {} if scene_spec is None else {cube.color: _cube_cfg(cube) for cube in scene_spec.cubes}
+        scene_object = None if scene_spec is None else scene_spec.object
+        if scene_object is not None:
+            if scene_object.shape == "sphere":
+                object_spawn = sim_utils.SphereCfg(radius=scene_object.size_m[0] / 2,
+                    rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+                    mass_props=sim_utils.MassPropertiesCfg(mass=scene_object.mass_kg),
+                    collision_props=sim_utils.CollisionPropertiesCfg(),
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=scene_object.diffuse_rgb))
+            else:
+                object_spawn = sim_utils.CuboidCfg(size=scene_object.size_m,
+                    rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+                    mass_props=sim_utils.MassPropertiesCfg(mass=scene_object.mass_kg),
+                    collision_props=sim_utils.CollisionPropertiesCfg(),
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=scene_object.diffuse_rgb))
+            object_cfg = RigidObjectCfg(prim_path="{ENV_REGEX_NS}/TaskObject",
+                init_state=RigidObjectCfg.InitialStateCfg(pos=scene_object.position_m),
+                spawn=object_spawn)
 
         @configclass
         class IsaacG1BaseSceneCfg(InteractiveSceneCfg):
@@ -1185,23 +1249,30 @@ class SimulatorService:
                         rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
                     ),
                 )
-                cube_red = scene_cubes["red"]
-                cube_yellow = scene_cubes["yellow"]
-                cube_blue = scene_cubes["blue"]
+                if scene_object is None:
+                    cube_red = scene_cubes["red"]
+                    cube_yellow = scene_cubes["yellow"]
+                    cube_blue = scene_cubes["blue"]
+                else:
+                    task_object = object_cfg
                 target = AssetBaseCfg(
-                    prim_path="{ENV_REGEX_NS}/TargetTape",
+                    prim_path="{ENV_REGEX_NS}/TargetTape" if scene_spec.target.kind == "tape" else "{ENV_REGEX_NS}/TargetPlate",
                     init_state=AssetBaseCfg.InitialStateCfg(
                         pos=scene_spec.target.position_m,
                         rot=scene_spec.target.rotation_wxyz,
                     ),
                     # A flat marker with no collider: it labels the goal without
                     # perturbing the cubes or the robot that reach for it.
-                    spawn=sim_utils.CuboidCfg(
-                        size=scene_spec.target.size_m,
+                    spawn=(sim_utils.CuboidCfg(size=scene_spec.target.size_m,
                         visual_material=sim_utils.PreviewSurfaceCfg(
-                            diffuse_color=_TARGET_DIFFUSE_RGB, metallic=_TARGET_METALLIC, roughness=0.9
-                        ),
-                    ),
+                            diffuse_color=_TARGET_DIFFUSE_RGB, metallic=_TARGET_METALLIC, roughness=0.9))
+                        if scene_spec.target.kind == "tape" else
+                        sim_utils.MeshCylinderCfg(radius=scene_spec.target.size_m[0] / 2,
+                            height=scene_spec.target.size_m[2],
+                            collision_props=sim_utils.CollisionPropertiesCfg(),
+                            visual_material=sim_utils.PreviewSurfaceCfg(
+                                diffuse_color=(0.115, 0.04, 0.03) if scene_spec.target.color == "pink" else (0.006, 0.03, 0.034),
+                                roughness=0.85))),
                 )
             robot: ArticulationCfg = robot_cfg
 
@@ -1935,6 +2006,14 @@ class SimulatorService:
                 self._update_reset_pose_hold(command.body)
                 self._apply_hand_command(command.left_hand, "left")
                 self._apply_hand_command(command.right_hand, "right")
+                if self._target_overlay is not None:
+                    target = dict(zip(self._body_layout.names, command.body.q))
+                    if self._target_show_hands:
+                        for side, hand_command in (("left", command.left_hand), ("right", command.right_hand)):
+                            layout = self._hand_layouts[side]
+                            if layout is not None and hand_command is not None:
+                                target.update(zip(layout.names, hand_command.q))
+                    self._target_q = target
                 if self.tick % 4 == 0:
                     self._append_tracking_row(command)
         except CommandError as error:
@@ -1943,6 +2022,9 @@ class SimulatorService:
             command = None
             valid = False
         if not valid or command is None:
+            if self._target_q is not None and self._target_overlay is not None:
+                self._target_overlay.clear()
+            self._target_q = None
             self._stale_ticks += 1
             if self._control_mode == CONTROLLED:
                 self._passive_since_tick = self.tick
@@ -2509,7 +2591,9 @@ class SimulatorService:
         return self._asset_top_height_m("/World/envs/env_0/Table")
 
     def _target_top_height_m(self) -> float | None:
-        return self._asset_top_height_m("/World/envs/env_0/TargetTape")
+        target = self.profile.scene.target if self.profile.scene is not None else None
+        name = "TargetTape" if target is None or target.kind == "tape" else "TargetPlate"
+        return self._asset_top_height_m(f"/World/envs/env_0/{name}")
 
     def _scene_probe(self) -> dict[str, Any] | None:
         """Live table, target and cube readings next to the profile's numbers.
@@ -2569,6 +2653,12 @@ class SimulatorService:
                 target_top - declared_target_top if target_top is not None else None
             ),
             "cubes": cubes,
+            "object": (
+                {"name": scene.object.name,
+                 "declared_center_xyz_m": scene.object.position_m,
+                 "live_center_xyz_m": [float(v) for v in self._scene["task_object"].data.root_pos_w[0, :3]]}
+                if scene.object is not None else None
+            ),
             "episode_id": self.episode_id,
             "physics_tick": self.tick,
         }
@@ -2675,6 +2765,15 @@ class SimulatorService:
         if rendered:
             self._perf_step_seconds += time.perf_counter() - step_started
             render_started = time.perf_counter()
+            if self._target_overlay is not None and self._target_q is not None:
+                self._target_overlay.update(
+                    self._target_q,
+                    tuple(float(v) for v in self._robot.data.root_pos_w[0].tolist()),
+                    tuple(float(v) for v in self._robot.data.root_quat_w[0].tolist()),
+                )
+                if not self._target_first_update_logged:
+                    print(json.dumps({"event": "isaac_g1_target_skeleton_live", "joint_targets": len(self._target_q)}), flush=True)
+                    self._target_first_update_logged = True
             self._sim.render()
             self._perf_render_seconds += time.perf_counter() - render_started
             self._perf_render_count += 1
