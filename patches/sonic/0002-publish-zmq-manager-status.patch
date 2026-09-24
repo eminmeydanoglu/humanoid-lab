@@ -1,0 +1,68 @@
+--- a/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/input_interface/zmq_manager.hpp
++++ b/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/input_interface/zmq_manager.hpp
+@@ -51,6 +51,7 @@
+ #include <thread>
+ #include <chrono>
+ #include <mutex>
++#include <zmq.hpp>
+ 
+ #include "input_interface.hpp"
+ #include "input_command.hpp"
+@@ -102,6 +103,9 @@
+       
+       type_ = InputType::NETWORK;
+       active_mode_ = ManagedMode::PLANNER;  // Default to planner mode
++      status_publisher_.setsockopt(ZMQ_LINGER, 0);
++      status_publisher_.setsockopt(ZMQ_SNDHWM, 2);
++      status_publisher_.bind("tcp://*:5561");
+       
+       // Create pose interface (for streamed motion mode)
+       pose_interface_ = std::make_unique<ZMQEndpointInterface>(
+@@ -320,6 +324,7 @@
+           pose_watchdog_.LeaveStream();
+         }
+       }
++      PublishStatus();
+     }
+ 
+     void handle_input(MotionDataReader& motion_reader,
+@@ -1228,6 +1233,28 @@
+     
+ 
+   private:
++    void PublishStatus() {
++      const auto now = std::chrono::steady_clock::now();
++      if (last_status_publish_ != std::chrono::steady_clock::time_point{} &&
++          now - last_status_publish_ < std::chrono::milliseconds(100)) return;
++      last_status_publish_ = now;
++      std::string age = "null";
++      if (pose_interface_) {
++        if (auto valid = pose_interface_->GetLastValidTokenTime()) {
++          age = std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(now - *valid).count());
++        }
++      }
++      const std::string payload = "sonic_status {\"mode\":\"" +
++          std::string(active_mode_ == ManagedMode::PLANNER ? "PLANNER" : "STREAMED_MOTION") +
++          "\",\"valid_token_age_ms\":" + age +
++          ",\"sequence\":" + std::to_string(++status_sequence_) + "}";
++      try {
++        status_publisher_.send(zmq::buffer(payload), zmq::send_flags::dontwait);
++      } catch (const zmq::error_t& error) {
++        std::cerr << "[ZMQManager] status publish failed: " << error.what() << std::endl;
++      }
++    }
++
+     // ------------------------------------------------------------------
+     // Configuration (set once in constructor)
+     // ------------------------------------------------------------------
+@@ -1238,6 +1265,10 @@
+     std::string planner_topic_;      ///< Topic for planner movement commands.
+     bool zmq_conflate_;              ///< ZMQ conflate option for pose topic.
+     bool zmq_verbose_;               ///< Verbose logging flag.
++    zmq::context_t status_context_{1};
++    zmq::socket_t status_publisher_{status_context_, zmq::socket_type::pub};
++    std::chrono::steady_clock::time_point last_status_publish_{};
++    uint64_t status_sequence_ = 0;
+     
+     // ------------------------------------------------------------------
+     // Owned sub-components

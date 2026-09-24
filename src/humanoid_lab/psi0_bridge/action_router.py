@@ -7,6 +7,8 @@ import threading
 import time
 from typing import Any
 
+from humanoid_lab.psi0_bridge.pose_validator import PosePacketError, validate_pose_packet
+
 
 class RouterError(RuntimeError):
     pass
@@ -59,12 +61,14 @@ class ActionRouter:
         public_endpoint: str = "tcp://*:5556",
         groot_endpoint: str = "tcp://127.0.0.1:5560",
         telemetry: Any | None = None,
+        validate_policy_packets: bool = False,
     ) -> None:
         self.public_endpoint = public_endpoint
         self.groot_endpoint = groot_endpoint
         #: Opt-in recorder of every message that reaches the SONIC action port,
         #: for both sources (see :mod:`humanoid_lab.psi0_bridge.telemetry`).
         self.telemetry = telemetry
+        self.validate_policy_packets = validate_policy_packets
         self._lock = threading.Lock()
         self._source = "psi"
         self._gate = False
@@ -99,10 +103,19 @@ class ActionRouter:
         self._drain_warmstart()
         self._drain_initial_pose()
 
+    def reset_fault(self) -> None:
+        """Clear a latched invalid-packet fault only after forwarding is halted."""
+        with self._lock:
+            if self._gate:
+                raise RouterError("halt policy forwarding before reset_fault")
+            self._error = None
+
     def resume(self) -> None:
         with self._lock:
             if self._closed:
                 raise RouterError("action router is closed")
+            if self._error:
+                raise RouterError(self._error)
             self._gate = True
 
     def halt(self) -> None:
@@ -208,8 +221,9 @@ class ActionRouter:
                 if groot in events:
                     payload = groot.recv()
                     if self._accept("groot"):
-                        output.send(payload)
-                        self._record("groot", payload)
+                        if self._validate_policy("groot", payload):
+                            output.send(payload)
+                            self._record("groot", payload)
                 self._forward_control(output)
                 self._forward_psi(output)
                 self._forward_warmstart(output)
@@ -236,8 +250,25 @@ class ActionRouter:
             with self._lock:
                 accepted = self._gate and self._source == "psi" and generation == self._generation
             if accepted:
-                output.send(payload)
-                self._record("psi", payload)
+                if self._validate_policy("psi", payload, generation):
+                    output.send(payload)
+                    self._record("psi", payload)
+
+    def _validate_policy(self, source: str, payload: bytes, generation: int | None = None) -> bool:
+        if self.validate_policy_packets:
+            try:
+                validate_pose_packet(payload)
+            except PosePacketError as exc:
+                with self._lock:
+                    if self._source == source and (generation is None or generation == self._generation):
+                        self._gate = False
+                        self._generation += 1
+                        self._error = f"invalid {source} pose packet: {exc}"
+                return False
+        with self._lock:
+            return self._gate and self._source == source and not self._closed and (
+                generation is None or generation == self._generation
+            )
 
     def _forward_warmstart(self, output: Any) -> None:
         while True:

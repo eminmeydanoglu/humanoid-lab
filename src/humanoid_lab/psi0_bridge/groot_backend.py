@@ -34,6 +34,10 @@ class GrootProcessGroup:
         log_dir: Path,
         server_port: int = 5550,
         action_port: int = 5560,
+        camera_host: str = "127.0.0.1",
+        camera_port: int = 5555,
+        state_zmq_host: str = "127.0.0.1",
+        state_zmq_port: int = 5557,
         ready_timeout_s: float = 300.0,
         policy_clock: str = "simulation",
         policy_clock_file: Path | None = None,
@@ -47,6 +51,10 @@ class GrootProcessGroup:
         self.log_dir = Path(log_dir)
         self.server_port = int(server_port)
         self.action_port = int(action_port)
+        self.camera_host = camera_host
+        self.camera_port = int(camera_port)
+        self.state_zmq_host = state_zmq_host
+        self.state_zmq_port = int(state_zmq_port)
         self.ready_timeout_s = float(ready_timeout_s)
         if policy_clock not in ("wall", "simulation"):
             raise ValueError(f"unknown policy clock {policy_clock!r}")
@@ -104,8 +112,8 @@ class GrootProcessGroup:
                f"--capture-max-requests={self.capture_max_requests} "
                if self.capture_dir is not None else "")
             + f"--host=127.0.0.1 --port={self.server_port} "
-            "--camera-host=127.0.0.1 --camera-port=5555 "
-            "--state-zmq-host=127.0.0.1 --state-zmq-port=5557 "
+            f"--camera-host={shlex.quote(self.camera_host)} --camera-port={self.camera_port} "
+            f"--state-zmq-host={shlex.quote(self.state_zmq_host)} --state-zmq-port={self.state_zmq_port} "
             f"--action-zmq-host=0.0.0.0 --action-zmq-port={self.action_port} "
             "--keyboard-zmq-host=127.0.0.1 --keyboard-zmq-port=5580 "
             "--embodiment-tag=unitree_g1_sonic "

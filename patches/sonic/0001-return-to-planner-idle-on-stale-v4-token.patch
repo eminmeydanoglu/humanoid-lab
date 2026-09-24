@@ -1,0 +1,126 @@
+--- a/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/input_interface/zmq_endpoint_interface.hpp
++++ b/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/input_interface/zmq_endpoint_interface.hpp
+@@ -406,6 +406,14 @@
+                                                "Protocol version 4 with empty token data!");
+                             return;
+                         }
++                        if (result.token_data.size() != 64 ||
++                            !std::all_of(result.token_data.begin(), result.token_data.end(),
++                                         [](double value) { return std::isfinite(value); })) {
++                            DisableZmqAndReset(motion_reader, current_motion, current_frame,
++                                               operator_state, reinitialize_heading, current_motion_mutex,
++                                               "Protocol version 4 token must contain 64 finite values");
++                            return;
++                        }
+                         
+                         // Keep robot active
+                         {
+@@ -415,6 +423,7 @@
+                             operator_state.play = true; // this should be redundant because the robot never read reference motion
+                         }
+                         
++                        last_valid_token_time_ = std::chrono::steady_clock::now();
+                         // Skip motion handling and keyboard controls
+                         return;
+                     }
+@@ -581,6 +590,11 @@
+       }
+       return last_receive_time_;
+     }
++
++    // Reception does not prove that a Protocol v4 token was accepted.
++    std::optional<std::chrono::steady_clock::time_point> GetLastValidTokenTime() const {
++      return last_valid_token_time_;
++    }
+     
+ private:
+     /// Reset the streamed motion buffer, merger state, and protocol version.
+@@ -595,6 +609,9 @@
+         stream_window_start_ = 0;
+         data_timestamp_.reset();
+         last_receive_time_.reset();
++        last_valid_token_time_.reset();
++        has_hand_joints_ = false;
++        has_vr_3point_control_ = false;
+     }
+     
+     /// Outcome of DecodeIntoMotionSequence().
+@@ -1857,6 +1874,7 @@
+     bool is_localhost_ = true;         ///< True if host_ is localhost (for directly comparing timestamps)
+     std::optional<std::chrono::steady_clock::time_point> data_timestamp_{};  ///< Timestamp of last received message from XR source
+     std::optional<std::chrono::steady_clock::time_point> last_receive_time_{}; ///< Timestamp of last OnPoseDataReceived (ms, monotonic).
++    std::optional<std::chrono::steady_clock::time_point> last_valid_token_time_{}; ///< Last accepted Protocol v4 token, main thread only.
+     uint64_t receive_count_ = 0;       ///< Total number of messages received.
+     uint64_t last_decode_time_ = 0;    ///< Timestamp of last DecodeIntoMotionSequence call (ms).
+     
+--- a/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/input_interface/zmq_manager.hpp
++++ b/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/input_interface/zmq_manager.hpp
+@@ -54,6 +54,7 @@
+ 
+ #include "input_interface.hpp"
+ #include "input_command.hpp"
++#include "pose_watchdog.hpp"
+ #include "zmq_endpoint_interface.hpp"
+ #include "zmq_packed_message_subscriber.hpp"
+ #include "../localmotion_kplanner.hpp"  // For LocomotionMode enum
+@@ -79,6 +80,8 @@
+       PLANNER = 0,         // Planner-only mode (self-managed planner topic)
+       STREAMED_MOTION = 1  // ZMQ streamed motion mode (pose topic via ZMQEndpointInterface)
+     };
++
++    ManagedMode GetManagedMode() const { return active_mode_; } // input thread only
+ 
+     ZMQManager(
+       const std::string& zmq_host,
+@@ -249,6 +252,11 @@
+             }
+ 
+             if (new_mode == ManagedMode::PLANNER) {
++              pose_watchdog_.LeaveStream();
++              switch_from_teleop_to_planner_ = false;
++              has_upper_body_control_ = false;
++              has_hand_joints_ = false;
++              has_vr_3point_control_ = false;
+               std::cout << "[ZMQManager] Switched to: PLANNER mode (safety reset)" << std::endl;
+               if (latest_planner_message_.valid) {
+                 constexpr auto PLANNER_MESSAGE_TIMEOUT = std::chrono::milliseconds(100);
+@@ -264,6 +272,7 @@
+                 }
+               }
+             } else if (new_mode == ManagedMode::STREAMED_MOTION) {
++              pose_watchdog_.EnterStream(std::chrono::steady_clock::now());
+               std::cout << "[ZMQManager] Switched to: STREAMED MOTION mode (safety reset)" << std::endl;
+               trigger_zmq_toggle = true;
+ 
+@@ -292,6 +301,23 @@
+         if (trigger_zmq_toggle) {
+           pose_interface_->TriggerZMQToggle();
+           std::cout << "[ZMQManager] ZMQ streaming enabled" << std::endl;
++        }
++        if (auto valid = pose_interface_->GetLastValidTokenTime()) {
++          pose_watchdog_.ValidToken(*valid);
++        }
++        if (pose_watchdog_.Expired(std::chrono::steady_clock::now())) {
++          // The workstation may have failed. Do not continue exposing the last
++          // external token or hand targets while waiting for another command.
++          std::cerr << "[ZMQManager] Valid Protocol v4 token timed out; returning to planner IDLE" << std::endl;
++          TriggerSafetyReset();
++          pose_interface_->TriggerSafetyReset();
++          active_mode_ = ManagedMode::PLANNER;
++          switch_from_teleop_to_planner_ = false;
++          is_planner_ready_ = false;
++          has_upper_body_control_ = false;
++          has_hand_joints_ = false;
++          has_vr_3point_control_ = false;
++          pose_watchdog_.LeaveStream();
+         }
+       }
+     }
+@@ -1228,6 +1254,7 @@
+     // Mode / message state
+     // ------------------------------------------------------------------
+     ManagedMode active_mode_;           ///< Current operational mode (PLANNER or STREAMED_MOTION).
++    PoseWatchdog pose_watchdog_{std::chrono::milliseconds{300}};
+     
+     std::mutex command_mutex_;          ///< Guards access to latest_command_.
+     CommandMessage latest_command_;     ///< Most recent (or accumulated) command message.

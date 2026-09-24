@@ -4,12 +4,16 @@ import socket
 import time
 import unittest
 
+import numpy as np
+
 try:
     import zmq
 except ImportError:  # pragma: no cover
     zmq = None
 
 from humanoid_lab.psi0_bridge.action_router import ActionRouter
+from humanoid_lab.psi0_bridge.action_router import RouterError
+from humanoid_lab.datasets.sonic.protocol_v4 import pack_latent_action_message
 
 
 def free_port() -> int:
@@ -46,6 +50,56 @@ class ActionRouterTest(unittest.TestCase):
     def receive(self) -> bytes:
         self.assertTrue(self.output.poll(1000))
         return self.output.recv()
+
+    def enable_policy_validation(self) -> None:
+        self.router.close()
+        self.router = ActionRouter(
+            public_endpoint=f"tcp://127.0.0.1:{self.public_port}",
+            groot_endpoint=f"tcp://127.0.0.1:{self.groot_port}",
+            validate_policy_packets=True,
+        )
+        time.sleep(0.2)
+
+    def valid_pose(self) -> bytes:
+        return pack_latent_action_message(
+            np.zeros(64, dtype=np.float32), 0,
+            np.zeros(7, dtype=np.float32), np.zeros(7, dtype=np.float32),
+        )
+
+    def test_validated_groot_packet_and_invalid_packet_closes_gate(self) -> None:
+        self.enable_policy_validation()
+        self.router.select("groot")
+        self.router.resume()
+        self.groot.send(self.valid_pose())
+        self.assertEqual(self.receive(), self.valid_pose())
+        self.groot.send(b"bad packet")
+        deadline = time.monotonic() + 1.0
+        while self.router.status()["gate_open"] and time.monotonic() < deadline:
+            time.sleep(0.01)
+        status = self.router.status()
+        self.assertFalse(status["gate_open"])
+        self.assertIn("invalid groot pose packet", status["error"] or "")
+        self.assertEqual(status["sent"], 1)
+        self.assertFalse(self.output.poll(100))
+        with self.assertRaises(RouterError):
+            self.router.resume()
+
+    def test_invalid_selected_psi_packet_closes_gate(self) -> None:
+        self.enable_policy_validation()
+        self.router.select("psi")
+        self.router.resume()
+        self.router.psi_sink.resume()
+        self.assertTrue(self.router.psi_sink.publish(self.valid_pose()))
+        self.assertEqual(self.receive(), self.valid_pose())
+        self.assertTrue(self.router.psi_sink.publish(b"bad packet"))
+        deadline = time.monotonic() + 1.0
+        while self.router.status()["gate_open"] and time.monotonic() < deadline:
+            time.sleep(0.01)
+        status = self.router.status()
+        self.assertFalse(status["gate_open"])
+        self.assertIn("invalid psi pose packet", status["error"] or "")
+        self.assertEqual(status["sent"], 1)
+        self.assertFalse(self.output.poll(100))
 
     def test_forwards_only_selected_source(self) -> None:
         self.router.select("psi")

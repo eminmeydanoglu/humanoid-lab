@@ -1,0 +1,8 @@
+{
+  "source_relative_to_data_root": "outputs/sonic-production-benchmark/G1_Dex3_ObjectPlacement_Dataset/episodes/episode_000003/action.npz",
+  "source_sha256": "407e1ac08690a4baa588bf44e6e742beb09f097eeb2679c77b15507695ef5368",
+  "frame_index": 0,
+  "action_dimensions": 78,
+  "training_valid_mask": true,
+  "packet_sha256": "022875b9dd8b4b350c4854642dd8f0f75d378aa536be1f748aab60f0d21d7b1b"
+}

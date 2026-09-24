@@ -184,11 +184,12 @@ class Monitor:
         return hz if hz > 0 else 1.0
 
     def _serve(self) -> None:
-        from .camera import CameraClient
+        from .camera import CameraClient, HttpColorCameraClient
         from .state_source import StateSubscriber
 
         try:
-            camera = CameraClient(self.camera_endpoint, timeout_ms=self.camera_timeout_ms)
+            client_class = HttpColorCameraClient if self.camera_endpoint.startswith("http://") else CameraClient
+            camera = client_class(self.camera_endpoint, timeout_ms=self.camera_timeout_ms)
             state = StateSubscriber(self.state_endpoint, topic=self.state_topic)
         except Exception as exc:  # noqa: BLE001 - report instead of dying silently
             with self._lock:
@@ -237,7 +238,10 @@ class Monitor:
                 self._camera_reconnects = camera.reconnects
             return
         with self._lock:
-            self._frame = FrameSnapshot(frame=frame, timestamp_s=time.monotonic())
+            self._frame = FrameSnapshot(
+                frame=frame,
+                timestamp_s=time.monotonic() - getattr(camera, "last_age_s", 0.0),
+            )
             self._camera_error = None
             self._frame_count += 1
             self._camera_reconnects = camera.reconnects

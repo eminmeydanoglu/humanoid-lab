@@ -14,6 +14,9 @@ Psi0 server owns the ``resize``/``center_crop`` transform (``/info`` pins it at
 from __future__ import annotations
 
 import io
+import time
+import urllib.error
+import urllib.request
 
 import numpy as np
 
@@ -159,3 +162,42 @@ class CameraClient:
     def close(self) -> None:
         self._socket.close(linger=0)
         self._context.term()
+
+
+class HttpColorCameraClient:
+    """Fresh JPEG client for the robot's color-only camera service."""
+
+    def __init__(self, endpoint: str, *, timeout_ms: int = 250) -> None:
+        if not endpoint.startswith("http://"):
+            raise ValueError("robot camera endpoint must be an HTTP URL")
+        self.endpoint = endpoint.rstrip("/")
+        self.timeout_s = timeout_ms / 1000.0
+        self.reconnects = 0
+        self.last_age_s = 0.0
+
+    def fetch(self) -> np.ndarray:
+        started = time.monotonic()
+        try:
+            with urllib.request.urlopen(
+                self.endpoint + "/frame/color.jpg", timeout=self.timeout_s
+            ) as response:
+                if response.headers.get_content_type() != "image/jpeg":
+                    raise CameraError("robot camera did not return JPEG")
+                age_ms = int(response.headers.get("X-Frame-Age-Ms", "-1"))
+                jpeg = response.read()
+        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+            self.reconnects += 1
+            raise CameraError(f"robot camera {self.endpoint}: {exc}") from exc
+        # Clocks on Raider and Unitree need not agree. The server's capture age
+        # plus this full request duration is a conservative bound on freshness.
+        effective_age_ms = age_ms + (time.monotonic() - started) * 1000
+        if age_ms < 0 or effective_age_ms > 500:
+            raise CameraError(f"robot camera frame age is at least {effective_age_ms:.0f} ms")
+        self.last_age_s = effective_age_ms / 1000.0
+        frame = _decode_jpeg(jpeg)
+        if frame.shape != FRAME_SHAPE:
+            raise CameraError(f"robot camera returned {frame.shape}, expected {FRAME_SHAPE}")
+        return frame
+
+    def close(self) -> None:
+        pass
