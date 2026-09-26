@@ -1,0 +1,5 @@
+---
+string state
+string reason
+string checkpoint
+string session_id

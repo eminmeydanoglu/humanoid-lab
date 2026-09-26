@@ -1,0 +1,64 @@
+{
+  "source_root": "/home/aksoy-lab/code/humanoid-lab-main/data/datasets/first_tur_ham/unitree-g1-dex3",
+  "index_dir": "outputs/dex3/index",
+  "output_dir": "outputs/dex3/run",
+  "policy": {
+    "action_modality": "action",
+    "trunk_weights": "outputs/weights/flux-3-action-base.safetensors",
+    "video_vae_id": "outputs/weights/video_vae.safetensors",
+    "text_encoder_id": "outputs/weights/text_encoder",
+    "attn_mode": "torch",
+    "action_dim": 28,
+    "camera_layout": "single",
+    "camera_keys": [
+      "images.head"
+    ],
+    "canvas_hw": [
+      192,
+      256
+    ],
+    "fps": 30.0,
+    "chunk_size": 32,
+    "gripper_flip_dims": [],
+    "action_parameterization": "absolute",
+    "absolute_action_dims": [],
+    "augment": true,
+    "vae_batch_windows": 1,
+    "compile_model": false
+  },
+  "steps": 20,
+  "cooldown_start": 19,
+  "cooldown_steps": 1,
+  "seed": 42,
+  "reseed_on_resume": true,
+  "windows_per_rank": 1,
+  "grad_accumulation": 1,
+  "num_workers": 8,
+  "prefetch_factor": 2,
+  "decoder": "pyav",
+  "shard_size": 4,
+  "param_dtype": "float32",
+  "compute_dtype": "bfloat16",
+  "reduce_dtype": "float32",
+  "activation_checkpointing": true,
+  "reshard_after_forward": true,
+  "betas": [
+    0.9,
+    0.99
+  ],
+  "eps": 1e-08,
+  "weight_decay": 0.05,
+  "fused_optimizer": true,
+  "ema_sigma_rels": [],
+  "checkpoint_every": 1000,
+  "log_every": 10,
+  "resume": "auto",
+  "frame_hw": [
+    192,
+    256
+  ],
+  "frozen_steps": 5,
+  "heads_warmup_steps": 5,
+  "trunk_warmup_steps": 10,
+  "max_grad_norm": 1.0
+}

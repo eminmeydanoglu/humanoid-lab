@@ -1,0 +1,47 @@
+{
+  "base_policy": "outputs/dex3/g1-base-policy",
+  "dataset": {
+    "source_root": "/home/aksoy-lab/code/humanoid-lab-main/data/datasets/first_tur_ham/unitree-g1-dex3",
+    "index_dir": "outputs/dex3/index",
+    "train_split": "train",
+    "val_split": "val",
+    "decoder": "pyav",
+    "batch_size": 1,
+    "vae_batch_windows": 1,
+    "grad_accumulation_steps": 1
+  },
+  "peft": {
+    "method_type": "LORA",
+    "r": 32,
+    "lora_alpha": 32,
+    "target_modules": null,
+    "full_training_modules": null
+  },
+  "optimizer": {
+    "type": "adamw",
+    "lr": 0.000192,
+    "betas": [0.9, 0.999],
+    "eps": 1e-08,
+    "weight_decay": 0.0,
+    "grad_clip_norm": 1.0
+  },
+  "scheduler": {
+    "type": "frozen_warmup_constant",
+    "freeze_steps": 0,
+    "num_warmup_steps": 0,
+    "warmup_steps_heads": 0,
+    "decay_steps": 0,
+    "cooldown_steps": 0
+  },
+  "run": {
+    "seed": 42,
+    "steps": 20,
+    "output_dir": "outputs/dex3/peft-smoke",
+    "save_checkpoint": true
+  },
+  "device": "cuda",
+  "dtype": "bfloat16",
+  "gradient_checkpointing": true,
+  "ema": false,
+  "compile": false
+}
