@@ -131,6 +131,16 @@ def test_server_plan_does_not_require_docker_or_write_anything(tmp_path):
     assert "DEALER/ROUTER" in plan["protocol"]
 
 
+def test_server_runs_in_foreground_and_rejects_session_management_flags():
+    source = SERVER.read_text(encoding="utf-8")
+    assert 'exec "$model_python" "$server"' in source
+    assert "setsid" not in source
+    for flag in ("--stop", "--status", "--foreground", "--log-dir"):
+        result = run(SERVER, flag)
+        assert result.returncode == 2
+        assert "unknown argument" in result.stderr
+
+
 def test_dev_entry_reaches_the_same_bootstrap_plan():
     # `./dev.sh flux-model-env --plan` is the documented entry point; it must
     # resolve to the same pinned plan without requiring the model environment.

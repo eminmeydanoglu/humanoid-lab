@@ -1,193 +1,84 @@
-# Flux 3 / Dex3 — simülasyonda çalıştırma
+# Flux Dex3 in the suspended PickApple simulator
 
-Komutları depo kökünden çalıştırın. Varsayılan sahne **PickApple**, prompt
-`Put the apple into the plate.`; robot 29 gövde + 14 Dex3 eklemiyle sabit
-kök üzerinde çalışır. `flux-sim` Isaac Sim'i, ROS 2 kamera köprüsü ve
-`flux_dex3` düğümünü, ayrıca GPU model sunucusunu başlatır. SONIC controller
-çalıştırılmaz.
+Run each process in its own terminal from the repository root. The simulator owns the scene and its camera/DDS streams; the model server owns the GPU model; ROS 2 owns the camera bridge and the Dex3 controller. You decide when to start and stop each process and when to call a task service. No session manager starts other processes on your behalf.
 
-## 1. Hazırlık (makine/checkout başına bir kez)
+## One-time preparation
 
-Mevcut kurulumda aşağıdaki kontroller yeterlidir:
+Run `./setup.sh` first if `.env` does not exist. Build the ROS container and the workspace after installing or changing ROS sources:
 
-```sh
-./dev.sh flux-model-server --check    # model ortamı, hazırlanmış adapter ve base model
-./dev.sh flux-sim config              # profil, motor ayarı, portlar ve görüntü modu
+```bash
+docker compose --env-file .env --profile flux build flux-ros
+docker compose --env-file .env up -d dev
+docker compose --env-file .env --profile flux up -d flux-ros
+./dev.sh flux-ros-build
 ```
 
-Yeni kurulumda, eksik olanları sırayla hazırlayın:
+The model environment and trained weights are separate from the repository. On a new installation, inspect `./dev.sh flux-model-env --plan`, create the environment with `./dev.sh flux-model-env`, and prepare the trained adapter with:
 
-```sh
-docker compose --profile flux build flux-ros
-./dev.sh flux-ros-build
-./dev.sh flux-model-env --plan
-./dev.sh flux-model-env              # indirip kalıcı GPU ortamını kurar
+```bash
 ./dev.sh flux-checkpoint --source /path/to/trained/checkpoint \
   --base-model-dir /path/to/base-policy-export
 ./dev.sh flux-model-server --check
 ```
 
-Eğitilmiş adapter ve base policy **harici dosyalardır**; otomatik indirilmezler.
-`flux-checkpoint` adapter'ın salt-okunur kopyasını varsayılan olarak
-`data/models/flux-dex3/checkpoint-2500` altına hazırlar. Base modeli kopyalamaz;
-ona işaret eden yolu hazırlanan adapter içinde günceller. `--check` geçmiyorsa
-`./dev.sh flux-model-server --plan` ile seçilen Python ve checkpoint yoluna bakın.
-Hazır GPU sunucusu `./dev.sh flux-model-server --status` ile `READY` raporlar.
+The adapter defaults to `data/models/flux-dex3/checkpoint-2500`; the model server uses the persistent `data/venvs/flux-model` interpreter if present. `./dev.sh flux-model-server --plan` shows the resolved paths without starting anything. Neither the adapter nor its base model is downloaded automatically.
 
-## 2. Simülasyonu aç, prompt ver, görevi çalıştır
+## Start the processes
 
-Yeni bir **etkileşimli** oturum için her koşuda yeni bir `--tag` kullanın:
+**Terminal 1 — GPU model server** (leave it running; its logs stay here):
 
-```sh
-./dev.sh flux-sim up --tag pickapple-01 --duration 600 --gui
-# Ayrı terminalde:
-./dev.sh flux-sim status
-./dev.sh flux-sim task --prompt "Put the apple into the plate." --run-s 15
+```bash
+./dev.sh flux-model-server
 ```
 
-`up` başlangıç kontrolünden sonra **aynı terminalde Isaac, ROS düğümü ve model
-sunucusunun loglarını canlı gösterir**. Ctrl-C yalnız log takibinden çıkar;
-çalışan simülasyonu kapatmak için `flux-sim stop` kullanın. Başka terminalde
-sonradan loglara bağlanmak için `./dev.sh flux-sim logs`; log takibi olmadan
-başlatmak için `./dev.sh flux-sim up --detach --tag pickapple-01 --duration 600`.
-`task` ROS StartTask servisine prompt'u gönderir,
-`--run-s` saniye boyunca komutları izler, ardından StopTask çağırır ve rapor
-üretir. Varsayılan görev süresi **8 saniyedir**. `--duration` ise Isaac
-simülasyonunun toplam süresidir (varsayılan **180 saniye**); görev süresinden
-uzun seçin. `status` model, kamera ve eklem akışlarının sağlığını kontrol eder.
+It binds `127.0.0.1:5561` and checks the interpreter and prepared checkpoint before loading. Ctrl-C stops this server. Start a second copy only after the first one exits.
 
-Prompt, `flux_dex3` düğümünün eğitim manifestindeki yazıyla **birebir aynı**
-olmalıdır; rastgele metin reddedilir. PickGum için sahneyi ve prompt'u birlikte
-değiştirin:
+**Terminal 2 — Isaac simulator** (scene, fixed-base robot, camera and DDS):
 
-```sh
-./dev.sh flux-sim up --tag pickgum-01 --duration 600 --gui \
-  --profile configs/profiles/isaac-g1-flux-dex3-pickgum.json
-./dev.sh flux-sim task --prompt "Put the gum into the plate." --run-s 15
+```bash
+./dev.sh flux-isaac configs/profiles/pick-apple-askida.json --gui
 ```
 
-Geçerli prompt'ların tamamı
-`third_party/flux/flux-inference/ros2/flux_dex3/flux_dex3/node.py` içindeki
-`PROMPTS` listesinde. Mevcut oturumun ayarları `data/outputs/flux-dex3/latest`
-ile işaret edilen etikette saklanır; `status`, `task`, `verify` ve `stop` bu
-oturumu seçer. Eski oturuma dönmek için `--tag ETIKET` verin. `up` etiketsiz
-çağrılırsa `latest` oturumunu yeniden kullanır; yeni sonuçlar için yeni etiket
-seçin. Aynı anda ikinci bir Isaac G1 koşusu başlatmayın.
+This profile inherits the apple-and-plate scene, fixes the G1 base in space, and selects the simulator's `flux_dds` actuator/feedback adapter. The simulator publishes the SONIC-format head camera on port 5555 for the ROS camera bridge. `--gui` opens the local Isaac window; omit it for the default WebRTC view or use `--headless` when a window is unnecessary. A run without `--duration` stays up until you stop it with Ctrl-C. Only one Isaac G1 run can own the simulator lock at a time. For the gum scene use `configs/profiles/pick-gum-askida.json` here and the corresponding gum prompt below.
 
-Tek komutla otomatik görev + doğrulama istiyorsanız:
+**Terminal 3 — ROS 2 launch** (camera bridge and Flux Dex3 node):
 
-```sh
-./dev.sh flux-sim e2e --prompt "Put the apple into the plate."
-# PickGum alternatifi:
-./dev.sh flux-sim e2e --profile configs/profiles/isaac-g1-flux-dex3-pickgum.json \
-  --prompt "Put the gum into the plate." --duration 300 --run-s 15
+```bash
+./dev.sh flux-ros ros2 launch flux_sim_camera flux_sim.launch.py \
+  model_endpoint:=tcp://127.0.0.1:5561 \
+  camera_endpoint:=tcp://127.0.0.1:5555 \
+  motor_output_config:=/workspace/humanoid-lab/configs/flux/flux-dex3-sim-motor-config.json \
+  enable_motor_commands:=true
 ```
 
-`e2e` yeni etiket üretir, görevi çalıştırıp durdurur, Isaac'in toplam süresinin
-bitmesini bekler, hareket kaydını doğrular ve oturumu kapatır. Devam ederken
-logları ayrı terminalde `./dev.sh flux-sim logs` ile izleyin. Mevcut Isaac
-koşusu varsa önce onun bitmesini bekleyin veya aşağıdaki `stop` ile kapatın.
+The launch logs stay in this terminal. Its camera bridge translates the simulator stream into `/camera/color/image_raw`; the Dex3 node reads this image and the simulated joint-state topics and publishes motor commands. The supplied motor config is **simulation-only**. Publishing requires both `enable_motor_commands:=true` and a valid motor config. To inspect observations without motor commands, omit the last two launch arguments; the node will create no command publishers. Stop the launch with Ctrl-C.
 
-## 3. ROS servisleriyle doğrudan kullanım
+The simulator and ROS container use ROS domain 42 and loopback-only CycloneDDS. The ROS container uses host networking, so `127.0.0.1` reaches the model server on the host and the simulator's camera port.
 
-Önce `./dev.sh flux-sim up --tag YENI_ETIKET --duration 600` çalıştırıp
-`./dev.sh flux-sim status` sonucunu kontrol edin. Başka terminalde, simülasyon
-ve ROS düğümü çalışırken:
+## Call the ROS services yourself
 
-```sh
+**Terminal 4 — operator commands.** Check readiness before starting a task:
+
+```bash
 ./dev.sh flux-ros ros2 service call /flux_dex3/get_status \
   flux_dex3_interfaces/srv/GetStatus '{}'
 ./dev.sh flux-ros ros2 service call /flux_dex3/start_task \
   flux_dex3_interfaces/srv/StartTask '{prompt: "Put the apple into the plate."}'
-# Komutlar StopTask çağrılana kadar sürer; otomatik süre sınırı yoktur.
-./dev.sh flux-ros ros2 service call /flux_dex3/stop_task \
-  std_srvs/srv/Trigger '{}'
-```
-
-`start_task` yanıtında `accepted: true` yalnız başlangıç isteğinin kabul
-edildiğini gösterir. Sonrasında `get_status` yanıtında `state: RUNNING` ve dolu
-`session_id` görmelisiniz. `READY` ile boş `session_id` gelirse görev kendini
-durdurmuştur; aşağıdaki hata ayıklama bölümündeki `ros-launch.log` dosyasına
-bakın. `accepted: false` ise `reason` alanına bakın: model `READY` olmalı,
-kamera/eklem ölçümleri güncel olmalı ve prompt eğitim manifestinde bulunmalı.
-Görev sürerken yeni bir prompt göndermeden önce `stop_task` çağırın. ROS
-servislerini doğrudan kullanırken `flux-sim task` komutunun süre sınırlı
-raporlaması ve otomatik StopTask davranışı devrede değildir.
-
-## 4. İzleme, kayıt ve kapatma
-
-Ayrı terminalde RViz'i açın:
-
-```sh
-./dev.sh flux-rviz
-```
-
-RViz robot eklemlerini ve kafa kamerasını gösterir. Isaac'in görünümü
-varsayılan olarak **WebRTC** ile yayınlanır (bağlantı adresi ve varsayılan
-49100 portu koşunun `isaac.log` dosyasında); kurulu istemci için
-`./dev.sh webrtc-client`. `--gui` yerel Isaac penceresini, `--headless` Isaac
-penceresi olmadan koşuyu seçer. RViz her durumda ayrı yerel X11 penceresidir.
-
-Normal süre sonunda Isaac `tracking.parquet` ve `summary.json` dosyalarını
-yazar. Kayıt doğrulaması ve kapatma:
-
-```sh
-./dev.sh flux-sim verify
-./dev.sh flux-sim stop --keep-model-server
-```
-
-`verify` için simülasyonun `--duration` süresini **normal biçimde** bitirmesini
-bekleyin; erken `stop` bu dosyaları yazdırmayabilir. `--keep-model-server`
-yüklenmiş GPU modelini korur; düz `./dev.sh flux-sim stop` modeli de kapatır.
-Çıktılar `data/outputs/flux-dex3/<tag>/` altındadır: `isaac.log`, `ros-launch.log`,
-`preflight.json`, `task-report.json` (yalnız `flux-sim task`), `tracking.parquet`,
-`summary.json`, `tracking-report.json` (doğrulamadan sonra).
-
-### StartTask kabul edildiği hâlde robot hareket etmiyorsa
-
-```sh
-tail -n 80 "data/outputs/flux-dex3/$(cat data/outputs/flux-dex3/latest)/ros-launch.log"
 ./dev.sh flux-ros ros2 service call /flux_dex3/get_status \
   flux_dex3_interfaces/srv/GetStatus '{}'
 ```
 
-`prediction rejected: stale observation` çıktısı, tahmin döndüğünde kamera
-ölçümünün simülasyon için **1,6 saniyelik** yaş sınırını aştığını ve motor
-komutlarının kesildiğini gösterir. Robot düğümünün varsayılan sınırı 1,2 saniye
-olarak kalır. Model `READY` kalsa da görev artık çalışmaz. GPU yükünü
-azaltıp WebRTC/yerel Isaac penceresi olmadan yeniden denemek için mevcut koşu
-işiniz bittikten sonra:
+The model must report READY and camera/joint observations must be fresh. An `accepted: true` start response confirms only that the request was accepted; confirm `state: RUNNING` and a nonempty `session_id` with `get_status`. The prompt must exactly match an entry in `flux_dex3/flux_dex3/node.py`'s `PROMPTS`. For the gum profile use `Put the gum into the plate.`. A task has no automatic time limit; stop it explicitly:
 
-```sh
-./dev.sh flux-sim stop --keep-model-server
-./dev.sh flux-sim up --tag pickapple-headless-01 --duration 600 --headless
-./dev.sh flux-sim task --prompt "Put the apple into the plate." --run-s 15
+```bash
+./dev.sh flux-ros ros2 service call /flux_dex3/stop_task \
+  std_srvs/srv/Trigger '{}'
 ```
 
-Gerekirse RViz penceresini de kapatıp deneyin; bu adım gecikmeyi azaltmayı
-hedefler, sonucu `task` raporu ve `ros-launch.log` ile doğrulayın. Yaş sınırını
-artırmak gecikmiş robot komutlarını kabul edeceği için sırf hareket elde etmek
-amacıyla değiştirmeyin.
+Check `get_status` again for the resulting state and reason. Stop the task before stopping ROS or Isaac; then use Ctrl-C in each process's own terminal. A rejected start or a task that stops unexpectedly is explained by the service's `reason` field and the ROS launch terminal. The model and simulator terminals show their respective failures separately.
 
-### RViz kamerası görünmüyorsa
+## Optional observation and recordings
 
-Kamera köprüsü `/camera/color/image_raw` ile aynı zaman damgalı
-`/camera/color/camera_info` yayımlar; RViz de `torso_link -> head_camera`
-dönüşümünü ekler. Eski ROS/RViz süreçleri kod değişikliklerini otomatik
-almaz. Aktif görevi bitirip eski RViz penceresini Ctrl-C ile kapattıktan sonra:
+For visualization, open RViz in another terminal with `./dev.sh flux-ros ros2 launch flux_sim_viz flux_rviz.launch.py`. RViz reads the simulated joint states and head-camera topic. The WebRTC client can be started separately with `./dev.sh webrtc-client` when installed.
 
-```sh
-./dev.sh flux-ros-build
-./dev.sh flux-sim stop --keep-model-server
-./dev.sh flux-sim up --tag pickapple-02 --duration 600 --gui
-./dev.sh flux-rviz                 # RViz'i de yeniden açın
-```
-
-Kamera çerçevesini kontrol etmek için
-`./dev.sh flux-ros ros2 run tf2_ros tf2_echo world head_camera` kullanın
-(Ctrl-C ile çıkılır). RViz **Camera** paneli 3B geometriyi görüntünün üzerine
-çizebilir; yalnız ham kamera pikselleri için **Image** panelini kullanın.
-
-Ek seçenekler için `./dev.sh flux-sim help`; motor komutları kapalı prova için
-`./dev.sh flux-sim e2e --no-motor-commands --headless`. DDS bağlantı testi
-`./dev.sh flux-dds-probe`, kamera köprüsü testleri `./dev.sh flux-ros-tests`.
+Add `--tracking-output /outputs/<run>/tracking.parquet --metrics-output /outputs/<run>/summary.json` to the simulator command if you need recorded motion and a summary; these files are written when Isaac ends normally. Choose a distinct output directory for each run. These recordings and visualization have no effect on service calls or process ownership.

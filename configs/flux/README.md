@@ -102,9 +102,9 @@ own range, and "physical" means the same numbers on both sides.
 
 - Live endpoint matching between the node's ROS topics and the simulator's raw
   DDS topics (`/arm_sdk` <-> `rt/arm_sdk`, `/lowstate` <-> `rt/lowstate`,
-  `/dex3/*/cmd|state` <-> `rt/dex3/*/cmd|state`).  The raw names follow the
-  `rmw_cyclonedds_cpp` mapping and the Unitree SDK examples; the wire check is
-  the integration owner's `scripts/flux-dds-probe.py`.
+  `/dex3/*/cmd|state` <-> `rt/dex3/*/cmd|state`). The raw names follow the
+  `rmw_cyclonedds_cpp` mapping and the Unitree SDK examples; check live topic
+  traffic with ROS 2 while the simulator and launch are running.
 - End-to-end model runs: this config is intended to replace the +/-2.6 rad
   diagnostic override without any override.  The first canonical revision
   (0.35 rad hands) aborted at seq=1 on a real model chunk; the 0.6 rad envelope

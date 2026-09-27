@@ -32,7 +32,7 @@ LAUNCH_PATH = (
     ROOT
     / "third_party/flux/flux-inference/ros2/flux_sim_viz/launch/flux_rviz.launch.py"
 )
-CANONICAL_PROFILE = ROOT / "configs/profiles/isaac-g1-flux-dex3-pickapple.json"
+CANONICAL_PROFILE = ROOT / "configs/profiles/pick-apple-askida.json"
 
 
 def urdf_joint_names() -> set[str]:

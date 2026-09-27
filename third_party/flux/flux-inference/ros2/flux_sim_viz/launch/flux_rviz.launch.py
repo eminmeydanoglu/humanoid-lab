@@ -20,7 +20,7 @@ from launch_ros.actions import Node
 from flux_sim_viz.urdf import DEFAULT_URDF, load_robot_description
 
 
-DEFAULT_PROFILE = Path("/workspace/humanoid-lab/configs/profiles/isaac-g1-flux-dex3-pickapple.json")
+DEFAULT_PROFILE = Path("/workspace/humanoid-lab/configs/profiles/pick-apple-askida.json")
 
 
 def camera_mount(profile_path: Path = DEFAULT_PROFILE):

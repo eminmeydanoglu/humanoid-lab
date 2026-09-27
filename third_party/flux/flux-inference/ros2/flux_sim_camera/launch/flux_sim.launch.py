@@ -40,7 +40,7 @@ def generate_launch_description():
         # this remains bounded and leaves the robot node's own default intact.
         DeclareLaunchArgument("freshness_s", default_value="0.5"),
         # Observation age reached 1.5 s during the livestream run.
-        DeclareLaunchArgument("max_chunk_age_s", default_value="1.6"),
+        DeclareLaunchArgument("max_chunk_age_s", default_value="2.0"),
         DeclareLaunchArgument("pair_tolerance_s", default_value="0.1"),
         DeclareLaunchArgument("camera_bridge", default_value="true"),
         Node(

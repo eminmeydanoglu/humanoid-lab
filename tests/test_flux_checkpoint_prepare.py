@@ -48,7 +48,8 @@ def make_checkpoint(root: Path, base_dir: Path | str) -> None:
 
 
 def run_script(*args):
-    return subprocess.run([sys.executable, str(SCRIPT), *args],
+    python = os.environ.get("FLUX_MODEL_PYTHON", sys.executable)
+    return subprocess.run([python, str(SCRIPT), *args],
                           capture_output=True, text=True)
 
 

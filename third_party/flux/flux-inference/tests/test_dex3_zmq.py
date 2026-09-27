@@ -252,3 +252,21 @@ def test_immutable_checkpoint_and_nonloopback_security(checkpoint):
         Dex3Server(str(checkpoint), bind_ip="0.0.0.0", server_secret_key="secret", client_keys_dir="keys")
     with pytest.raises(ValueError, match="CURVE"):
         Dex3Server(str(checkpoint), bind_ip="192.0.2.1")
+
+
+def test_worker_passes_merge_adapter_to_inference(checkpoint, monkeypatch):
+    seen = {}
+    inference = importlib.import_module("examples.dex3.g1_inference")
+
+    class StubInference:
+        @classmethod
+        def load(cls, path, *, device="cuda", merge_adapter=False):
+            seen["merge_adapter"] = merge_adapter
+            return FakeModel()
+
+    monkeypatch.setattr(inference, "G1Inference", StubInference)
+    server = Dex3Server(str(checkpoint), port=port(), merge_adapter=True)
+    server.stop_event.set()  # the worker still loads the model, then leaves its loop
+    server._worker()
+    assert server.results.get_nowait()[0] == "loaded"
+    assert seen["merge_adapter"] is True

@@ -33,8 +33,8 @@ MOTOR_CONFIG = ROOT / "configs" / "flux" / "flux-dex3-sim-motor-config.json"
 JOINT_LIMITS = ROOT / "configs" / "datasets" / "sonic" / "g1_joint_limits.json"
 
 FLUX_PROFILES = (
-    "isaac-g1-flux-dex3-pickgum.json",
-    "isaac-g1-flux-dex3-pickapple.json",
+    "pick-gum-askida.json",
+    "pick-apple-askida.json",
 )
 
 #: The declared raw-DDS contract, in the role names the provider uses.
@@ -537,8 +537,8 @@ class FluxProfileTests(unittest.TestCase):
 
     def test_the_profiles_keep_the_inherited_task_table(self) -> None:
         for name, base in (
-            ("isaac-g1-flux-dex3-pickgum.json", "isaac-g1-sonic-pickgum-dex3.json"),
-            ("isaac-g1-flux-dex3-pickapple.json", "isaac-g1-sonic-pickapple-dex3.json"),
+            ("pick-gum-askida.json", "isaac-g1-sonic-pickgum-dex3.json"),
+            ("pick-apple-askida.json", "isaac-g1-sonic-pickapple-dex3.json"),
         ):
             with self.subTest(profile=name):
                 flux = RunProfile.load(PROFILES / name)

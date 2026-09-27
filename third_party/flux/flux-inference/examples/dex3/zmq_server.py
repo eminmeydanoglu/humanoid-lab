@@ -76,7 +76,8 @@ class Dex3Server:
     """The ROUTER stays on the serving thread; the worker owns the only policy instance."""
 
     def __init__(self, checkpoint, *, bind_ip="127.0.0.1", port=5557, device="cuda",
-                 server_secret_key=None, client_keys_dir=None, model_loader=None, context=None):
+                 server_secret_key=None, client_keys_dir=None, model_loader=None, context=None,
+                 merge_adapter=False):
         address = ipaddress.ip_address(bind_ip)
         if address.is_unspecified:
             raise ValueError("wildcard bind is forbidden; select an explicit interface IP")
@@ -92,6 +93,7 @@ class Dex3Server:
         self.client_keys_dir = client_keys_dir
         self.model_loader = model_loader
         self.context = context
+        self.merge_adapter = merge_adapter
         self.status = "LOADING"
         self.identity = ""
         self.error = ""
@@ -110,7 +112,8 @@ class Dex3Server:
             if self.model_loader is None:
                 from examples.dex3.g1_inference import G1Inference
 
-                model = G1Inference.load(self.checkpoint, device=self.device)
+                model = G1Inference.load(self.checkpoint, device=self.device,
+                                         merge_adapter=self.merge_adapter)
             else:
                 model = self.model_loader(self.checkpoint, device=self.device)
             image = np.zeros((192, 256, 3), dtype=np.uint8)
@@ -274,9 +277,12 @@ def main():
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--server-secret-key", help="CURVE server .key_secret certificate")
     parser.add_argument("--client-keys-dir", help="directory of allowlisted client .key certificates")
+    parser.add_argument("--merge-adapter", action="store_true",
+                        help="merge the LoRA adapter into the base weights at load (in memory only)")
     args = parser.parse_args()
     Dex3Server(args.checkpoint, bind_ip=args.bind_ip, port=args.port, device=args.device,
-               server_secret_key=args.server_secret_key, client_keys_dir=args.client_keys_dir).serve_forever()
+               server_secret_key=args.server_secret_key, client_keys_dir=args.client_keys_dir,
+               merge_adapter=args.merge_adapter).serve_forever()
 
 
 if __name__ == "__main__":

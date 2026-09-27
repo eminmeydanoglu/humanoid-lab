@@ -1,5 +1,7 @@
 """G1 observation-to-action boundary without loading the 7B policy."""
 
+import sys
+import types
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -122,3 +124,83 @@ def test_saved_g1_processors_accept_live_observation():
     runner.policy.predict_action_chunk = lambda batch: torch.zeros(1, 32, 28)
     actions = runner.predict(np.zeros((192, 256, 3), np.uint8), np.zeros(28), "stack three block")
     assert actions.shape == (32, 28) and np.isfinite(actions).all()
+
+
+def test_load_merges_adapter_only_when_requested(monkeypatch, tmp_path):
+    """``merge_adapter`` bakes the LoRA delta in memory on request, after the device move."""
+    calls = []
+
+    class LoadedPolicy:
+        config = SimpleNamespace(
+            camera_order=[CAMERA],
+            action_dim=28,
+            chunk_size=32,
+            n_obs_steps=1,
+            canvas_hw=[192, 256],
+            action_representation="absolute",
+        )
+
+        def eval(self):
+            pass
+
+        def reset(self):
+            pass
+
+    class StubPolicy(LoadedPolicy):
+        @classmethod
+        def from_pretrained(cls, name, strict=True):
+            calls.append("base")
+            return cls()
+
+    class StubPeftConfig:
+        base_model_name_or_path = "base-policy"
+
+        @classmethod
+        def from_pretrained(cls, path):
+            calls.append("config")
+            return cls()
+
+    class StubPeftModel:
+        config = LoadedPolicy.config  # PeftModel forwards the base policy's config
+
+        @classmethod
+        def from_pretrained(cls, base, path, config=None, is_trainable=False):
+            calls.append("adapter")
+            return cls()
+
+        def to(self, device):
+            calls.append(f"to:{device}")
+            return self
+
+        def eval(self):
+            return self
+
+        def reset(self):
+            pass
+
+        def merge_adapter(self):
+            calls.append("merge")
+
+    modules = {
+        "lerobot": types.ModuleType("lerobot"),
+        "lerobot.policies": types.ModuleType("lerobot.policies"),
+        "lerobot.policies.factory": types.ModuleType("lerobot.policies.factory"),
+        "lerobot.policies.flux3": types.ModuleType("lerobot.policies.flux3"),
+        "lerobot.policies.flux3.modeling_flux3": types.ModuleType("lerobot.policies.flux3.modeling_flux3"),
+        "peft": types.ModuleType("peft"),
+    }
+    modules["lerobot.policies.factory"].make_pre_post_processors = lambda config, pretrained_path: (
+        FakePre(),
+        FakePost(),
+    )
+    modules["lerobot.policies.flux3.modeling_flux3"].Flux3Policy = StubPolicy
+    modules["peft"].PeftConfig = StubPeftConfig
+    modules["peft"].PeftModel = StubPeftModel
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+    assert isinstance(G1Inference.load(tmp_path, device="cpu", merge_adapter=True).policy, StubPeftModel)
+    assert calls.index("merge") > calls.index("to:cpu")
+    calls.clear()
+    G1Inference.load(tmp_path, device="cpu")
+    assert "merge" not in calls
