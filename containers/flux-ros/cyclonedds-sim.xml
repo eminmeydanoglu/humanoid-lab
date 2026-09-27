@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- Simulation-only profile: loopback only, with no multicast or routing.
+
+     This is the flux-ros copy of containers/cyclonedds-sim.xml.  The shared
+     file spells the loopback interface as address="lo", which the CycloneDDS
+     release in this container matches only against IP addresses; the ROS 2
+     side therefore names the loopback IPv4 address explicitly.  The SDK path
+     (unitree_sdk2py / the SONIC deployment) reads its own internal
+     configuration and is unaffected. -->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain id="any">
+    <General>
+      <Interfaces>
+        <NetworkInterface address="127.0.0.1" multicast="false" />
+      </Interfaces>
+      <AllowMulticast>false</AllowMulticast>
+      <DontRoute>true</DontRoute>
+    </General>
+  </Domain>
+</CycloneDDS>

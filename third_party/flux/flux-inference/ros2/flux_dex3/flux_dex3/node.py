@@ -42,6 +42,7 @@ class Dex3Node(Node):
         self.declare_parameter("endpoint", "tcp://127.0.0.1:5557")
         self.declare_parameter("camera_topic", "/camera/color/image_raw")
         self.declare_parameter("network_timeout_s", 2.0)
+        self.declare_parameter("max_chunk_age_s", 1.2)
         self.declare_parameter("freshness_s", 0.25)
         self.declare_parameter("pair_tolerance_s", 0.1)
         self.declare_parameter("client_certificate", "")
@@ -72,7 +73,10 @@ class Dex3Node(Node):
         self.events = queue.Queue()
         self.network = NetworkWorker(endpoint, self.events,
                                      float(self.get_parameter("network_timeout_s").value), public, secret, server)
-        self.chunk_executor = ChunkExecutor()
+        max_chunk_age_s = float(self.get_parameter("max_chunk_age_s").value)
+        if not 0 < max_chunk_age_s <= 2.0:
+            raise ValueError("max_chunk_age_s must be in (0, 2.0]")
+        self.chunk_executor = ChunkExecutor(max_chunk_age_s=max_chunk_age_s)
         self.command_output = None
         if self.get_parameter("enable_motor_commands").value:
             config_path = self.get_parameter("motor_output_config").value

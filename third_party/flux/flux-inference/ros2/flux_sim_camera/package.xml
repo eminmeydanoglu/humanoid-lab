@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>flux_sim_camera</name>
+  <version>0.1.0</version>
+  <description>Simulation-only SONIC ego_view to ROS Image bridge and Flux Dex3 launch.</description>
+  <maintainer email="maintainer@example.invalid">FLUX Action maintainers</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>flux_dex3</exec_depend>
+  <exec_depend>flux_dex3_interfaces</exec_depend>
+  <exec_depend>unitree_hg</exec_depend>
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

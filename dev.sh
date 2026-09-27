@@ -1100,6 +1100,57 @@ PY
   return "$controller_rc"
 }
 
+# ---------------------------------------------------------------------------
+# Flux 3 / Dex3 simulation loop
+#
+# The ROS side runs in the profile-gated flux-ros container; the GPU model
+# server, the ROS-side launch, the client exercise and its evidence are the
+# scripts/flux-* scripts.  dev.sh only owns container plumbing and the reuse of
+# the existing Isaac launcher.  The canonical `flux-sim e2e` run uses the
+# fixed-root calibrated PickApple scene and the Flux motor config under
+# configs/flux; `--no-motor-commands` is the command-disabled dry run.
+
+flux_ros_up() {
+  DC --profile flux up -d flux-ros >/dev/null
+}
+
+flux_dds_probe() { # [--sdk|--ros] [probe arguments]
+  # Default: both sides concurrently.  The sdk side runs where the simulator's
+  # DDS bindings live (the dev container), the ros side in flux-ros.
+  local side=both
+  case "${1:-}" in
+    --sdk) side=sdk; shift ;;
+    --ros) side=ros; shift ;;
+  esac
+  local -a probe_args=("$@")
+  if [ "${#probe_args[@]}" -eq 0 ]; then
+    probe_args=(--seconds 20)
+  fi
+  up_once
+  flux_ros_up
+  local sdk_pid="" sdk_log="" rc=0
+  if [ "$side" != "ros" ]; then
+    sdk_log="/tmp/humanoid-lab-flux-dds-sdk-$$.log"
+    DC exec -T dev bash -lc \
+      'source /opt/humanoid-lab/entrypoint.sh && use-isaac-sonic && cd /workspace/humanoid-lab && exec python3 scripts/flux-dds-probe.py --role sdk "$@"' \
+      -- "${probe_args[@]}" >"$sdk_log" 2>&1 &
+    sdk_pid=$!
+    sleep 2
+  fi
+  if [ "$side" != "sdk" ]; then
+    DC --profile flux exec -T flux-ros bash -lc \
+      'source /opt/humanoid-lab/flux-ros/entrypoint.sh && exec python3 /workspace/humanoid-lab/scripts/flux-dds-probe.py --role ros "$@"' \
+      -- "${probe_args[@]}" || rc=1
+  fi
+  if [ -n "$sdk_pid" ]; then
+    if ! wait "$sdk_pid"; then rc=1; fi
+    echo "[flux-dds-probe] sdk side:" >&2
+    cat "$sdk_log" >&2
+    rm -f -- "$sdk_log"
+  fi
+  return "$rc"
+}
+
 case "${1:-}" in
   "")
     up_once
@@ -1191,6 +1242,76 @@ case "${1:-}" in
     # Flags not listed here are passed to scripts/psi0-isaac-eval.py.
     up_once
     psi0_isaac_eval "${@:2}"
+    ;;
+  flux-isaac)
+    # Isaac for the Flux 3 / Dex3 loop: the scene profile is explicit (the
+    # calibrated fixed-root PickApple profile is the evaluation scene) and the
+    # head camera is published in SONIC's ego_view format for the ROS bridge.
+    profile_file="${2:-}"
+    [ -n "$profile_file" ] && [ -f "$profile_file" ] || {
+      echo "usage: $0 flux-isaac <profile.json> [--duration S] [runner args...]" >&2
+      exit 2
+    }
+    shift 2
+    g1_mode_args flux-isaac "$@"
+    up_once
+    run_isaac_g1 "$profile_file" "${G1_ARGS[@]}" --sonic-camera-endpoint tcp://*:5555 "$@"
+    ;;
+  flux-ros)
+    # The simulation-only ROS 2 container (Jazzy, pinned unitree_hg): a shell,
+    # or the command after the subcommand run inside it.
+    flux_ros_up
+    if [ "$#" -ge 2 ]; then
+      DC --profile flux exec -T flux-ros bash -lc \
+        'source /opt/humanoid-lab/flux-ros/entrypoint.sh && cd /workspace/humanoid-lab && exec "$@"' -- "${@:2}"
+    else
+      DC --profile flux exec flux-ros bash -lc \
+        'source /opt/humanoid-lab/flux-ros/entrypoint.sh && cd /workspace/humanoid-lab && exec bash'
+    fi
+    ;;
+  flux-ros-build)
+    flux_ros_up
+    DC --profile flux exec -T flux-ros bash -lc \
+      'source /opt/humanoid-lab/flux-ros/entrypoint.sh && exec bash /workspace/humanoid-lab/scripts/flux-ros-build.sh "$@"' -- "${@:2}"
+    ;;
+  flux-rviz)
+    # RViz over the running simulation: the repository's G1 URDF fed by the
+    # simulator's own measured joint state, plus the head camera.  Run
+    # `flux-sim up` first; this only opens the view.
+    flux_ros_up
+    DC --profile flux exec -T flux-ros bash -lc \
+      'source /opt/humanoid-lab/flux-ros/entrypoint.sh && cd /workspace/humanoid-lab && exec ros2 launch flux_sim_viz flux_rviz.launch.py "$@"' -- "${@:2}"
+    ;;
+  flux-ros-tests)
+    # Focused tests of the camera bridge's frame logic, run in the container
+    # that has the bridge's own dependencies.
+    flux_ros_up
+    DC --profile flux exec -T flux-ros bash -lc \
+      'source /opt/humanoid-lab/flux-ros/entrypoint.sh && cd /workspace/humanoid-lab/third_party/flux/flux-inference/ros2/flux_sim_camera && exec python3 -m pytest test -q "$@"' -- "${@:2}"
+    ;;
+  flux-checkpoint)
+    # Immutable adapter copy for the GPU server.  Runs on the host with the
+    # model interpreter because the server's own checkpoint_identity check is
+    # the acceptance test.
+    exec "${FLUX_MODEL_PYTHON:-/tmp/lerobot-peft-env/bin/python}" scripts/flux-prepare-checkpoint.py "${@:2}"
+    ;;
+  flux-model-server)
+    exec bash scripts/flux-model-server.sh "${@:2}"
+    ;;
+  flux-model-env)
+    # Pinned GPU environment for the model server: --plan / --check / install.
+    exec bash scripts/flux-bootstrap-model-env.sh "${@:2}"
+    ;;
+  flux-dds-probe)
+    # Wire compatibility between the simulator's Unitree DDS topics and the
+    # ROS 2 unitree_hg messages: both directions, both sides.
+    flux_dds_probe "${@:2}"
+    ;;
+  flux-sim)
+    # Canonical run (no flags): fixed-root PickApple scene + the Flux motor
+    # config under configs/flux; `--no-motor-commands` is the dry run.
+    # `flux-sim config` prints the resolved plan and the prerequisite checks.
+    exec bash scripts/flux-sim.sh "${@:2}"
     ;;
   doctor)
     ./doctor.sh
@@ -1361,7 +1482,7 @@ case "${1:-}" in
     exit 2
     ;;
   *)
-    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-direct-reference dex3|isaac-g1-sonic-fixed-base dex3|isaac-g1-sonic {dex3|inspire-ftp}|sonic-controller|psi0-isaac-eval --checkpoint-dir RUN_DIR --checkpoint-step STEP|sonic-dataset-validate|sonic-pilot|sonic-encode|sonic-review|sonic-review-serve|sonic-convert|sonic-convert-unitree|sonic-tests|sonic-verify|doctor|smoke|groot-finetune-smoke|psi0-smoke|psi0-dex3-check|psi0-dex3-run|psi0-tests|psi0-dex3-dataset-split|psi0-dex3-dataset-convert|psi0-dex3-dataset-validate|sync|fetch-models|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
+    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-direct-reference dex3|isaac-g1-sonic-fixed-base dex3|isaac-g1-sonic {dex3|inspire-ftp}|sonic-controller|flux-sim {up|status|task|verify|stop|config|e2e} [--livestream|--gui|--headless] [--no-motor-commands]|flux-isaac PROFILE|flux-model-env {--plan|--check}|flux-ros|flux-ros-build|flux-ros-tests|flux-rviz|flux-checkpoint|flux-model-server|flux-dds-probe|psi0-isaac-eval --checkpoint-dir RUN_DIR --checkpoint-step STEP|sonic-dataset-validate|sonic-pilot|sonic-encode|sonic-review|sonic-review-serve|sonic-convert|sonic-convert-unitree|sonic-tests|sonic-verify|doctor|smoke|groot-finetune-smoke|psi0-smoke|psi0-dex3-check|psi0-dex3-run|psi0-tests|psi0-dex3-dataset-split|psi0-dex3-dataset-convert|psi0-dex3-dataset-validate|sync|fetch-models|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
     exit 2
     ;;
 esac

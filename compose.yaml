@@ -97,3 +97,55 @@ services:
     tty: true
     restart: unless-stopped
     stop_grace_period: 30s
+
+  # The simulation-only ROS 2 side of the Flux 3 / Dex3 evaluation: the
+  # repository's own flux_dex3 node against the simulator's DDS (domain 42,
+  # loopback) and the GPU model server on 127.0.0.1:5561.  Profile-gated so no
+  # existing `up` starts it; the repository's ROS packages are built from the
+  # bind-mounted checkout into /data/flux-ros/ws by scripts/flux-ros-build.sh.
+  flux-ros:
+    image: humanoid-lab/flux-ros:${FLUX_ROS_TAG:-jazzy}
+    build:
+      context: .
+      dockerfile: containers/flux-ros/Dockerfile
+      args:
+        ROS_DIGEST: ${FLUX_ROS_DIGEST:-sha256:c3706ef0a0aa45413c07803cf433602f543b22e45b4855f6fca955c2d8ecc4e8}
+        UNITREE_ROS2_COMMIT: ${UNITREE_ROS2_COMMIT:-668d1ec5a05d1c38d3306bdca7d59f2ba3581a88}
+        DEVELOPER_UID: ${DEVELOPER_UID:-1000}
+        DEVELOPER_GID: ${DEVELOPER_GID:-1000}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    container_name: ${COMPOSE_PROJECT_NAME:-humanoid-lab}-flux-ros
+    hostname: humanoid-lab-flux-ros
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-42}
+      - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}
+      - CYCLONEDDS_URI=file:///opt/humanoid-lab/flux-ros/cyclonedds-sim.xml
+      - HUMANOID_SIM_DDS_DOMAIN_ID=42
+      - PYTHONDONTWRITEBYTECODE=1
+      # RViz draws on the host display; the rest of the stack is headless.
+      - DISPLAY=${DISPLAY:-:0}
+    volumes:
+      - ${HUMANOID_SOURCE_ROOT:?set HUMANOID_SOURCE_ROOT in .env}:/workspace/humanoid-lab
+      - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}:/data
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    network_mode: host
+    # RViz renders the robot model on the host GPU; the robot-side DDS traffic
+    # is unaffected by the reservation.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    profiles:
+      - flux
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - |
+        set -e
+        source /opt/humanoid-lab/flux-ros/entrypoint.sh
+        exec sleep infinity
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s

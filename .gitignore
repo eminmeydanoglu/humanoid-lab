@@ -8,7 +8,7 @@ plan_2.md
 # lock render cikti
 .generated/
 # kalici veri (dataset, cache, venv, model): repo icinde ama git disi
-data/
+/data/
 # python build artiklari
 *.egg-info/
 __pycache__/

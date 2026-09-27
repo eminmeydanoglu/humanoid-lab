@@ -12,7 +12,7 @@ from typing import Any, Mapping
 from ..contracts.commands import CommandError, JointCommand
 from .base import ControllerInterface, ControllerSource
 
-PROVIDERS = ("none", "scripted", "sonic_dds", "trajectory")
+PROVIDERS = ("none", "scripted", "sonic_dds", "flux_dds", "trajectory")
 
 
 def build_controller(
@@ -41,6 +41,13 @@ def build_controller(
         return (
             sonic_dds.SonicDdsController(settings, physics_dt=physics_dt, ttl_s=ttl_s),
             sonic_dds.interface(settings),
+        )
+    if provider == "flux_dds":
+        from . import flux_dds
+
+        return (
+            flux_dds.FluxDdsController(settings, physics_dt=physics_dt, ttl_s=ttl_s),
+            flux_dds.interface(settings),
         )
     if provider == "trajectory":
         from . import trajectory
