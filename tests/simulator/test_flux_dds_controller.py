@@ -318,14 +318,10 @@ class MotorConfigTests(unittest.TestCase):
         self.assertEqual(self.config["arm_mode_machine"], 5)
         self.assertEqual(self.config["max_tracking_error_rad"], 2.5)
 
-    def test_the_confirmations_are_declared_simulation_scoped(self) -> None:
-        # load_motor_config requires both flags true before the node publishes;
-        # the README next to the file states what they do and do not mean.
-        self.assertIs(self.config["control_authority_confirmed"], True)
-        self.assertIs(self.config["hand_revision_confirmed"], True)
+    def test_simulation_config_scope_is_documented(self) -> None:
         readme = (ROOT / "configs" / "flux" / "README.md").read_text()
-        self.assertIn("simulation only", readme)
-        self.assertIn("must not be copied to a real robot", readme)
+        self.assertIn("simulation settings do not establish hardware", readme)
+        self.assertIn("Use the robot-specific", readme)
 
 
 class PhysicalLimitGateTests(unittest.TestCase):

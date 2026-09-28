@@ -144,6 +144,57 @@ def test_wire_roundtrip_and_rejection(sample):
         protocol.decode_request([b"x" * (protocol.MAX_METADATA + 1)])
 
 
+def test_curve_accepts_full_resolution_image(checkpoint, tmp_path):
+    from zmq.auth import create_certificates, load_certificate
+    from zmq.auth.thread import ThreadAuthenticator
+
+    create_certificates(str(tmp_path), "server")
+    create_certificates(str(tmp_path), "client")
+    server_public, server_secret = load_certificate(str(tmp_path / "server.key_secret"))
+    client_public, client_secret = load_certificate(str(tmp_path / "client.key_secret"))
+    server = Dex3Server(str(checkpoint), port=port(), model_loader=lambda *args, **kwargs: FakeModel())
+
+    def configure_curve(context, socket):
+        auth = ThreadAuthenticator(context)
+        auth.start()
+        try:
+            auth.configure_curve(domain="*", location=str(tmp_path))
+            socket.curve_publickey = server_public
+            socket.curve_secretkey = server_secret
+            socket.curve_server = True
+        except Exception:
+            auth.stop()
+            raise
+        return auth
+
+    server._configure_curve = configure_curve
+    ready = threading.Event()
+    thread = threading.Thread(target=server.serve_forever, kwargs={"ready_event": ready}, daemon=True)
+    thread.start()
+    assert ready.wait(3)
+    context = zmq.Context()
+    sock = context.socket(zmq.DEALER)
+    sock.setsockopt(zmq.LINGER, 0)
+    sock.setsockopt(zmq.RCVTIMEO, 3000)
+    sock.curve_publickey = client_public
+    sock.curve_secretkey = client_secret
+    sock.curve_serverkey = server_public
+    sock.connect("tcp://127.0.0.1:{}".format(server.port))
+    try:
+        wait_status(sock, "READY")
+        image = np.zeros((480, 640, 3), np.uint8)
+        state = np.zeros(28, np.float32)
+        reply = exchange(sock, protocol.encode_predict_request("full-frame", 0, time.time(), "stack", image, state))
+        assert reply["type"] == "PREDICT"
+        assert reply["action_shape"] == [32, 28]
+    finally:
+        server.stop()
+        thread.join(3)
+        sock.close()
+        context.term()
+    assert not thread.is_alive()
+
+
 def test_server_status_busy_sessions_and_roundtrip(checkpoint, sample):
     model = FakeModel()
     gate = threading.Event()

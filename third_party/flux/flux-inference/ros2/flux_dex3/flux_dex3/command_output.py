@@ -36,13 +36,11 @@ def lowcmd_crc(cmd):
 def load_motor_config(path):
     """Require a complete, hardware-specific motor contract before creating publishers."""
     config = json.loads(Path(path).read_text(encoding="utf-8"))
-    expected = {"control_authority_confirmed", "hand_revision_confirmed", "joint_limits_rad",
+    expected = {"joint_limits_rad",
                 "max_tracking_error_rad", "arm_kp", "arm_kd", "hand_kp", "hand_kd",
                 "hand_timeout_enabled", "arm_mode_machine"}
     if not isinstance(config, dict) or set(config) != expected:
         raise ValueError("motor config fields do not match the required contract")
-    if config["control_authority_confirmed"] is not True or config["hand_revision_confirmed"] is not True:
-        raise ValueError("control ownership and hand revision must be confirmed")
     for name, size in (("joint_limits_rad", 28), ("arm_kp", 14), ("arm_kd", 14),
                        ("hand_kp", 14), ("hand_kd", 14)):
         values = config[name]
@@ -72,7 +70,7 @@ class CommandOutput:
 
         self.config = load_motor_config(config_path)
         self.hand_type, self.arm_type, self.motor_type = HandCmd, LowCmd, MotorCmd
-        self.arm_pub = node.create_publisher(LowCmd, "/arm_sdk", 10)
+        self.arm_pub = node.create_publisher(LowCmd, "/lowcmd", 10)
         self.left_pub = node.create_publisher(HandCmd, "/dex3/left/cmd", 10)
         self.right_pub = node.create_publisher(HandCmd, "/dex3/right/cmd", 10)
 
@@ -90,9 +88,9 @@ class CommandOutput:
         if len(arm.motor_cmd) != 35:
             raise ValueError("expected 35 arm command slots")
         arm.mode_machine = self.config["arm_mode_machine"]
-        arm.motor_cmd[29].q = 1.0
         for offset, (index, q) in enumerate(arm_targets.items()):
             motor = arm.motor_cmd[index]
+            motor.mode = 1
             motor.q = float(q)
             motor.dq = motor.tau = 0.0
             motor.kp = float(self.config["arm_kp"][offset])

@@ -34,15 +34,17 @@ natten_index="${FLUX_NATTEN_INDEX:-https://whl.natten.org/}"
 
 action=install
 force=0
+resume=0
 usage() {
   cat >&2 <<EOF
-usage: $0 [--plan | --check | --force]
+usage: $0 [--plan | --check | --resume | --force]
 
   --plan     print the resolved paths, pins and commands (no downloads, no writes)
   --check    verify the persistent environment against the pins (no writes)
   (default)  create the environment: uv venv + pinned lock install + pinned
              editable LeRobot checkout.  Requires network and disk (~7 GiB);
-             refuses to touch an existing environment without --force.
+             refuses to touch an existing environment without --resume or --force.
+  --resume   finish an incomplete environment at the pinned LeRobot commit
   --force    with install: move an existing environment aside instead of deleting it
 
 Pins:
@@ -60,6 +62,7 @@ while [ "$#" -gt 0 ]; do
     --plan) action=plan; shift ;;
     --check) action=check; shift ;;
     --force) force=1; shift ;;
+    --resume) resume=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown argument: $1" >&2; usage; exit 2 ;;
   esac
@@ -82,7 +85,7 @@ import sys
 install = [
     "uv venv --python %s %s" % (python_version, venv),
     "git init %s && git fetch --depth=1 %s %s" % (lerobot_src, lerobot_repo, lerobot_commit),
-    "uv pip install --python %s/bin/python --extra-index-url %s -f %s -r %s"
+    "uv pip install --python %s/bin/python --index-strategy unsafe-first-match --extra-index-url %s -f %s -r %s"
     % (venv, torch_index, natten_index, lock_file),
     "uv pip install --python %s/bin/python -e %s" % (venv, lerobot_src),
 ]
@@ -165,7 +168,16 @@ install_env() {
   }
   [ -f "$lock_file" ] || { echo "error: lock file missing: $lock_file" >&2; exit 2; }
 
-  if [ -e "$venv" ] || [ -d "$lerobot_src" ]; then
+  if [ "$resume" -eq 1 ]; then
+    [ "$force" -eq 0 ] && [ -x "$venv/bin/python" ] && [ -d "$lerobot_src/.git" ] &&
+      [ "$("$venv/bin/python" -c 'import platform; print(platform.python_version()[:4])')" = "$python_version" ] &&
+      [ ! -e "$venv/FLUX_MODEL_ENV.json" ] &&
+      [ "$(git -C "$lerobot_src" rev-parse HEAD)" = "$lerobot_commit" ] &&
+      [ -z "$(git -C "$lerobot_src" status --porcelain)" ] || {
+      echo "error: --resume requires an incomplete environment and a clean pinned LeRobot checkout" >&2
+      exit 2
+    }
+  elif [ -e "$venv" ] || [ -d "$lerobot_src" ]; then
     [ "$force" -eq 1 ] || {
       echo "error: environment already exists ($venv, $lerobot_src)" >&2
       echo "       verify it with: $0 --check   (or rebuild with --force, which moves it aside)" >&2
@@ -179,8 +191,10 @@ install_env() {
   fi
 
   mkdir -p "$(dirname "$venv")" "$(dirname "$lerobot_src")"
-  echo "flux-bootstrap-model-env: uv venv ($python_version) -> $venv" >&2
-  "$uv_bin" venv --python "$python_version" "$venv"
+  if [ "$resume" -eq 0 ]; then
+    echo "flux-bootstrap-model-env: uv venv ($python_version) -> $venv" >&2
+    "$uv_bin" venv --python "$python_version" "$venv"
+  fi
 
   echo "flux-bootstrap-model-env: LeRobot @ $lerobot_commit -> $lerobot_src" >&2
   if [ ! -d "$lerobot_src/.git" ]; then
@@ -196,7 +210,8 @@ install_env() {
 
   echo "flux-bootstrap-model-env: installing the pinned lock (torch $torch_index, NATTEN $natten_index)" >&2
   "$uv_bin" pip install --python "$venv/bin/python" \
-    --extra-index-url "$torch_index" -f "$natten_index" -r "$lock_file"
+    --index-strategy unsafe-first-match --extra-index-url "$torch_index" \
+    -f "$natten_index" -r "$lock_file"
   "$uv_bin" pip install --python "$venv/bin/python" -e "$lerobot_src"
 
   python3 - "$venv" "$lerobot_repo" "$lerobot_commit" "$lock_file" "$uv_bin" <<'PY'

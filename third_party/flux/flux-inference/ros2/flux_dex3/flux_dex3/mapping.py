@@ -29,7 +29,7 @@ def measured_state(lowstate, left, right):
 
 
 def split_action(action):
-    """Return named motor-index targets for the three command topics."""
+    """Return motor-index targets for the body and two hand command topics."""
     if len(action) != 28 or not all(math.isfinite(float(value)) for value in action):
         raise ValueError("expected 28 finite joint targets")
     return (

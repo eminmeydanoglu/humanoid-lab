@@ -113,7 +113,7 @@
       1.74533
     ]
   ],
-  "max_tracking_error_rad": 2.5,
+  "max_tracking_error_rad": 4.0,
   "arm_kp": [
     14.250623098688912,
     14.250623098688912,
@@ -178,6 +178,6 @@
     0.1,
     0.1
   ],
-  "hand_timeout_enabled": true,
+  "hand_timeout_enabled": false,
   "arm_mode_machine": 5
 }

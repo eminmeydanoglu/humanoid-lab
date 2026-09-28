@@ -1,6 +1,4 @@
 {
-  "control_authority_confirmed": true,
-  "hand_revision_confirmed": true,
   "joint_limits_rad": [
     [-3.0892, 2.6704],
     [-1.5882, 2.2515],

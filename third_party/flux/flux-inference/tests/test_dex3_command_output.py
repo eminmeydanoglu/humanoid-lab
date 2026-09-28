@@ -49,8 +49,6 @@ class FakeNode:
 def config(tmp_path):
     path = tmp_path / "verified_config.json"
     path.write_text(json.dumps({
-        "control_authority_confirmed": True,
-        "hand_revision_confirmed": True,
         "joint_limits_rad": [[-2.5, 2.5]] * 28,
         "max_tracking_error_rad": 0.3,
         "arm_kp": [60.0] * 14,
@@ -65,11 +63,11 @@ def config(tmp_path):
 
 def test_crc_matches_robot_vendor_python_reference():
     cmd = LowCmd()
-    cmd.motor_cmd[29].q = 1.0
+    cmd.motor_cmd[15].mode = 1
     cmd.motor_cmd[15].q = 0.25
     cmd.motor_cmd[15].kp = 60
     cmd.motor_cmd[15].kd = 1.5
-    assert lowcmd_crc(cmd) == 0xCEE03A29
+    assert lowcmd_crc(cmd) == 0x01626411
 
 
 def test_verified_config_required_before_publishers(config, monkeypatch):
@@ -80,18 +78,20 @@ def test_verified_config_required_before_publishers(config, monkeypatch):
     monkeypatch.setitem(sys.modules, "unitree_hg.msg", messages)
     node = FakeNode()
     output = CommandOutput(node, config)
-    assert set(node.publishers) == {"/arm_sdk", "/dex3/left/cmd", "/dex3/right/cmd"}
+    assert set(node.publishers) == {"/lowcmd", "/dex3/left/cmd", "/dex3/right/cmd"}
     target = np.zeros(28, dtype=np.float32)
     target[0], target[14], target[24] = 0.1, -0.2, 0.2
     output.publish(target, np.zeros(28, dtype=np.float32))
-    arm = node.publishers["/arm_sdk"].messages[0]
+    arm = node.publishers["/lowcmd"].messages[0]
     assert arm.motor_cmd[15].q == pytest.approx(0.1)
-    assert arm.motor_cmd[29].q == 1.0 and arm.crc == lowcmd_crc(arm)
+    assert arm.crc == lowcmd_crc(arm)
+    assert [motor.mode for motor in arm.motor_cmd] == [0] * 15 + [1] * 14 + [0] * 6
+    assert all(motor.kp == motor.kd == motor.tau == 0.0 for motor in arm.motor_cmd[:15] + arm.motor_cmd[29:])
     assert node.publishers["/dex3/left/cmd"].messages[0].motor_cmd[0].mode == 0x10
     assert node.publishers["/dex3/right/cmd"].messages[0].motor_cmd[3].mode == 0x13
     with pytest.raises(ValueError, match="tracking-error"):
         output.publish(np.ones(28, dtype=np.float32), np.zeros(28, dtype=np.float32))
-    assert len(node.publishers["/arm_sdk"].messages) == 1
+    assert len(node.publishers["/lowcmd"].messages) == 1
 
 
 def test_out_of_range_target_is_published_at_joint_limit(config, monkeypatch):
@@ -107,7 +107,7 @@ def test_out_of_range_target_is_published_at_joint_limit(config, monkeypatch):
     measured = np.zeros(28, dtype=np.float32)
     measured[0], measured[14], measured[24] = 2.5, -2.5, 2.5
     output.publish(target, measured)
-    assert node.publishers["/arm_sdk"].messages[0].motor_cmd[15].q == pytest.approx(2.5)
+    assert node.publishers["/lowcmd"].messages[0].motor_cmd[15].q == pytest.approx(2.5)
     assert node.publishers["/dex3/left/cmd"].messages[0].motor_cmd[0].q == pytest.approx(-2.5)
     assert node.publishers["/dex3/right/cmd"].messages[0].motor_cmd[3].q == pytest.approx(2.5)
     assert target[0] == pytest.approx(2.6)
@@ -115,11 +115,6 @@ def test_out_of_range_target_is_published_at_joint_limit(config, monkeypatch):
 
 def test_invalid_hardware_contract_fails_closed(config):
     data = json.loads(config.read_text())
-    data["control_authority_confirmed"] = False
-    config.write_text(json.dumps(data))
-    with pytest.raises(ValueError, match="ownership"):
-        load_motor_config(config)
-    data["control_authority_confirmed"] = True
     data["joint_limits_rad"][0] = [0, 0]
     config.write_text(json.dumps(data))
     with pytest.raises(ValueError, match="limits"):

@@ -1,4 +1,17 @@
-# Flux Dex3 simulation motor config
+# Flux Dex3 motor configs
+
+`flux-dex3-robot-motor-config.json` uses the pinned SONIC joint limits and arm
+`deploy_gains()[15:29]`; its `arm_mode_machine=5` matches the robot's LowState.
+Hand gains 1.5/0.1 and the motion timeout bit 0 match the robot's
+`gear_sonic_deploy/.../include/dex3_hands.hpp::sizeCommand`; its `hold()` keeps
+those gains while its relax command sets timeout bit 1. The 4.0 rad
+tracking-error limit permits large differences between measured and target positions. Set
+`enable_motor_commands=true` with this config to create the command publishers.
+`pause_task` repeats the last target at 30 Hz; it requires an executed target.
+`stop_task` clears targets and ceases publishing. Confirm control ownership and
+physical hand revision before commanding the robot.
+
+## Simulation config
 
 `flux-dex3-sim-motor-config.json` is the file the `flux_dex3` node loads through
 its `motor_output_config` parameter when this repository runs the model against
@@ -6,22 +19,11 @@ the Isaac simulator.  The node validates it with its own `load_motor_config()`
 before it creates a publisher; this note records where each value comes from and
 how the node and simulator enforce the same physical limits.
 
-## Scope: simulation only
+## Simulation scope
 
-The two confirmation flags are **scoped to the simulation**:
-
-- `control_authority_confirmed`: in a run of the `flux_dds` provider the
-  simulator is the exclusive owner of `/arm_sdk` and the two hand command
-  topics; no SONIC controller process runs and no second command source exists.
-  This is a statement about the simulated deployment, not about a physical G1.
-- `hand_revision_confirmed`: the hand revision is the pinned asset's
-  (`g1_29dof_with_hand_rev_1_0`, Dex3, 7 joints per hand in the training order).
-  No physical hand was inspected.
-
-`load_motor_config()` requires both flags to be `true` before the node will
-publish, so this file is **not evidence of hardware ownership or hand
-revision** and must not be copied to a real robot.  A physical run needs its
-own configuration and its own confirmations.
+The simulation config describes the pinned Dex3 asset. Use the robot-specific
+config for physical deployment; simulation settings do not establish hardware
+control ownership or hand revision.
 
 ## Physical joint limits
 
@@ -44,7 +46,7 @@ aborted a task at seq=1.
 
 The other motor settings retain their independent contracts: arm gains come
 from `deploy_gains()[15..28]`, hand gains are 1.5/0.1, and
-`max_tracking_error_rad` is 2.5.  The hand watchdog remains enabled and
+`max_tracking_error_rad` is 2.5 in the simulation config.  Its hand timeout bit is enabled and
 `arm_mode_machine` is 5 for the pinned G1 asset.
 
 ## Simulator asset check
@@ -57,7 +59,7 @@ own range, and "physical" means the same numbers on both sides.
 ## Not verified here
 
 - Live endpoint matching between the node's ROS topics and the simulator's raw
-  DDS topics (`/arm_sdk` <-> `rt/arm_sdk`, `/lowstate` <-> `rt/lowstate`,
+  DDS topics (`/lowcmd` <-> `rt/lowcmd`, `/lowstate` <-> `rt/lowstate`,
   `/dex3/*/cmd|state` <-> `rt/dex3/*/cmd|state`). The raw names follow the
   `rmw_cyclonedds_cpp` mapping and the Unitree SDK examples; check live topic
   traffic with ROS 2 while the simulator and launch are running.

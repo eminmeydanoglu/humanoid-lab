@@ -236,7 +236,8 @@ class Dex3Server:
             socket.setsockopt(zmq.LINGER, 0)
             socket.setsockopt(zmq.SNDTIMEO, 0)
             socket.setsockopt(zmq.RCVTIMEO, 50)
-            socket.setsockopt(zmq.MAXMSGSIZE, protocol.MAX_FRAME)
+            # CURVE adds framing to a full-size image before the socket size check.
+            socket.setsockopt(zmq.MAXMSGSIZE, protocol.MAX_FRAME + 256)
             socket.setsockopt(zmq.ROUTER_MANDATORY, 1)
             auth = self._configure_curve(context, socket)
             host = "[{}]".format(self.bind_ip) if ":" in self.bind_ip else self.bind_ip

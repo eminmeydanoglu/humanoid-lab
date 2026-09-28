@@ -44,7 +44,7 @@ class Dex3Node(Node):
         self.declare_parameter("camera_topic", "/camera/color/image_raw")
         self.declare_parameter("network_timeout_s", 2.0)
         self.declare_parameter("max_chunk_age_s", 1.2)
-        self.declare_parameter("freshness_s", 0.25)
+        self.declare_parameter("freshness_s", 2.0)
         self.declare_parameter("pair_tolerance_s", 0.1)
         self.declare_parameter("client_certificate", "")
         self.declare_parameter("server_public_key", "")

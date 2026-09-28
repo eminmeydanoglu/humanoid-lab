@@ -73,6 +73,13 @@ def test_bootstrap_check_fails_cleanly_when_the_environment_is_absent(tmp_path):
     assert not (tmp_path / "venvs").exists()  # --check writes nothing
 
 
+def test_bootstrap_resume_refuses_missing_or_unpinned_environment(tmp_path):
+    result = run(BOOTSTRAP, "--resume", env=clean_env(HUMANOID_DATA_ROOT=str(tmp_path)))
+    assert result.returncode == 2
+    assert "incomplete environment" in result.stderr
+    assert not (tmp_path / "venvs").exists()
+
+
 def test_server_prefers_persistent_env_then_fallback_then_override(tmp_path):
     # A data root with a persistent environment installed.
     with_persistent = tmp_path / "with-persistent"
