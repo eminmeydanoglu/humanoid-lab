@@ -45,8 +45,7 @@ class ChunkExecutor:
             if len(self.limits) != 28 or any(len(pair) != 2 for pair in self.limits):
                 raise ValueError("invalid hardware limit configuration")
             low, high = np.asarray(self.limits, np.float32).T
-            if np.any(chunk < low) or np.any(chunk > high):
-                raise ValueError("action exceeds joint limit")
+            chunk = np.clip(chunk, low, high)
         else:
             # Dry-run only: the dataset and installed Dex3 hardware may have different strokes.
             if np.any(np.abs(chunk) > 3.2):

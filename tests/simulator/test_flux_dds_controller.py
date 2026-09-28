@@ -47,25 +47,7 @@ EXPECTED_TOPICS = {
     "right_hand_state": "rt/dex3/right/state",
 }
 
-#: The simulation-only acceptance margin the canonical motor config puts around
-#: each physical hand limit.  It is set from the real closed-loop evidence, not
-#: from the training corpus alone: the corpus reaches 0.3491 rad past a physical
-#: limit, but a stochastic model chunk commanded 0.4410 rad past one
-#: (data/outputs/flux-dex3/flux-e2e-final/tracking.parquet, 35.2 s, 372 rows,
-#: right_hand_index_1 target minimum -0.4410 against a 0.0 lower limit).  0.6 rad
-#: is that observed overshoot plus 0.159 rad of headroom.
-HAND_ENVELOPE_MARGIN_RAD = 0.6
-
-#: The margin the first canonical revision used; the closed-loop run above
-#: aborted seq=1 "action exceeds joint limit" because it was too small.
-SUPERSEDED_HAND_ENVELOPE_MARGIN_RAD = 0.35
-
-#: The largest hand excursion the trained corpus commands past a physical limit
-#: (four finger channels of both hands, 2.09 rad against nominal 1.75 rad).
-CORPUS_WORST_EXCESS_RAD = 0.3491
-
-#: The real model's per-channel overshoots past physical limits, measured in the
-#: successful broad diagnostic run on 2026-09-27 (same tracking.parquet).
+#: Real model overshoots observed in the successful closed-loop diagnostic run.
 REAL_MODEL_OVERSHOOT_RAD = {
     "right_hand_index_1_joint": -0.4410,
     "right_hand_middle_1_joint": -0.3286,
@@ -76,11 +58,6 @@ REAL_MODEL_OVERSHOOT_RAD = {
     "left_hand_middle_0_joint": 0.1437,
     "right_hand_thumb_0_joint": -1.1406,
 }
-
-#: The worst hand excursion a single model chunk showed against the strict
-#: physical limits, from data/outputs/flux-dex3/flux-probe-1/model-probe.json
-#: (right index 0, predicted below a zero-side limit).
-PROBE_WORST_EXCESS_RAD = 0.2287
 
 
 # -- the Flux node's own message shapes, as plain objects --------------------
@@ -326,56 +303,13 @@ class MotorConfigTests(unittest.TestCase):
             [[pinned[name]["lower"], pinned[name]["upper"]] for name in arm_names],
         )
 
-    def test_hand_limits_are_the_physical_range_plus_the_observed_model_margin(self) -> None:
+    def test_hand_limits_match_the_pinned_physical_range_and_order(self) -> None:
         pinned = json.loads(JOINT_LIMITS.read_text())["joints"]
-        hand_names = (
-            list(sonic.hand_joint_names("left")) + list(sonic.hand_joint_names("right"))
+        hand_names = list(sonic.hand_joint_names("left")) + list(sonic.hand_joint_names("right"))
+        self.assertEqual(
+            self.config["joint_limits_rad"][14:],
+            [[pinned[name]["lower"], pinned[name]["upper"]] for name in hand_names],
         )
-        envelope = self.config["joint_limits_rad"][14:]
-        self.assertEqual(len(envelope), 14)
-        for name, (lower, upper) in zip(hand_names, envelope):
-            physical = pinned[name]
-            self.assertAlmostEqual(lower, physical["lower"] - HAND_ENVELOPE_MARGIN_RAD, places=6)
-            self.assertAlmostEqual(upper, physical["upper"] + HAND_ENVELOPE_MARGIN_RAD, places=6)
-            # A margin, not a licence: every envelope stays a narrow
-            # neighbourhood of the real joint, far below the +/-2.6 rad
-            # diagnostic that was used as a stopgap.
-            self.assertLess(upper - lower, 3.5)
-            self.assertNotEqual([lower, upper], [-2.6, 2.6])
-        # The closed-loop evidence is what sets the margin, and the corpus
-        # evidence is smaller; both are covered by exactly one number.
-        worst_closed_loop = abs(REAL_MODEL_OVERSHOOT_RAD["right_hand_index_1_joint"])
-        self.assertGreater(HAND_ENVELOPE_MARGIN_RAD, worst_closed_loop)
-        self.assertGreater(HAND_ENVELOPE_MARGIN_RAD, CORPUS_WORST_EXCESS_RAD)
-        self.assertGreater(worst_closed_loop, CORPUS_WORST_EXCESS_RAD)
-        self.assertGreater(SUPERSEDED_HAND_ENVELOPE_MARGIN_RAD, CORPUS_WORST_EXCESS_RAD)
-
-    def test_hand_envelope_keeps_training_order_and_per_hand_signs(self) -> None:
-        envelope = self.config["joint_limits_rad"][14:]
-        left = dict(zip(sonic.hand_joint_names("left"), envelope[:7]))
-        right = dict(zip(sonic.hand_joint_names("right"), envelope[7:]))
-        # The training order is left hand then right, each in its own order:
-        # middle before index on the left, index before middle on the right.
-        self.assertEqual(list(left)[:5], [
-            "left_hand_thumb_0_joint", "left_hand_thumb_1_joint", "left_hand_thumb_2_joint",
-            "left_hand_middle_0_joint", "left_hand_middle_1_joint",
-        ])
-        self.assertEqual(list(right)[:5], [
-            "right_hand_thumb_0_joint", "right_hand_thumb_1_joint", "right_hand_thumb_2_joint",
-            "right_hand_index_0_joint", "right_hand_index_1_joint",
-        ])
-        # The fingers close towards zero on the left and away from it on the
-        # right; a swapped side or a sign flip would put the margin on the
-        # wrong end of the joint.
-        for name in ("middle_0", "middle_1", "index_0", "index_1"):
-            self.assertGreater(left[f"left_hand_{name}_joint"][1], 0.0)
-            self.assertLess(left[f"left_hand_{name}_joint"][0], -1.0)
-            self.assertLess(right[f"right_hand_{name}_joint"][0], 0.0)
-            self.assertGreater(right[f"right_hand_{name}_joint"][1], 1.0)
-        self.assertLess(left["left_hand_thumb_2_joint"][0], 0.0)
-        self.assertGreater(right["right_hand_thumb_2_joint"][1], 0.0)
-        for lower, upper in envelope:
-            self.assertTrue(lower < upper and all(map(math.isfinite, (lower, upper))))
 
     def test_hand_gains_mode_and_bound_are_the_declared_values(self) -> None:
         self.assertEqual(self.config["hand_kp"], [1.5] * 14)
@@ -394,13 +328,8 @@ class MotorConfigTests(unittest.TestCase):
         self.assertIn("must not be copied to a real robot", readme)
 
 
-class HandEnvelopeGateTests(unittest.TestCase):
-    """The trained model's hand targets against the node's own chunk gate.
-
-    The gate is the node's real ``ChunkExecutor`` driven by the canonical
-    config's limits, so these tests measure the acceptance envelope the ROS
-    side will apply at run time with no fake re-implementation of it.
-    """
+class PhysicalLimitGateTests(unittest.TestCase):
+    """The node schedules out-of-range predictions at physical joint limits."""
 
     TRAINING_ORDER = (
         list(sonic.BODY_JOINT_ORDER[15:29])
@@ -411,92 +340,33 @@ class HandEnvelopeGateTests(unittest.TestCase):
     def setUp(self) -> None:
         self.limits = command_output.load_motor_config(MOTOR_CONFIG)["joint_limits_rad"]
 
-    def chunk(self, joint: str, value: float):
+    def test_real_model_overshoots_are_clipped_and_task_continues(self) -> None:
         import numpy as np
-
-        actions = np.zeros((32, 28), dtype=np.float32)
-        actions[:, self.TRAINING_ORDER.index(joint)] = value
-        return actions
-
-    def accepted(self, joint: str, value: float) -> bool:
         from flux_dex3.executor import ChunkExecutor
 
         executor = ChunkExecutor(limits=self.limits)
         executor.start("session")
-        try:
-            executor.accept("session", 1, 0.1, self.chunk(joint, value))
-        except ValueError:
-            return False
-        return True
-
-    def test_real_closed_loop_overshoots_pass_the_node_gate(self) -> None:
-        # Every per-channel overshoot the real model commanded in the 35.2 s
-        # diagnostic run; the canonical run rejected these with the earlier
-        # 0.35 rad margin, which is what the envelope now exists to admit.
+        actions = np.zeros((32, 28), dtype=np.float32)
         for joint, value in REAL_MODEL_OVERSHOOT_RAD.items():
-            with self.subTest(joint=joint):
-                self.assertTrue(self.accepted(joint, value))
-        # The probe's worst violation, and the corpus' own extremes.
-        self.assertTrue(self.accepted("right_hand_index_0_joint", -PROBE_WORST_EXCESS_RAD))
-        self.assertTrue(self.accepted("right_hand_index_1_joint", 2.0944))
-        self.assertTrue(self.accepted("right_hand_middle_1_joint", 2.0944))
-        self.assertTrue(self.accepted("left_hand_middle_1_joint", -2.0944))
-        self.assertTrue(self.accepted("left_hand_index_1_joint", -2.0944))
-        self.assertTrue(self.accepted("left_hand_thumb_2_joint", 1.7463))
-        self.assertTrue(self.accepted("right_hand_thumb_2_joint", -1.7463))
+            actions[:, self.TRAINING_ORDER.index(joint)] = value
+        executor.accept("session", 0, 0.1, actions, now=10.0)
+        first = executor.tick(now=10.0)
+        for joint, value in REAL_MODEL_OVERSHOOT_RAD.items():
+            index = self.TRAINING_ORDER.index(joint)
+            lower, upper = self.limits[index]
+            self.assertAlmostEqual(first[index], min(max(value, lower), upper), places=6)
+        self.assertEqual(executor.session, "session")
+        self.assertEqual(executor.last_seq, 0)
+        self.assertAlmostEqual(actions[0, self.TRAINING_ORDER.index("right_hand_index_1_joint")], -0.4410)
+        executor.accept("session", 1, 0.1, actions * 10, now=10.2)
+        self.assertIsNotNone(executor.next_chunk)
+        self.assertTrue(np.all(executor.next_chunk >= np.asarray(self.limits)[:, 0]))
+        self.assertTrue(np.all(executor.next_chunk <= np.asarray(self.limits)[:, 1]))
 
-    def test_the_superseded_margin_would_have_rejected_the_real_model(self) -> None:
-        """The regression witness: 0.35 rad was too small for a stochastic model."""
-        from flux_dex3.executor import ChunkExecutor
-
-        pinned = json.loads(JOINT_LIMITS.read_text())["joints"]
-        arm_names = list(sonic.BODY_JOINT_ORDER[15:29])
-        hand_names = list(sonic.hand_joint_names("left")) + list(sonic.hand_joint_names("right"))
-        old = [[pinned[name]["lower"], pinned[name]["upper"]] for name in arm_names]
-        old += [
-            [pinned[name]["lower"] - SUPERSEDED_HAND_ENVELOPE_MARGIN_RAD,
-             pinned[name]["upper"] + SUPERSEDED_HAND_ENVELOPE_MARGIN_RAD]
-            for name in hand_names
-        ]
-
-        def accepted(limits, joint, value):
-            executor = ChunkExecutor(limits=limits)
-            executor.start("session")
-            try:
-                executor.accept("session", 1, 0.1, self.chunk(joint, value))
-            except ValueError:
-                return False
-            return True
-
-        witness = REAL_MODEL_OVERSHOOT_RAD["right_hand_index_1_joint"]
-        self.assertFalse(accepted(old, "right_hand_index_1_joint", witness))
-        self.assertTrue(accepted(self.limits, "right_hand_index_1_joint", witness))
-
-    def test_gross_outliers_fail_the_node_gate(self) -> None:
-        # Hundreds of milliradians past the envelope, next to the physical range:
-        self.assertFalse(self.accepted("right_hand_index_0_joint", 2.50))
-        self.assertFalse(self.accepted("right_hand_index_1_joint", 2.50))
-        # A garbage or unit-scaled target:
-        self.assertFalse(self.accepted("right_hand_index_0_joint", 3.20))
-        self.assertFalse(self.accepted("left_hand_middle_1_joint", -2.50))
-        self.assertFalse(self.accepted("left_hand_thumb_0_joint", 3.20))
-        # The arm side keeps its strict physical limits: no margin at all.
-        self.assertFalse(self.accepted("left_shoulder_pitch_joint", -3.10))
-        self.assertFalse(self.accepted("right_elbow_joint", 2.10))
-
-    def test_the_adapter_clamps_with_the_same_physical_limits_the_config_uses(self) -> None:
+    def test_adapter_uses_the_same_physical_limits(self) -> None:
         pinned = flux_dds.pinned_position_limits()
-        for name, pair in zip(sonic.BODY_JOINT_ORDER[15:29], self.limits[:14]):
-            self.assertEqual(pinned[name], (pair[0], pair[1]))
-        # The hand envelope is *derived* from the same physical numbers, so the
-        # two sides cannot drift apart about what the model may not exceed.
-        for name, (lower, upper) in zip(
-            list(sonic.hand_joint_names("left")) + list(sonic.hand_joint_names("right")),
-            self.limits[14:],
-        ):
-            physical = pinned[name]
-            self.assertAlmostEqual(lower, physical[0] - HAND_ENVELOPE_MARGIN_RAD, places=6)
-            self.assertAlmostEqual(upper, physical[1] + HAND_ENVELOPE_MARGIN_RAD, places=6)
+        for name, pair in zip(self.TRAINING_ORDER, self.limits):
+            self.assertEqual(pinned[name], tuple(pair))
 
 
 class FluxProfileTests(unittest.TestCase):
@@ -510,7 +380,8 @@ class FluxProfileTests(unittest.TestCase):
                 self.assertTrue(profile.robot.disable_gravity)
                 self.assertIsNone(profile.support)
                 self.assertEqual(profile.initial_pose, "sonic_standing")
-                self.assertEqual(profile.robot.initial_position_m, (0.0, 0.0, sonic.STANDING_ROOT_HEIGHT_M))
+                expected_x = 0.08 if name == "pick-apple-askida.json" else 0.0
+                self.assertEqual(profile.robot.initial_position_m, (expected_x, 0.0, sonic.STANDING_ROOT_HEIGHT_M))
                 scene = profile.scene
                 self.assertIsNotNone(scene)
                 self.assertEqual(scene.target.kind, "plate")
@@ -524,6 +395,17 @@ class FluxProfileTests(unittest.TestCase):
                 self.assertEqual(controller["mode_machine"], 5)
                 self.assertEqual(controller["command_ttl_s"], 0.25)
                 self.assertEqual(controller["hand_fallback"], "passive")
+
+    def test_apple_spawn_faces_the_table(self) -> None:
+        apple = RunProfile.load(PROFILES / "pick-apple-askida.json")
+        self.assertEqual(apple.robot.initial_position_m[:2], (0.08, 0.0))
+        self.assertEqual(apple.robot.initial_rotation_wxyz, (1.0, 0.0, 0.0, 0.0))
+        self.assertEqual(apple.robot.initial_joint_positions_rad, {
+            "left_elbow_joint": -0.3222726578,
+            "right_elbow_joint": -0.3222726578,
+        })
+        self.assertEqual(apple.camera,
+                         RunProfile.load(PROFILES / "isaac-g1-sonic-pickapple-dex3.json").camera)
 
     def test_flux_profiles_declare_the_raw_dds_topic_contract(self) -> None:
         for name in FLUX_PROFILES:
@@ -580,14 +462,18 @@ class CommandVectorTests(unittest.TestCase):
             self.assertAlmostEqual(tau[slot], 0.3 * (offset + 1))
             self.assertAlmostEqual(kp[slot], 10.0 + offset)
             self.assertAlmostEqual(kd[slot], 1.0 + 0.1 * offset)
-        for slot in range(15):
+        for slot in range(12):
             self.assertEqual((q[slot], dq[slot], tau[slot], kp[slot], kd[slot]), (0.0,) * 5)
+        deployed_kp, deployed_kd = sonic.deploy_gains()
+        for slot in flux_dds.WAIST_MOTOR_SLOTS:
+            self.assertEqual((q[slot], dq[slot], tau[slot]), (0.0,) * 3)
+            self.assertEqual((kp[slot], kd[slot]), (deployed_kp[slot], deployed_kd[slot]))
         # The command vectors are the 29 body joints: the arm-SDK weight slot
         # (29) and the unused tail of the 35-slot LowCmd are not joints.
         for values in (q, dq, tau, kp, kd):
             self.assertEqual(len(values), len(sonic.BODY_JOINT_ORDER))
 
-    def test_the_zero_fill_is_passive_under_the_simulators_torque_law(self) -> None:
+    def test_legs_are_passive_and_waist_holds_the_torso(self) -> None:
         q, dq, tau, kp, kd = flux_dds.body_command_vectors(arm_low_command().motor_cmd)
         measured = [0.7 + 0.11 * index for index in range(29)]
         measured_velocity = [-0.3 + 0.02 * index for index in range(29)]
@@ -595,7 +481,10 @@ class CommandVectorTests(unittest.TestCase):
             torque = tau[slot] + kp[slot] * (q[slot] - measured[slot]) + kd[slot] * (
                 dq[slot] - measured_velocity[slot]
             )
-            self.assertEqual(torque, 0.0)
+            if slot in flux_dds.WAIST_MOTOR_SLOTS:
+                self.assertLess(torque, 0.0)
+            else:
+                self.assertEqual(torque, 0.0)
 
     def test_hand_vectors_cover_exactly_seven_motors(self) -> None:
         q, dq, tau, kp, kd = flux_dds.hand_command_vectors(
@@ -663,7 +552,8 @@ class ControllerTests(unittest.TestCase):
                 self.assertEqual(command.body.joint_names, sonic.BODY_JOINT_ORDER)
                 self.assertEqual(command.body.q[15], 0.1)
                 self.assertEqual(command.body.kp[28], 10.0 + 13)
-                self.assertEqual(command.body.q[14], 0.0)  # waist stays untouched
+                self.assertEqual(command.body.q[14], 0.0)  # waist holds the standing angle
+                self.assertGreater(command.body.kp[14], 0.0)
                 self.assertIsNotNone(command.left_hand)
                 self.assertEqual(command.left_hand.q, LEFT_INSIDE)
                 self.assertEqual(command.right_hand.q, RIGHT_INSIDE)

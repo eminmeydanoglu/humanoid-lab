@@ -94,6 +94,25 @@ def test_verified_config_required_before_publishers(config, monkeypatch):
     assert len(node.publishers["/arm_sdk"].messages) == 1
 
 
+def test_out_of_range_target_is_published_at_joint_limit(config, monkeypatch):
+    package = ModuleType("unitree_hg")
+    messages = ModuleType("unitree_hg.msg")
+    messages.LowCmd, messages.HandCmd, messages.MotorCmd = LowCmd, HandCmd, Motor
+    monkeypatch.setitem(sys.modules, "unitree_hg", package)
+    monkeypatch.setitem(sys.modules, "unitree_hg.msg", messages)
+    node = FakeNode()
+    output = CommandOutput(node, config)
+    target = np.zeros(28, dtype=np.float32)
+    target[0], target[14], target[24] = 2.6, -3.0, 3.0
+    measured = np.zeros(28, dtype=np.float32)
+    measured[0], measured[14], measured[24] = 2.5, -2.5, 2.5
+    output.publish(target, measured)
+    assert node.publishers["/arm_sdk"].messages[0].motor_cmd[15].q == pytest.approx(2.5)
+    assert node.publishers["/dex3/left/cmd"].messages[0].motor_cmd[0].q == pytest.approx(-2.5)
+    assert node.publishers["/dex3/right/cmd"].messages[0].motor_cmd[3].q == pytest.approx(2.5)
+    assert target[0] == pytest.approx(2.6)
+
+
 def test_invalid_hardware_contract_fails_closed(config):
     data = json.loads(config.read_text())
     data["control_authority_confirmed"] = False

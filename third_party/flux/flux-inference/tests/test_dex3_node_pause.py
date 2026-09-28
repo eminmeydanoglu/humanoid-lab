@@ -1,6 +1,7 @@
 """Exercise Foxy service behavior with stand-in ROS messages and no robot publishers."""
 
 import importlib
+import inspect
 import sys
 import time
 from types import ModuleType, SimpleNamespace
@@ -12,15 +13,24 @@ import pytest
 class FakeLogger:
     def __init__(self):
         self.lines = []
+        self.severities = {}
+
+    def _record(self, severity, text):
+        caller = inspect.currentframe().f_back.f_back
+        key = (caller.f_code.co_filename, caller.f_lineno)
+        if key in self.severities and self.severities[key] != severity:
+            raise ValueError("Logger severity cannot be changed between calls.")
+        self.severities[key] = severity
+        self.lines.append((severity, text))
 
     def info(self, text):
-        self.lines.append(("info", text))
+        self._record("info", text)
 
     def warn(self, text):
-        self.lines.append(("warn", text))
+        self._record("warn", text)
 
     def error(self, text):
-        self.lines.append(("error", text))
+        self._record("error", text)
 
 
 class FakeNode:
@@ -119,6 +129,19 @@ def _fresh_observation(node):
     for key, size in (("low", 35), ("left", 7), ("right", 7)):
         node._store(key, _motors(size, 0.0))
     return stamp
+
+
+def test_status_error_then_loading_then_ready_keeps_logger_severity_stable(robot_node):
+    node = robot_node
+    for status, detail in (("ERROR", "out of memory"), ("LOADING", ""), ("READY", "")):
+        node.events.put(("status", {"status": status, "checkpoint": "", "error": detail}))
+        node._tick()
+    assert node.server_status == "READY"
+    assert [(level, text) for level, text in node.logger.lines if "GPU model status:" in text] == [
+        ("error", "GPU model status: ERROR checkpoint= detail=out of memory"),
+        ("info", "GPU model status: LOADING checkpoint= detail="),
+        ("info", "GPU model status: READY checkpoint= detail="),
+    ]
 
 
 def test_pause_repeats_last_target_until_stop_and_logs_transitions(robot_node):

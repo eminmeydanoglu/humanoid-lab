@@ -1,5 +1,6 @@
 """G1 observation-to-action boundary without loading the 7B policy."""
 
+import ast
 import sys
 import types
 from pathlib import Path
@@ -7,9 +8,10 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import examples.dex3.g1_inference as inference_module
 import torch
 
-from examples.dex3.g1_inference import G1Inference
+from examples.dex3.g1_inference import G1Inference, _TASKS, _keep_text_encoder_on_cpu, _offload_text_encoder
 from flux_action.data.lerobot.dex3_view import CAMERA
 
 
@@ -126,6 +128,55 @@ def test_saved_g1_processors_accept_live_observation():
     assert actions.shape == (32, 28) and np.isfinite(actions).all()
 
 
+def test_precomputed_tasks_match_ros_node():
+    node = Path(__file__).resolve().parents[1] / "ros2/flux_dex3/flux_dex3/node.py"
+    tree = ast.parse(node.read_text(encoding="utf-8"))
+    prompts = next(statement.value.args[0] for statement in tree.body
+                   if isinstance(statement, ast.Assign) and
+                   any(isinstance(target, ast.Name) and target.id == "PROMPTS" for target in statement.targets))
+    assert set(_TASKS) == {"", *ast.literal_eval(prompts)}
+
+
+def test_text_encoder_is_skipped_when_frozen_components_move():
+    video = torch.nn.Linear(2, 2)
+    encoder = torch.nn.Linear(2, 2)
+    frozen = SimpleNamespace(video_vae=SimpleNamespace(module=video), text_encoder=encoder)
+    _keep_text_encoder_on_cpu(SimpleNamespace(frozen=frozen))
+    frozen._apply(lambda tensor: tensor.to(torch.float64))
+    assert video.weight.dtype == torch.float64
+    assert encoder.weight.dtype == torch.float32
+    assert encoder.weight.device.type == "cpu"
+
+
+def test_offloaded_text_contexts_are_cached_and_encode_new_tasks_on_cpu(monkeypatch):
+    calls = []
+
+    class Encoder:
+        def to(self, device):
+            calls.append(("move", device))
+            return self
+
+    def encode(encoder, caption, device, *, fixed_length):
+        calls.append(("encode", caption, device, fixed_length))
+        return torch.ones(1, 2, 3)
+
+    module = types.ModuleType("lerobot.policies.flux3.f3")
+    module.VEC_DIM = 3
+    module.text_context = encode
+    module.packing = SimpleNamespace(pack_text=lambda ctx, width: {"ctx_ids": torch.zeros(1, 2)})
+    monkeypatch.setitem(sys.modules, "lerobot.policies.flux3.f3", module)
+    base = SimpleNamespace(frozen=SimpleNamespace(text_encoder=Encoder()), _ctx_cache={},
+                           config=SimpleNamespace(text_fixed_length=320), dtype_=torch.bfloat16)
+    _offload_text_encoder(base, "cpu")
+    assert calls[0] == ("move", "cpu")
+    assert [c[1] for c in calls if c[0] == "encode"] == list(_TASKS)
+    assert base._context("new instruction", torch.device("cpu"))[0].dtype == torch.bfloat16
+    assert calls[-1] == ("encode", "new instruction", "cpu", 320)
+    count = len(calls)
+    base._context("new instruction", torch.device("cpu"))
+    assert len(calls) == count
+
+
 def test_load_merges_adapter_only_when_requested(monkeypatch, tmp_path):
     """``merge_adapter`` bakes the LoRA delta in memory on request, after the device move."""
     calls = []
@@ -199,8 +250,13 @@ def test_load_merges_adapter_only_when_requested(monkeypatch, tmp_path):
     for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
 
-    assert isinstance(G1Inference.load(tmp_path, device="cpu", merge_adapter=True).policy, StubPeftModel)
+    assert isinstance(G1Inference.load(tmp_path, device="cpu", merge_adapter=True, offload_text_encoder=False).policy, StubPeftModel)
     assert calls.index("merge") > calls.index("to:cpu")
     calls.clear()
-    G1Inference.load(tmp_path, device="cpu")
+    G1Inference.load(tmp_path, device="cpu", offload_text_encoder=False)
     assert "merge" not in calls
+    calls.clear()
+    monkeypatch.setattr(inference_module, "_keep_text_encoder_on_cpu", lambda base: calls.append("keep-on-cpu"))
+    monkeypatch.setattr(inference_module, "_offload_text_encoder", lambda base, device: calls.append("cache-text"))
+    G1Inference.load(tmp_path, device="cpu")
+    assert calls.index("keep-on-cpu") < calls.index("to:cpu") < calls.index("cache-text")

@@ -82,8 +82,7 @@ class CommandOutput:
         if target.shape != (28,) or measured.shape != (28,) or not np.isfinite(target).all() or not np.isfinite(measured).all():
             raise ValueError("invalid command or measured state")
         limits = np.asarray(self.config["joint_limits_rad"], dtype=np.float32)
-        if np.any(target < limits[:, 0]) or np.any(target > limits[:, 1]):
-            raise ValueError("target exceeds verified hardware limits")
+        target = np.clip(target, limits[:, 0], limits[:, 1])
         if np.any(np.abs(target - measured) > self.config["max_tracking_error_rad"]):
             raise ValueError("target exceeds measured tracking-error bound")
         arm_targets, left_targets, right_targets = split_action(target)

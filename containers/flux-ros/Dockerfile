@@ -44,6 +44,7 @@ RUN set -eux; \
         ros-jazzy-rosidl-default-generators \
         ros-jazzy-rosidl-generator-dds-idl \
         ros-jazzy-rviz2 \
+        ros-jazzy-foxglove-bridge \
         libgl1-mesa-dri \
         python3-colcon-common-extensions \
         python3-numpy=1:1.26.4+ds-6ubuntu1 \

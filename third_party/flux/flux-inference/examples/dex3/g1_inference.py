@@ -3,11 +3,60 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import MethodType
 
 import numpy as np
 import torch
 
 from flux_action.data.lerobot.dex3_view import CAMERA
+
+# Simulation and robot node accept the same task vocabulary. Cache its text contexts
+# before readiness so CPU text encoding never delays a supported task's first chunk.
+_TASKS = (
+    "", "stack three block", "camera packaging", "object placement", "pour water", "toasted bread",
+    "Put the apple into the plate.", "Put the bottle into the plate.",
+    "Put the charger into the plate.", "Put the doll into the plate.",
+    "Put the gum into the plate.", "Put the snack into the plate.",
+    "Put the tissue paper into the plate.",
+)
+
+
+def _keep_text_encoder_on_cpu(base):
+    """Skip Qwen when the PEFT policy moves its frozen components to the GPU."""
+    frozen = base.frozen
+    frozen.text_encoder.to("cpu")
+
+    def apply_video_only(self, fn):
+        video = getattr(self.video_vae, "module", self.video_vae)
+        if isinstance(video, torch.nn.Module):
+            video._apply(fn)
+
+    frozen._apply = MethodType(apply_video_only, frozen)
+
+
+def _offload_text_encoder(base, device):
+    """Cache BF16 text contexts on the DiT device; Qwen stays on CPU."""
+    from lerobot.policies.flux3.f3 import VEC_DIM, packing, text_context
+
+    encoder = base.frozen.text_encoder
+    encoder.to("cpu")
+
+    def context(self, caption, target):
+        hit = self._ctx_cache.get(caption)
+        if hit is None or hit[0].device != target:
+            if len(self._ctx_cache) > 256:
+                self._ctx_cache.clear()
+            encoded = text_context(encoder, caption, "cpu", fixed_length=self.config.text_fixed_length)
+            encoded = encoded.to(device=target, dtype=self.dtype_)
+            self._ctx_cache[caption] = (encoded, packing.pack_text(encoded, VEC_DIM)["ctx_ids"])
+        return self._ctx_cache[caption]
+
+    base._context = MethodType(context, base)
+    with torch.inference_mode():
+        for task in _TASKS:
+            base._context(task, torch.device(device))
+    if torch.device(device).type == "cuda":
+        torch.cuda.empty_cache()
 
 
 class G1Inference:
@@ -28,7 +77,8 @@ class G1Inference:
         self.reset()
 
     @classmethod
-    def load(cls, checkpoint: str | Path, *, device: str = "cuda", merge_adapter: bool = False) -> G1Inference:
+    def load(cls, checkpoint: str | Path, *, device: str = "cuda", merge_adapter: bool = False,
+             offload_text_encoder: bool = True) -> G1Inference:
         """Load the raw LoRA adapter and its checkpoint-owned normalization once.
 
         ``merge_adapter`` bakes the LoRA delta into the base weights in memory (the checkpoint on
@@ -46,9 +96,13 @@ class G1Inference:
         base = Flux3Policy.from_pretrained(adapter.base_model_name_or_path, strict=True)
         pre, post = make_pre_post_processors(base.config, pretrained_path=checkpoint)
         policy = PeftModel.from_pretrained(base, str(checkpoint), config=adapter, is_trainable=False)
+        if offload_text_encoder:
+            _keep_text_encoder_on_cpu(base)
         policy.to(device)
         if merge_adapter:
             policy.merge_adapter()
+        if offload_text_encoder:
+            _offload_text_encoder(base, device)
         return cls(policy, pre, post, device=device)
 
     def reset(self) -> None:

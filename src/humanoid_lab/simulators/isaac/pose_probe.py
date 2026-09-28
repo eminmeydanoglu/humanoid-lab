@@ -290,9 +290,12 @@ def _scene_cfg(profile: RunProfile, include_scene: bool) -> Any:
         rigid_props=sim_utils.RigidBodyPropertiesCfg(disable_gravity=True),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(fix_root_link=robot_spec.fixed_base),
     )
+    initial_state = robot_cfg.init_state.replace(pos=robot_spec.initial_position_m)
+    if robot_spec.initial_rotation_wxyz is not None:
+        initial_state = initial_state.replace(rot=robot_spec.initial_rotation_wxyz)
     robot_cfg = robot_cfg.replace(
         prim_path="{ENV_REGEX_NS}/Robot",
-        init_state=robot_cfg.init_state.replace(pos=robot_spec.initial_position_m),
+        init_state=initial_state,
     )
 
     camera = profile.camera
@@ -414,7 +417,7 @@ def _run(args: argparse.Namespace, app: Any) -> int:
     from pxr import Usd, UsdGeom, UsdPhysics
 
     from ...controllers.sonic import named_pose
-    from .service import flatten_tape_specular
+    from .service import align_fixed_base_rotation, flatten_tape_specular
 
     profile = RunProfile.load(args.profile)
     robot_path = "/World/envs/env_0/Robot"
@@ -430,6 +433,7 @@ def _run(args: argparse.Namespace, app: Any) -> int:
         )
     )
     scene = InteractiveScene(_scene_cfg(profile, args.include_scene))
+    align_fixed_base_rotation(sim.stage, profile.robot, robot_path)
     # The probe builds the profile's target when it builds the scene, so it has
     # to flatten the tape's specular too or its frames would show the gray the
     # live scene was fixed away from.  The fix is authored before the scene is

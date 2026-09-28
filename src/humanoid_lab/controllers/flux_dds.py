@@ -9,13 +9,11 @@ for the simulator; this provider is the robot side of that contract:
 * it turns the newest arm and hand commands into the simulator's joint command,
   applying the 14 arm joints and the two 7-joint hands **only**.
 
-The legs and the waist are commanded with zero position, zero velocity, zero
-torque and zero gains.  The simulator computes ``tau + kp*(q_des - q) +
-kd*(dq_des - dq)`` per joint, so zero gains leave those joints with no torque:
-they are passive, exactly as they are in a run without a controller.  The fill
-is a constant, not a hold -- no target is latched, and a stream that stops
-arriving expires through the standard ``command_ttl_s`` window and returns the
-whole robot to passive.
+The legs are passive.  The three waist joints hold their zero-angle standing
+pose with the pinned deployment's position and damping gains while arm commands
+are fresh.  This keeps the torso aligned with the fixed pelvis under arm loads.
+A stream that stops arriving expires through the standard ``command_ttl_s``
+window and returns the whole robot to passive.
 
 Arm and hand positions are clamped to the joint ranges of the pinned physical
 model before they become the simulator's torque command.  That clamp is the
@@ -60,6 +58,7 @@ from .sonic import (
     BODY_EFFORT_LIMIT_NM,
     BODY_JOINT_ORDER,
     DEFAULT_INTERFACE,
+    deploy_gains,
     HAND_EFFORT_LIMIT_NM,
     RIGHT_HAND_EFFORT_LIMIT_NM,
     hand_joint_names,
@@ -72,6 +71,7 @@ READ_BATCH = 256
 #: ``BODY_JOINT_ORDER`` shares that hardware order, so the same indices select
 #: the arm joints in the simulator's command vectors.
 ARM_MOTOR_SLOTS: tuple[int, ...] = tuple(range(15, 29))
+WAIST_MOTOR_SLOTS: tuple[int, ...] = tuple(range(12, 15))
 
 #: Motor slots of one 35-slot LowCmd, checked instead of assumed: a different
 #: layout on the wire would otherwise distribute arm targets into hand slots.
@@ -216,10 +216,9 @@ def body_command_vectors(
 ) -> tuple[tuple[float, ...], ...]:
     """The 29-joint ``q``/``dq``/``tau``/``kp``/``kd`` vectors for one LowCmd.
 
-    Arm targets come from the command slots the Flux node writes (15..28).  The
-    other slots are the legs and the waist: they carry no command of their own
-    and are filled with zeros, which under the simulator's per-joint torque law
-    is a passive joint rather than a hold.
+    Arm targets come from the command slots the Flux node writes (15..28).
+    The waist holds its zero-angle standing pose with deployment gains; the
+    legs remain passive under the simulator's per-joint torque law.
     """
     if len(motor_cmd) != LOW_CMD_MOTOR_SLOTS:
         raise CommandError(
@@ -230,6 +229,10 @@ def body_command_vectors(
     tau = [0.0] * len(BODY_JOINT_ORDER)
     kp = [0.0] * len(BODY_JOINT_ORDER)
     kd = [0.0] * len(BODY_JOINT_ORDER)
+    deployed_kp, deployed_kd = deploy_gains()
+    for slot in WAIST_MOTOR_SLOTS:
+        kp[slot] = deployed_kp[slot]
+        kd[slot] = deployed_kd[slot]
     for slot in ARM_MOTOR_SLOTS:
         motor = motor_cmd[slot]
         q[slot] = float(motor.q)

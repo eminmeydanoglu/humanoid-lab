@@ -312,6 +312,8 @@ class RobotSpec:
     asset_provenance: str
     initial_position_m: tuple[float, float, float]
     hand: HandSpec
+    initial_joint_positions_rad: Mapping[str, float] | None = None
+    initial_rotation_wxyz: tuple[float, float, float, float] | None = None
     fixed_base: bool = False
     #: Explicit gravity switch; defaults to the fixed-base behaviour.  A
     #: kinematic replay writes every joint each tick, so gravity would otherwise
@@ -342,6 +344,11 @@ class RobotSpec:
             asset_provenance=str(data["asset_provenance"]),
             initial_position_m=_tuple(data["initial_position_m"], 3, "initial_position_m"),
             hand=HandSpec.from_dict(data["hand"]),
+            initial_joint_positions_rad={str(k): float(v) for k, v in data.get("initial_joint_positions_rad", {}).items()},
+            initial_rotation_wxyz=(
+                _tuple(data["initial_rotation_wxyz"], 4, "initial_rotation_wxyz")
+                if "initial_rotation_wxyz" in data else None
+            ),
             fixed_base=bool(data.get("fixed_base", False)),
             disable_gravity=(
                 None if data.get("disable_gravity") is None else bool(data["disable_gravity"])
@@ -509,6 +516,8 @@ class RunProfile:
                 "asset_reference": self.robot.asset_reference,
                 "asset_provenance": self.robot.asset_provenance,
                 "initial_position_m": list(self.robot.initial_position_m),
+                "initial_joint_positions_rad": dict(self.robot.initial_joint_positions_rad or {}),
+                "initial_rotation_wxyz": self.robot.initial_rotation_wxyz,
                 "hand": {
                     "kind": self.robot.hand.kind,
                     "dofs": self.robot.hand.dofs,

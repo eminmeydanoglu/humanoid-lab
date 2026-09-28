@@ -54,6 +54,19 @@ DEFAULT_TRAINING_CFG = "/opt/src/sonic/gear_sonic/envs/manager_env/robots/g1.py"
 _CUBE_DIFFUSE_RGB = {"red": (0.80, 0.05, 0.05), "yellow": (0.85, 0.75, 0.05), "blue": (0.05, 0.20, 0.80)}
 
 
+def align_fixed_base_rotation(stage: Any, robot: Any, robot_path: str) -> None:
+    rotation = robot.initial_rotation_wxyz
+    if not robot.fixed_base or rotation is None:
+        return
+    from pxr import Gf, UsdPhysics
+
+    path = f"{robot_path}/pelvis/FixedJoint"
+    joint = UsdPhysics.FixedJoint.Get(stage, path)
+    if not joint:
+        raise RuntimeError(f"fixed-base rotation requested but {path} is missing")
+    joint.GetLocalRot0Attr().Set(Gf.Quatf(*rotation))
+
+
 def cube_diffuse_rgb(cube: Any) -> tuple[float, float, float]:
     """The rendered material of one cube.
 
@@ -424,6 +437,7 @@ class SimulatorService:
         self._is_rendering = self._sim.has_gui() or self._sim.has_rtx_sensors()
         print('{"event":"isaac_g1_start","stage":"free_base"}', flush=True)
         self._configure_free_base_if_needed()
+        align_fixed_base_rotation(self._sim.stage, self.profile.robot, "/World/envs/env_0/Robot")
         attach_stage_to_usd_context()
         print('{"event":"isaac_g1_start","stage":"hard_reset"}', flush=True)
         self._sim.reset()  # The sole hard reset, after all topology exists.
@@ -859,6 +873,12 @@ class SimulatorService:
         values = self._initial_joint_pos.clone()
         for name, angle in pose.items():
             values[0, names.index(name)] = float(angle)
+        overrides = self.profile.robot.initial_joint_positions_rad or {}
+        unknown = sorted(set(overrides) - set(names))
+        if unknown:
+            raise ContractError(f"initial joint positions name joints this asset does not have: {unknown}")
+        for name, angle in overrides.items():
+            values[0, names.index(name)] = float(angle)
         self._initial_joint_pos = values
         self._apply_reset_pose_to(values, names)
         # The pose and the height it was authored for travel together: the same
@@ -1173,9 +1193,12 @@ class SimulatorService:
         robot_cfg.spawn.rigid_props.disable_gravity = (
             robot_spec.fixed_base if robot_spec.disable_gravity is None else robot_spec.disable_gravity
         )
+        initial_state = robot_cfg.init_state.replace(pos=robot_spec.initial_position_m)
+        if robot_spec.initial_rotation_wxyz is not None:
+            initial_state = initial_state.replace(rot=robot_spec.initial_rotation_wxyz)
         robot_cfg = robot_cfg.replace(
             prim_path="{ENV_REGEX_NS}/Robot",
-            init_state=robot_cfg.init_state.replace(pos=robot_spec.initial_position_m),
+            init_state=initial_state,
         )
         camera = self.profile.camera
         camera_path = f"{{ENV_REGEX_NS}}/Robot/{camera.parent_link}/{camera.name}"

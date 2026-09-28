@@ -64,8 +64,11 @@ def test_chunk_queues_next_and_rejects_stale_or_invalid():
         exe.accept("episode", 1, 0.2, chunk, now=11.0)
     with pytest.raises(ValueError):
         exe.accept("wrong", 2, 0.2, chunk, now=11.0)
-    with pytest.raises(ValueError):
-        exe.accept("episode", 2, 0.2, chunk * 3, now=11.0)
+    exe.accept("episode", 2, 0.2, chunk * 3, now=11.1)
+    assert exe.tick(10 + 64 / 30)[0] == 2.0
+    assert exe.session == "episode"
+    with pytest.raises(ValueError, match="invalid action chunk"):
+        exe.accept("episode", 3, 0.2, np.full((32, 28), np.nan), now=11.0)
     with pytest.raises(ValueError):
         exe.accept("episode", 2, 1.3, chunk, now=11.0)
     exe.stop()

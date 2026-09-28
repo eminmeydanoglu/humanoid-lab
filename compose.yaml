@@ -145,7 +145,7 @@ services:
       - |
         set -e
         source /opt/humanoid-lab/flux-ros/entrypoint.sh
-        exec sleep infinity
+        exec ros2 run foxglove_bridge foxglove_bridge --ros-args -p address:=127.0.0.1 -p port:=8765 -p capabilities:="[connectionGraph,assets]"
     init: true
     restart: unless-stopped
     stop_grace_period: 30s

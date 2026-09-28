@@ -359,8 +359,11 @@ class Dex3Node(Node):
                 self.checkpoint = event[1].get("checkpoint", "")
                 status_log = (self.server_status, self.checkpoint, event[1].get("error", ""))
                 if status_log != self._last_status_log:
-                    level = self.get_logger().error if self.server_status == "ERROR" else self.get_logger().info
-                    level("GPU model status: %s checkpoint=%s detail=%s" % status_log)
+                    message = "GPU model status: %s checkpoint=%s detail=%s" % status_log
+                    if self.server_status == "ERROR":
+                        self.get_logger().error(message)
+                    else:
+                        self.get_logger().info(message)
                     self._last_status_log = status_log
                 if self.paused:
                     self.reason = (("paused; repeating last target at 30 Hz; command publishing %s" %
