@@ -11,7 +11,7 @@ from typing import Any
 
 import numpy as np
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 DEFAULT_CAPTURE = REPO / "data/outputs/blockstacking-debug/exp15-groot-contract-ab/corrected-sim-model-independent-rerun2-20260922T132233Z/groot-capture"
 DEFAULT_ANCHORS = REPO / "data/outputs/blockstacking-debug/experiments/11-offline-demo-fit/groot-full-horizon-train.json"
 DEFAULT_DATASET = REPO / "data/datasets/groot/unitree-dex3-sonic-v1/train"

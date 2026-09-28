@@ -3,7 +3,7 @@
 `--plan` resolves paths, pins and commands without touching docker, the GPU or
 the network, so the resolution order and the pins are testable here.  Building
 the environment itself needs network and ~7 GiB of wheels and is documented in
-scripts/flux-README.md; these tests never run it.
+the Flux Dex3 section of README.md; these tests never run it.
 """
 
 import json

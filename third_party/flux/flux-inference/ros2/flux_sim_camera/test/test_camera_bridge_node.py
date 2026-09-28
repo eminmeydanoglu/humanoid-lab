@@ -2,6 +2,8 @@
 
 Runs in the flux-ros container (rclpy + pyzmq + Pillow): a fake simulator PUB
 socket feeds the real node, and a ROS subscriber checks what was published.
+The bridge stamps the camera's optical frame but publishes no transforms -- the
+TF stack in flux_sim_viz owns the frames, including that optical child.
 """
 
 import io
@@ -122,6 +124,32 @@ def test_bridge_publishes_only_new_frames(simulator_pub):
         assert collector.frames[1].header.stamp.nanosec == 250_000_000
         assert len(collector.camera_info) == 2
         assert collector.camera_info[1].header == collector.frames[1].header
+    finally:
+        bridge.destroy_node()
+        collector.destroy_node()
+        rclpy.shutdown()
+
+
+def test_images_default_to_the_optical_frame(simulator_pub):
+    socket, endpoint = simulator_pub
+    rclpy.init(args=["--ros-args", "-p", "endpoint:=" + endpoint,
+                     "-p", "topic:=" + TOPIC, "-p", "camera_info_topic:=" + INFO_TOPIC])
+    bridge = CameraBridge()
+    collector = Collector()
+    try:
+        _spin([bridge, collector], 0.5)
+        for _ in range(10):
+            socket.send(pack(200.0))
+            _spin([bridge, collector], 0.05)
+        _spin([bridge, collector], 0.3)
+
+        assert collector.frames, "the frame must be published"
+        frame = collector.frames[-1]
+        # The default name is the optical child the TF stack publishes; the
+        # image is stamped with it so RViz/Foxglove read a camera-convention
+        # frame instead of the simulator's forward-+X body frame.
+        assert frame.header.frame_id == "head_camera_optical"
+        assert collector.camera_info[-1].header == frame.header
     finally:
         bridge.destroy_node()
         collector.destroy_node()

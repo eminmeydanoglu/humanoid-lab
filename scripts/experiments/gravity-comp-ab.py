@@ -27,11 +27,11 @@ The forward kinematics and the metric definitions are *not* re-implemented:
 they are loaded from the validated ``scripts/compare-blockstacking-dataset.py``
 and ``scripts/validate-blockstacking-tracking.py``.
 
-    python3 scripts/gravity-comp-ab.py profiles
-    python3 scripts/gravity-comp-ab.py run --repeats 3
-    data/venvs/hf-datasets/bin/python scripts/gravity-comp-ab.py analyse
-    python3 scripts/gravity-comp-ab.py figures
-    python3 scripts/gravity-comp-ab.py manifest
+    python3 scripts/experiments/gravity-comp-ab.py profiles
+    python3 scripts/experiments/gravity-comp-ab.py run --repeats 3
+    data/venvs/hf-datasets/bin/python scripts/experiments/gravity-comp-ab.py analyse
+    python3 scripts/experiments/gravity-comp-ab.py figures
+    python3 scripts/experiments/gravity-comp-ab.py manifest
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ from pathlib import Path
 
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 CAMPAIGN = REPO_ROOT / "data" / "outputs" / "blockstacking-debug"
 OUTPUT = CAMPAIGN / "experiments" / "04-gravity-comp-ab"
 RUNS = OUTPUT / "runs"
@@ -1226,11 +1226,11 @@ def stage_manifest(_: argparse.Namespace) -> int:
             "version": SCRIPT_VERSION,
         },
         "commands": [
-            "python3 scripts/gravity-comp-ab.py profiles",
-            "python3 scripts/gravity-comp-ab.py run --repeats 3",
-            "data/venvs/hf-datasets/bin/python scripts/gravity-comp-ab.py analyse",
-            "python3 scripts/gravity-comp-ab.py figures",
-            "python3 scripts/gravity-comp-ab.py manifest",
+            "python3 scripts/experiments/gravity-comp-ab.py profiles",
+            "python3 scripts/experiments/gravity-comp-ab.py run --repeats 3",
+            "data/venvs/hf-datasets/bin/python scripts/experiments/gravity-comp-ab.py analyse",
+            "python3 scripts/experiments/gravity-comp-ab.py figures",
+            "python3 scripts/experiments/gravity-comp-ab.py manifest",
         ],
         "inputs": inputs,
         "runs": runs,

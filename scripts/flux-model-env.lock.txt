@@ -12,7 +12,7 @@
 #   * NATTEN wheels are built per torch/CUDA combination and come from
 #     https://whl.natten.org/ (see flux-training docs/setup.md).
 #
-# Install with scripts/flux-bootstrap-model-env.sh (see scripts/flux-README.md).
+# Install with scripts/flux-bootstrap-model-env.sh (see the Flux Dex3 section of README.md).
 # The versions are the validated ones; the upstream training docs additionally
 # mention transformers 5.16.1 for a source install, while this validated run
 # used 5.5.4, which is pinned here.

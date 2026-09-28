@@ -9,6 +9,7 @@ import numpy as np
 import rclpy
 from flux_dex3_interfaces.srv import GetStatus, StartTask
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 from std_srvs.srv import Trigger
 from unitree_hg.msg import HandState, LowState
@@ -104,7 +105,9 @@ class Dex3Node(Node):
         self._last_heartbeat = 0.0
         self._last_chunk_start = None
         self._last_hold = None
-        self.create_subscription(Image, self.get_parameter("camera_topic").value, self._image, 2)
+        # RealSense uses best-effort; the simulation's reliable publisher also matches.
+        self.create_subscription(Image, self.get_parameter("camera_topic").value, self._image,
+                                 qos_profile_sensor_data)
         self.create_subscription(LowState, "/lowstate", lambda msg: self._store("low", msg), 10)
         self.create_subscription(HandState, "/dex3/left/state", lambda msg: self._store("left", msg), 10)
         self.create_subscription(HandState, "/dex3/right/state", lambda msg: self._store("right", msg), 10)

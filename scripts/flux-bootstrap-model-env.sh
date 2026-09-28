@@ -7,8 +7,8 @@
 # happen and `--check` verifies an existing environment against the pins;
 # neither downloads anything.
 #
-# What this does NOT provide (both are external artifacts, see
-# scripts/flux-README.md):
+# What this does NOT provide (both are external artifacts, see the Flux Dex3
+# section of README.md):
 #   * the trained Dex3 adapter checkpoint (~450 MiB) -- prepare it with
 #     ./dev.sh flux-checkpoint --source <training checkpoint>;
 #   * the base policy export the adapter references (~13 GiB) -- read-only,

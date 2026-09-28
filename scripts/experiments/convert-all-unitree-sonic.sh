@@ -5,7 +5,7 @@
 # attempted and the run exits non-zero only at the end, after the aggregate
 # summary, so a single bad episode cannot hide the rest of the corpus.
 set -uo pipefail
-cd "$(dirname "$0")/.." || exit 1
+cd "$(dirname "$0")/../.." || exit 1
 
 config="configs/datasets/sonic/pilots.json"
 output_root="/data/datasets/unitree-sonic-v1.1-78d"

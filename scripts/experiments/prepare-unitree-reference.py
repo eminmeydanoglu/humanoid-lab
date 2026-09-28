@@ -5,7 +5,7 @@ Thin wrapper over the shared pilot library: it writes the canonical 50 Hz
 reference (official IsaacLab joint order), the encoder observation and the QC
 report into ``--output``.  The lower body comes from the static standing
 completion policy, not from a captured IDLE time series — see
-docs/sonic-pilots.md; use ``./dev.sh sonic-pilot --pilot unitree`` for the
+data/notes/sonic-pilots.md; use ``./dev.sh sonic-pilot --pilot unitree`` for the
 timestamped pilot layout.
 """
 
@@ -16,7 +16,7 @@ import json
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 from humanoid_lab.datasets.sonic.pilot import (  # noqa: E402

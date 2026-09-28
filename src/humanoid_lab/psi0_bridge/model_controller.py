@@ -189,7 +189,7 @@ class ModelController:
         handshake or warm start -- is different: that stream is aimed at the
         controller's first post-reset decode, so firing it at the queue ack lets
         the deployment reach SONIC before the scene moved, which is the race
-        ``hatalar.md`` A5 records.  With either one configured this waits for the
+        ``data/notes/hatalar.md`` A5 records.  With either one configured this waits for the
         loop's ``episode_id`` to advance, so the settle always starts from the
         applied reset.  A loop that never applies it fails the Reset closed.
         """

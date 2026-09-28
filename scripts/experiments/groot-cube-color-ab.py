@@ -16,11 +16,11 @@ of experiment 08 runs in both cells so it cannot be the treatment.
 
 Stages:
 
-    scripts/groot-cube-color-ab.py colour     # was the treatment applied, visually?
-    scripts/groot-cube-color-ab.py analyse    # validity + paired metrics + decision
-    scripts/groot-cube-color-ab.py figures    # at most three figures
-    scripts/groot-cube-color-ab.py manifest   # sha256 manifest
-    scripts/groot-cube-color-ab.py all
+    scripts/experiments/groot-cube-color-ab.py colour     # was the treatment applied, visually?
+    scripts/experiments/groot-cube-color-ab.py analyse    # validity + paired metrics + decision
+    scripts/experiments/groot-cube-color-ab.py figures    # at most three figures
+    scripts/experiments/groot-cube-color-ab.py manifest   # sha256 manifest
+    scripts/experiments/groot-cube-color-ab.py all
 
 The per-rollout reading (tracking series, telemetry, support calibration, palm
 kinematics) is experiment 07's own ``Rollout`` object and the settle/delivery
@@ -46,7 +46,7 @@ import numpy as np
 
 SCHEMA_VERSION = 1
 SCRIPT_VERSION = "groot-cube-color-ab.py/1.0.0"
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 CAMPAIGN = REPO_ROOT / "data" / "outputs" / "blockstacking-debug"
 EXPERIMENTS = CAMPAIGN / "experiments"
 DEFAULT_OUT = EXPERIMENTS / "09-groot-cube-color-ab"
@@ -1493,7 +1493,7 @@ def stage_manifest(args: argparse.Namespace) -> dict[str, Any]:
             "shipped": {"path": SHIPPED_PROFILE, "sha256": sha256(REPO_ROOT / SHIPPED_PROFILE)},
             "variant": {"path": VARIANT_PROFILE, "sha256": sha256(REPO_ROOT / VARIANT_PROFILE)},
         },
-        "script_sha256": sha256(REPO_ROOT / "scripts" / "groot-cube-color-ab.py"),
+        "script_sha256": sha256(REPO_ROOT / "scripts" / "experiments" / "groot-cube-color-ab.py"),
         "artifacts": artifacts,
     }
     write_json(out / "manifest.json", manifest)

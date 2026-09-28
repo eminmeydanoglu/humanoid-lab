@@ -16,6 +16,11 @@ from humanoid_lab.simulators.isaac.contracts import (  # noqa: E402
     body_gravity_columns,
     load_reset_pose,
 )
+from humanoid_lab.simulators.isaac.object_physics import (  # noqa: E402
+    TASK_OBJECT_ANGULAR_DAMPING_1_S,
+    TASK_OBJECT_FRICTION,
+    TASK_OBJECT_RESTITUTION,
+)
 
 SERVICE = ROOT / "src/humanoid_lab/simulators/isaac/service.py"
 
@@ -159,6 +164,20 @@ class IsaacG1SourceInvariantTests(unittest.TestCase):
         self.assertIn('"head_camera_shape": self._camera_shape', service)
         self.assertIn('"head_camera_flowing": self._camera_frames >= 2', service)
         self.assertNotIn('"clean_stop": True', service)
+
+    def test_the_scene_object_spawn_authors_rolling_resistance(self) -> None:
+        """Task objects need contact friction and rolling resistance."""
+        self.assertGreater(TASK_OBJECT_ANGULAR_DAMPING_1_S, 0.0)
+        self.assertEqual(TASK_OBJECT_FRICTION, 1.0)
+        self.assertEqual(TASK_OBJECT_RESTITUTION, 0.0)
+        spawn = SERVICE.read_text()
+        spawn = spawn[spawn.index("scene_object = None if scene_spec is None"):]
+        spawn = spawn[: spawn.index("@configclass")]
+        # Both shapes (apple sphere, gum cuboid) get the same contact physics.
+        self.assertEqual(spawn.count("rigid_props=object_rigid_props"), 2)
+        self.assertEqual(spawn.count("physics_material=object_material"), 2)
+        self.assertIn("angular_damping=TASK_OBJECT_ANGULAR_DAMPING_1_S", spawn)
+        self.assertIn('friction_combine_mode="max"', spawn)
 
     def test_controller_override_can_only_disable_a_profile_controller(self) -> None:
         """Provider configuration belongs to the profile; a CLI override must

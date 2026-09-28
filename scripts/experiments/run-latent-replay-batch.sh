@@ -6,7 +6,7 @@
 # episode is recorded and the batch keeps going; the batch exits non-zero at the
 # end so a partial run cannot pass as complete.
 set -uo pipefail
-cd "$(dirname "$0")/.." || exit 1
+cd "$(dirname "$0")/../.." || exit 1
 
 batch_root="${1:?usage: run-latent-replay-batch.sh <batch_root> [extra run-sonic-pilot-sim.sh flags]}"
 shift

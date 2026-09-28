@@ -16,12 +16,12 @@ handshake of experiment 08 is *not* used in either cell.
 
 Stages:
 
-    scripts/psi0-gravity-rollout-ab.py campaign   # drive both sessions
-    scripts/psi0-gravity-rollout-ab.py rollouts   # crop/analyse each session
-    scripts/psi0-gravity-rollout-ab.py analyse    # gates + paired metrics + decision
-    scripts/psi0-gravity-rollout-ab.py figures    # at most three figures
-    scripts/psi0-gravity-rollout-ab.py manifest   # input/output hashes
-    scripts/psi0-gravity-rollout-ab.py all
+    scripts/experiments/psi0-gravity-rollout-ab.py campaign   # drive both sessions
+    scripts/experiments/psi0-gravity-rollout-ab.py rollouts   # crop/analyse each session
+    scripts/experiments/psi0-gravity-rollout-ab.py analyse    # gates + paired metrics + decision
+    scripts/experiments/psi0-gravity-rollout-ab.py figures    # at most three figures
+    scripts/experiments/psi0-gravity-rollout-ab.py manifest   # input/output hashes
+    scripts/experiments/psi0-gravity-rollout-ab.py all
 
 The per-rollout reading is the campaign analyzer's own product
 (``runs/<cell>/rollouts/rollout-XX/{rollout.json,tracking.jsonl,isaac.samples.jsonl}``);
@@ -48,7 +48,7 @@ import numpy as np
 
 SCHEMA_VERSION = 1
 SCRIPT_VERSION = "psi0-gravity-rollout-ab.py/1.0.0"
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 CAMPAIGN = REPO_ROOT / "data" / "outputs" / "blockstacking-debug"
 EXPERIMENTS = CAMPAIGN / "experiments"
 DEFAULT_OUT = EXPERIMENTS / "10-psi0-gravity-rollout-ab"

@@ -21,7 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 from humanoid_lab.datasets.sonic.adapters.unitree_dex3 import load_episode  # noqa: E402

@@ -7,7 +7,7 @@ preflight instead of half way through a forward pass.  The conversion pipeline
 (``humanoid_lab.datasets.psi0_dex3``) imports the field names and widths from
 here rather than declaring a second copy.
 
-Field names follow the training plan (``psi_egitime_hazirlik.md`` §7 and §9)
+Field names follow the training plan (``data/notes/psi_egitime_hazirlik.md`` §7 and §9)
 with one addition the loader forces: the per-frame action validity must be
 carried **wide**.  Psi0's ``SonicRepackTransform`` multiplies the mask field into
 an ``(action_chunk_size, action_dim)`` loss mask and reshapes it to that shape

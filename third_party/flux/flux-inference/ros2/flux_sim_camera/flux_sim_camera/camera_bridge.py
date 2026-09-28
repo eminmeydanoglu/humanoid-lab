@@ -4,6 +4,12 @@ The simulation-only counterpart of the robot's RealSense stream.  It subscribes
 to the Isaac simulator's SONIC camera PUB socket and republishes each frame on
 the ordinary ROS camera topic with the simulator's own capture timestamp, so the
 ``flux_dex3`` node's freshness gate measures the simulator, not the bridge.
+
+Images carry the camera's optical frame (forward ``+Z``, REP 103), like the
+robot's RealSense stream: the simulator authors the mount in Isaac's world
+convention (forward ``+X``), and the TF stack in ``flux_sim_viz`` publishes the
+fixed ``head_camera -> head_camera_optical`` rotation.  This node only names the
+frame; it publishes no transforms.
 """
 
 from __future__ import annotations
@@ -30,7 +36,7 @@ class CameraBridge(Node):
         self.declare_parameter("endpoint", "tcp://127.0.0.1:5555")
         self.declare_parameter("topic", "/camera/color/image_raw")
         self.declare_parameter("camera_info_topic", "/camera/color/camera_info")
-        self.declare_parameter("frame_id", "head_camera")
+        self.declare_parameter("frame_id", "head_camera_optical")
         self.declare_parameter("focal_length_mm", 15.1159925892)
         self.declare_parameter("horizontal_aperture_mm", 20.955)
         self.declare_parameter("resync_s", 5.0)
@@ -58,7 +64,8 @@ class CameraBridge(Node):
         self._thread.start()
         self.create_timer(10.0, self._heartbeat)
         self.get_logger().info(
-            "Camera bridge started: endpoint=%s topic=%s" % (self.endpoint, self.publisher.topic_name)
+            "Camera bridge started: endpoint=%s topic=%s frame=%s"
+            % (self.endpoint, self.publisher.topic_name, self.frame_id)
         )
 
     def _warn(self, reason: str) -> None:
@@ -163,7 +170,15 @@ def main() -> None:
     try:
         node = CameraBridge()
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     finally:
-        if node is not None:
-            node.destroy_node()
-        rclpy.shutdown()
+        # The signal that ended spin shuts the context down and can land again
+        # during teardown; that is a normal stop, not a crash worth a traceback.
+        try:
+            if node is not None:
+                node.destroy_node()
+            if rclpy.ok():
+                rclpy.shutdown()
+        except (KeyboardInterrupt, RuntimeError):
+            pass

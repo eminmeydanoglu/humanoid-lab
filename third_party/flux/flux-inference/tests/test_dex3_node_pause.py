@@ -9,6 +9,8 @@ from types import ModuleType, SimpleNamespace
 import numpy as np
 import pytest
 
+SENSOR_QOS = SimpleNamespace(reliability="best_effort", depth=5)
+
 
 class FakeLogger:
     def __init__(self):
@@ -39,6 +41,7 @@ class FakeNode:
         self.params = {}
         self.services = {}
         self.publishers = []
+        self.subscriptions = []
         self.logger = FakeLogger()
 
     def declare_parameter(self, name, default):
@@ -54,6 +57,7 @@ class FakeNode:
         return self.logger
 
     def create_subscription(self, *args):
+        self.subscriptions.append(args)
         return args
 
     def create_service(self, kind, name, callback):
@@ -91,6 +95,7 @@ class FakeNetwork:
 def robot_node(monkeypatch):
     stubs = {
         "rclpy": {}, "rclpy.node": {"Node": FakeNode},
+        "rclpy.qos": {"qos_profile_sensor_data": SENSOR_QOS},
         "sensor_msgs": {}, "sensor_msgs.msg": {"Image": type("Image", (), {})},
         "std_srvs": {}, "std_srvs.srv": {"Trigger": type("Trigger", (), {})},
         "unitree_hg": {}, "unitree_hg.msg": {"LowState": type("LowState", (), {}),
@@ -214,6 +219,13 @@ def test_invalid_image_logs_once_without_per_frame_spam(robot_node):
     node._image(invalid)
     warnings = [line for level, line in node.logger.lines if level == "warn"]
     assert len(warnings) == 1 and "Observation rejected" in warnings[0]
+
+
+def test_camera_subscription_is_best_effort_for_the_robot_stream(robot_node):
+    camera = [args for args in robot_node.subscriptions if args[1] == "/camera/color/image_raw"]
+    assert len(camera) == 1
+    qos = camera[0][3]
+    assert getattr(qos, "reliability", None) == "best_effort"
 
 
 def test_snapshot_pairs_the_joint_sample_nearest_the_frame(robot_node):

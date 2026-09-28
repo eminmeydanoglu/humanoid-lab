@@ -2,7 +2,7 @@
 #
 # Psi0 fine-tuning of the Unitree Dex3 SONIC v1 pack on one RTX 5090.
 #
-# The gate runs of psi_egitime_hazirlik.md §16 all use this one script; only the
+# The gate runs of data/notes/psi_egitime_hazirlik.md §16 all use this one script; only the
 # step/horizon knobs change:
 #
 #   Kapı 2   ./dev.sh psi0-dex3-check                      loader + checkpoint contract
@@ -39,7 +39,7 @@ Train Psi0 on the Unitree Dex3 SONIC v1 pack (one RTX 5090, VLM frozen).
 
 usage: psi0-unitree-dex3-sonic-v1.sh [--print-args | --check-only | --help]
 
-Gate runs (psi_egitime_hazirlik.md §16), all the same script:
+Gate runs (data/notes/psi_egitime_hazirlik.md §16), all the same script:
   Kapı 2     ./dev.sh psi0-dex3-check                        loader + checkpoint contract
   Kapı 3-4   MAX_STEPS=1 ACCUM=1 AUG=0 ./dev.sh psi0-dex3-run      one step: forward+backward+optimizer
   Kapı 5     MAX_STEPS=10 CKPT_STEPS=5 AUG=0 ./dev.sh psi0-dex3-run

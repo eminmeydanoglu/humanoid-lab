@@ -34,6 +34,11 @@ from .contracts import (
     quaternion_up_z,
 )
 from .maths import quat_to_rotation_vector
+from .object_physics import (
+    TASK_OBJECT_ANGULAR_DAMPING_1_S,
+    TASK_OBJECT_FRICTION,
+    TASK_OBJECT_RESTITUTION,
+)
 
 PASSIVE = "passive"
 CONTROLLED = "controlled"
@@ -1228,19 +1233,30 @@ class SimulatorService:
         # auto-annotated into a config field.
         scene_cubes = {} if scene_spec is None else {cube.color: _cube_cfg(cube) for cube in scene_spec.cubes}
         scene_object = None if scene_spec is None else scene_spec.object
+        # Angular damping approximates rolling resistance absent from PhysX.
+        object_rigid_props = sim_utils.RigidBodyPropertiesCfg(
+            angular_damping=TASK_OBJECT_ANGULAR_DAMPING_1_S)
+        object_material = sim_utils.RigidBodyMaterialCfg(
+            static_friction=TASK_OBJECT_FRICTION,
+            dynamic_friction=TASK_OBJECT_FRICTION,
+            restitution=TASK_OBJECT_RESTITUTION,
+            friction_combine_mode="max",
+            restitution_combine_mode="min")
         if scene_object is not None:
             if scene_object.shape == "sphere":
                 object_spawn = sim_utils.SphereCfg(radius=scene_object.size_m[0] / 2,
-                    rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+                    rigid_props=object_rigid_props,
                     mass_props=sim_utils.MassPropertiesCfg(mass=scene_object.mass_kg),
                     collision_props=sim_utils.CollisionPropertiesCfg(),
-                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=scene_object.diffuse_rgb))
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=scene_object.diffuse_rgb),
+                    physics_material=object_material)
             else:
                 object_spawn = sim_utils.CuboidCfg(size=scene_object.size_m,
-                    rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+                    rigid_props=object_rigid_props,
                     mass_props=sim_utils.MassPropertiesCfg(mass=scene_object.mass_kg),
                     collision_props=sim_utils.CollisionPropertiesCfg(),
-                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=scene_object.diffuse_rgb))
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=scene_object.diffuse_rgb),
+                    physics_material=object_material)
             object_cfg = RigidObjectCfg(prim_path="{ENV_REGEX_NS}/TaskObject",
                 init_state=RigidObjectCfg.InitialStateCfg(pos=scene_object.position_m),
                 spawn=object_spawn)
