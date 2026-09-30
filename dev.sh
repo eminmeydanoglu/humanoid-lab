@@ -126,6 +126,31 @@ psi0_forward_env() {
   done
 }
 
+# Same contract for the GR00T N1.7 dex3/SONIC harness: the wrapper is driven by
+# env knobs (stages, batch envelope, resume, output location), and docker
+# compose exec forwards none of them by itself.
+groot_forward_env() {
+  GROOT_FORWARD=()
+  local name
+  for name in \
+    BATCH ACCUM MAX_STEPS LR SAVE_STEPS SAVE_TOTAL_LIMIT WORKERS SHARD_SIZE \
+    NUM_SHARDS_PER_EPOCH EPISODE_SAMPLING_RATE WEIGHT_DECAY WARMUP_RATIO \
+    STATE_DROPOUT COLOR_JITTER SKIP_WEIGHT_LOADING RESUME EXP STAMP \
+    OUTPUT_DIR OUTPUT_ROOT STATS_ROOT SPLIT DATASET_ROOT TRAIN_ID VAL_ID \
+    MODEL_DIR SOURCE_DIR EGO_KEY EMBODIMENT SEED WANDB WANDB_PROJECT WANDB_MODE \
+    GROOT_PYTHON GROOT_JSON_PYTHON GROOT_MODEL_DIR GROOT_SOURCE_DIR \
+    GROOT_EXPECTED_SOURCE_COMMIT GROOT_EXPECTED_MODEL_REPO \
+    GROOT_EXPECTED_MODEL_REVISION GROOT_SKIP_ENV_IMPORT GROOT_SKIP_GPU \
+    MIN_VRAM_MIB EXPECTED_GPU GPU_SAMPLE_SECONDS ALLOW_BATCH_OVERRIDE \
+    ALLOW_LOW_VRAM ALLOW_OTHER_GPU TUNE_PROJECTOR TUNE_DIFFUSION \
+    TUNE_PROJECTOR_MIN_VRAM_MIB ALLOW_FULL_TUNE OPTIM \
+    CUDA_VISIBLE_DEVICES OMP_NUM_THREADS; do
+    if [ -n "${!name:-}" ]; then
+      GROOT_FORWARD+=(-e "$name=${!name}")
+    fi
+  done
+}
+
 cleanup_isaac_demo() { # $1 = container-side pidfile
   # docker compose exec does not terminate its container process when this
   # client is interrupted. The pidfile is per invocation, so cleanup cannot
@@ -998,6 +1023,46 @@ case "${1:-}" in
     up_once
     DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-groot && exec /opt/humanoid-lab/groot-finetune-smoke.sh "$@"' groot-finetune-smoke "${@:2}"
     ;;
+  groot-dex3-stats)
+    # Official gr00t/data/stats.py for the Unitree Dex3 SONIC v1 pack, then a
+    # fail-closed check that the statistics it wrote are complete.  No GPU use.
+    up_once
+    groot_forward_env
+    DC exec -T "${GROOT_FORWARD[@]}" dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-groot && cd /workspace/humanoid-lab && exec bash scripts/groot-unitree-dex3-sonic.sh --stats "$@"' groot-dex3-stats "${@:2}"
+    ;;
+  groot-dex3-check)
+    # Preflight only: pinned source/model revisions, dataset contract, stats,
+    # GPU identity, output directory safety.  Writes nothing.
+    up_once
+    groot_forward_env
+    DC exec -T "${GROOT_FORWARD[@]}" dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-groot && cd /workspace/humanoid-lab && exec bash scripts/groot-unitree-dex3-sonic.sh --check-only' groot-dex3-check
+    ;;
+  groot-dex3-smoke)
+    # Exactly two optimizer steps on the pinned launcher, then the artifact
+    # validator proves a checkpoint-2 with a matching global_step exists.
+    up_once
+    groot_forward_env
+    DC exec -T "${GROOT_FORWARD[@]}" dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-groot && cd /workspace/humanoid-lab && exec bash scripts/groot-unitree-dex3-sonic.sh --smoke "$@"' groot-dex3-smoke "${@:2}"
+    ;;
+  groot-dex3-run)
+    # Full stage by default; flags such as --print-command/--dry-run/
+    # --validate-artifacts are passed through to the wrapper.
+    up_once
+    groot_forward_env
+    DC exec -T "${GROOT_FORWARD[@]}" dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-groot && cd /workspace/humanoid-lab && exec bash scripts/groot-unitree-dex3-sonic.sh "$@"' groot-dex3-run "${@:2}"
+    ;;
+  groot-dex3-tests)
+    # Offline: mocked source/dataset/model/GPU, no training and no stats run.
+    up_once
+    DC exec -T dev bash -lc '
+      source /opt/humanoid-lab/entrypoint.sh
+      cd /workspace/humanoid-lab
+      set -e
+      bash tests/test_groot_unitree_dex3_sonic.sh
+      use-groot
+      python3 -m unittest discover -s tests -p "test_groot_unitree_dex3_sonic_preflight.py" -v
+      python3 -m unittest discover -s tests -p "test_groot_finetune_launcher.py" -v' groot-dex3-tests "${@:2}"
+    ;;
   psi0-smoke)
     up_once
     DC exec -T dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-psi0 && exec /opt/humanoid-lab/psi0-env-smoke.sh "$@"' psi0-smoke "${@:2}"
@@ -1154,7 +1219,7 @@ case "${1:-}" in
     exit 2
     ;;
   *)
-    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-direct-reference dex3|isaac-g1-sonic-fixed-base dex3|isaac-g1-sonic {dex3|inspire-ftp}|sonic-controller|psi0-isaac-eval --checkpoint-dir RUN_DIR --checkpoint-step STEP|sonic-dataset-validate|sonic-pilot|sonic-encode|sonic-review|sonic-review-serve|sonic-convert|sonic-convert-unitree|sonic-tests|sonic-verify|doctor|smoke|groot-finetune-smoke|psi0-smoke|psi0-dex3-check|psi0-dex3-run|psi0-tests|psi0-dex3-dataset-split|psi0-dex3-dataset-convert|psi0-dex3-dataset-validate|sync|fetch-models|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
+    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-direct-reference dex3|isaac-g1-sonic-fixed-base dex3|isaac-g1-sonic {dex3|inspire-ftp}|sonic-controller|psi0-isaac-eval --checkpoint-dir RUN_DIR --checkpoint-step STEP|sonic-dataset-validate|sonic-pilot|sonic-encode|sonic-review|sonic-review-serve|sonic-convert|sonic-convert-unitree|sonic-tests|sonic-verify|doctor|smoke|groot-finetune-smoke|groot-dex3-stats|groot-dex3-check|groot-dex3-smoke|groot-dex3-run|groot-dex3-tests|psi0-smoke|psi0-dex3-check|psi0-dex3-run|psi0-tests|psi0-dex3-dataset-split|psi0-dex3-dataset-convert|psi0-dex3-dataset-validate|sync|fetch-models|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
     exit 2
     ;;
 esac

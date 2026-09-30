@@ -159,7 +159,9 @@ widened to match the measured distribution.
   outliers across the data file — `kRightHandMiddle0` at −3363.483 (episode 23)
   and −119.361 (episode 96). The pipeline encodes from `action`, not
   `observation.state`, so they do not reach any token; they are a raw-data defect
-  worth knowing about if the state field is ever used.
+  worth knowing about if the state field is ever used. The GR00T pack, which does
+  use the measured state, found these are part of a larger right-hand dropout
+  class — see section 6.
 * **`right_hip_roll` +1.58 rad in the free run.** The joint ranges above the
   model limit seen in the SONIC tracking trace belong to the *policy's own output*
   during the free run, not to the dataset reference (all 29 reference joints are
@@ -197,3 +199,46 @@ Both free runs completed with `hand_binding` bound on both sides and tracking MA
 0.1138 rad (Unitree, 822 frames) / 0.1011 rad (Apple, 414 frames). The kinematic
 replays write every frame with body and hand write error `0.0` rad and root write
 error `6e-8` m.
+
+## 6. The measured-state hand dropouts — corpus audit and the 51-frame bound
+
+Date: 2026-09-19. The first full GR00T pack conversion stopped at
+`G1_Dex3_PickDoll_Dataset` episode 77: `right_hand_index_0_joint` carried an
+invalid run of 18 samples, above the 15-frame repair bound declared by
+`configs/datasets/groot/unitree_dex3_sonic_v1.yaml`. A read-only scan of every
+raw episode of all 13 collections (predicate `~isfinite | abs(q) > 3.0 rad` on
+the 14 measured hand columns of `observation.state` and the 14 desired hand
+columns of `action`) places that failure in context:
+
+* **104 runs / 314 samples**, all in `observation.state` and all on the
+  **right hand**: `right_hand_index_0` 133, `right_hand_middle_0` 122,
+  `right_hand_index_1` 31, `right_hand_middle_1` 28. The left hand, both arms
+  and the whole desired action block are clean: 0 invalid samples and 0
+  non-finite values anywhere in the 28 columns.
+* **Stuck-value bursts, not scaled or noisy readings.** A run holds one constant
+  for its length and may switch constant mid-run (episode 77,
+  `kRightHandMiddle0`: −29.441 × 11 then −719.823 × 14). Magnitudes reach
+  1921.6 rad against a ±2.09 rad mechanical range.
+* **Run-length histogram** 72×1, 9×2, 5×3, 4×4, 4×5, 2×8, 2×9, 1×13, 1×15, and
+  four runs above the old bound: 17, 18, 25 and 51 frames. No run touches an
+  episode boundary.
+* **Only two episodes fail the old policy**, both in the train split:
+  PickDoll/77 (longest run 25 frames, worst channel 72/2227 = 3.23 %) and
+  PickDoll/153 (longest run 51 frames, worst channel 53/1457 = 3.64 %). Every
+  other affected episode stays inside 15 frames and 0.8 %.
+* **Interpolation is defensible for all four long runs.** The valid samples on
+  either side differ by ≤ 0.014 rad (0.0015, 1.5e−5, 0.014, 0.0022) while those
+  channels' p95 per-frame motion is 0.008–0.013 rad, and the clean desired
+  action moves ≤ 0.022 rad across the same spans — the hand is parked, so the
+  interpolated bridge is a near-hold, never an invented motion.
+
+The two episodes cannot be excluded: the split is the frozen Psi0
+`split_manifest.json` and `assert_manifest_matches_config` requires the
+contract's exclusions to equal the manifest's (PickDoll has none), so an
+exclusion would fail closed or fork the shared split. The narrowest safe change
+is therefore one number — `repair.max_gap_source_frames` 15 → 51 (the audited
+corpus maximum) — with the 3.0 rad threshold, the 5 % per-channel fraction cap,
+the boundary refusal, the all-invalid refusal and the action-clean check left
+unchanged. With that bound both episodes convert end-to-end; their repair
+ledgers (174 and 72 samples) match the audit per channel and the rebuilt-vs-
+corpus hand cross-check stays at 6e-8 rad.

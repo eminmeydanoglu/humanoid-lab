@@ -1,0 +1,212 @@
+# GR00T N1.7 training contract for the Unitree G1 Dex3 + SONIC v1.1 corpus.
+#
+# The pack is the frozen 50 Hz SONIC corpus re-expressed as a GR00T LeRobot v2.1
+# dataset: one row per retained SONIC sample, the measured upper body resampled
+# onto those exact timestamps, the 64D body latent copied verbatim, and the 14D
+# hand action rebuilt from the raw desired action by name. The corpus's clamped
+# tail is dropped instead of carried as a mask, so every row in the pack is a
+# training row and no row count is ever invented.
+#
+# The sources under `source:` are frozen inputs: the pipeline only ever reads
+# them. The episode split is not re-decided here either -- it is the Psi0 split
+# manifest, read as-is, so both packs describe the same source episodes.
+schema_version: 1
+name: groot-unitree-dex3-sonic-v1
+
+source:
+  raw_root: /data/datasets/first_tur_ham/unitree-g1-dex3
+  sonic_root: /data/datasets/unitree-sonic-v1.1-78d
+  collections:
+    - G1_Dex3_BlockStacking_Dataset
+    - G1_Dex3_CameraPackaging_Dataset
+    - G1_Dex3_GraspSquare_Dataset
+    - G1_Dex3_ObjectPlacement_Dataset
+    - G1_Dex3_PickApple_Dataset
+    - G1_Dex3_PickBottle_Dataset
+    - G1_Dex3_PickCharger_Dataset
+    - G1_Dex3_PickDoll_Dataset
+    - G1_Dex3_PickGum_Dataset
+    - G1_Dex3_PickSnack_Dataset
+    - G1_Dex3_PickTissue_Dataset
+    - G1_Dex3_Pouring_Dataset
+    - G1_Dex3_ToastedBread_Dataset
+  # These two episodes are never converted and never appear in a split.
+  excluded_episodes:
+    G1_Dex3_ObjectPlacement_Dataset:
+      episodes: [0]
+      reason: >-
+        49 source frames; the SONIC future window cannot be produced from it, so
+        it is absent from the frozen 78D corpus.
+    G1_Dex3_ToastedBread_Dataset:
+      episodes: [396]
+      reason: >-
+        upstream episode metadata/parquet offset inconsistency; the declared
+        location is unreachable and the episode is absent from the frozen 78D
+        corpus.
+
+# Psi0 pack the frozen SONIC corpus was cut into. The pack reuses that manifest
+# verbatim: same collections, same exclusions, same train/val episode identity.
+split:
+  name: psi0-unitree-dex3-sonic-v1
+  manifest: /data/datasets/psi0-unitree-dex3-sonic-v1/split_manifest.json
+
+# Single left head camera. The right camera is never a training input.
+camera:
+  source_key: observation.images.cam_left_high
+  target_key: observation.images.ego_view
+  excluded_keys:
+    - observation.images.cam_right_high
+  source_width: 640
+  source_height: 480
+  aspect_ratio: "4:3"
+
+fps:
+  source: 30
+  sonic: 50
+  dataset: 50
+
+# The output timeline *is* the SONIC corpus timeline: a retained row keeps the
+# corpus timestamp exactly, and the 30 Hz measured state is interpolated onto it.
+resample:
+  method: linear_timestamp_interpolation
+
+# Output rows are the corpus rows minus the clamped tail. The corpus keeps its
+# last 45 rows so a SONIC replay can execute the whole episode; their future
+# window is upstream last-frame clamping, so they are not training rows here.
+trim:
+  method: drop_trailing_invalid_rows
+  trailing_invalid_rows: 45
+  min_rows: 40
+
+# Gross measured hand corruption only (Unitree Dex3 motor readings; the hands'
+# mechanical range is far inside the threshold). A channel is repaired by
+# interpolating its *temporal* neighbours in the 30 Hz source episode, before any
+# 50 Hz resampling, and is never clipped. Action targets are expected clean and
+# are checked, not repaired.
+#
+# The gap bound is the audited maximum of the frozen corpus, not a round guess.
+# A scan of all 3150 usable episodes found 104 invalid runs / 314 samples, every
+# one in the measured right hand (index/middle channels), every value finite and
+# part of a stuck-value burst. Only four runs exceed 15 frames -- 17, 18, 25 and
+# 51 (the longest in PickDoll episode 153) -- and each is interior, with valid
+# neighbours <= 0.014 rad apart while the clean desired action moves <= 0.022 rad
+# across the same span, so the interpolated bridge is a near-hold and never an
+# invented motion. Excluding the two affected PickDoll episodes is unavailable:
+# the split is the frozen Psi0 manifest and the contract requires its exclusions
+# to match the manifest exactly.
+repair:
+  scope: measured_hand_channels
+  invalid_abs_rad: 3.0
+  method: linear_interpolation_over_valid_source_samples
+  max_invalid_fraction_per_channel: 0.05
+  max_gap_source_frames: 51
+  fail_on_action_hand_corruption: true
+
+state:
+  field: observation.state
+  dim: 43
+  gravity_field: observation.projected_gravity
+  projected_gravity: [0.0, 0.0, -1.0]
+  lower_body: official_sonic_standing_lower_body_v1
+  lower_body_semantics: synthetic constant SONIC deployment standing pose
+  joint_layout:
+    left_leg: [0, 6]
+    right_leg: [6, 12]
+    waist: [12, 15]
+    left_arm: [15, 22]
+    left_hand: [22, 29]
+    right_arm: [29, 36]
+    right_hand: [36, 43]
+  # The stored blocks above are the official SONIC exporter's order (lower body,
+  # then each arm with its hand). GR00T's registered `unitree_g1_sonic` key order
+  # differs, so this is the order the 46D model input is concatenated in; the
+  # loader reads every key through its slice in `modality.json`.
+  model_key_order:
+    - left_leg
+    - right_leg
+    - waist
+    - left_arm
+    - right_arm
+    - left_hand
+    - right_hand
+    - projected_gravity
+  # Official `unitree_g1_sonic` hand order inside `observation.state`: index,
+  # middle, thumb, both sides. It is not the order the hands are actuated in and
+  # not the order the SONIC corpus stores, so the state is mapped by name.
+  hand_order:
+    left: [index_0_joint, index_1_joint, middle_0_joint, middle_1_joint, thumb_0_joint, thumb_1_joint, thumb_2_joint]
+    right: [index_0_joint, index_1_joint, middle_0_joint, middle_1_joint, thumb_0_joint, thumb_1_joint, thumb_2_joint]
+  semantics:
+    legs_and_waist: synthetic constant SONIC standing proxy
+    arms: measured observation.state
+    hands: measured observation.state, gross corruption repaired
+
+# SONIC-native separate action fields. `action[:, 64:78]` of the corpus is *not*
+# copied: the corpus stores the left hand in the source motor order, which is not
+# the official actuated order this pack declares.
+action:
+  motion_token_field: action.motion_token
+  motion_token_dim: 64
+  left_hand_field: teleop.left_hand_joints
+  right_hand_field: teleop.right_hand_joints
+  hand_dim: 7
+  source: raw desired action, resampled to the token timestamps by name
+  # Official SONIC actuated order, thumb..index..middle, both sides.
+  hand_order:
+    left: [thumb_0_joint, thumb_1_joint, thumb_2_joint, index_0_joint, index_1_joint, middle_0_joint, middle_1_joint]
+    right: [thumb_0_joint, thumb_1_joint, thumb_2_joint, index_0_joint, index_1_joint, middle_0_joint, middle_1_joint]
+  model_key_order:
+    - motion_token
+    - left_hand_joints
+    - right_hand_joints
+  # GR00T `unitree_g1_sonic` reads 40 consecutive rows per sample at 50 Hz; an
+  # episode shorter than that can never form one window.
+  horizon: 40
+  # Cross-check of the corpus hand block, in radians. Both packs interpolate the
+  # same 30 Hz desired action onto the same 50 Hz grid, so agreement is expected
+  # to floating point; anything above this is a real ordering or grid mismatch.
+  corpus_hand_tolerance_rad: 0.001
+
+video:
+  codec: h264
+  pix_fmt: yuv420p
+  crf: 23
+  preset: veryfast
+  # Policy time t takes the newest source frame with timestamp <= t; no
+  # interpolated image is ever invented (ffmpeg `fps=50:round=down`).
+  resample: causal_last_frame_hold
+
+stats:
+  # The loader-facing statistics are produced by the official tool, later:
+  #   python /opt/src/isaac-groot/gr00t/data/stats.py \
+  #     --dataset-path <split_dir> --embodiment-tag UNITREE_G1_SONIC
+  # Both flags are required at the pinned commit (the tool's own usage line), and
+  # the tag is the enum member name: its lower-case value is rejected.
+  # This pipeline writes its own statistics under `own_file` with provenance and
+  # never writes the official files itself.
+  official_tool: /opt/src/isaac-groot/gr00t/data/stats.py
+  embodiment_tag: UNITREE_G1_SONIC
+  own_file: stats_groot_sonic.json
+  official_file: stats.json
+
+output:
+  root: /data/datasets/groot/unitree-dex3-sonic-v1
+  train_repo: train
+  val_repo: val
+
+# Canonical English instruction per collection, identical to the Psi0 pack so a
+# policy trained on either pack answers the same sentence for the same task.
+tasks:
+  G1_Dex3_BlockStacking_Dataset: "Stack the three cubic blocks on the black tape in the order red, yellow, blue."
+  G1_Dex3_CameraPackaging_Dataset: "Place the RealSense D-405 camera into the mounting case and secure the lid."
+  G1_Dex3_GraspSquare_Dataset: "Grasp the square object."
+  G1_Dex3_ObjectPlacement_Dataset: "Pick up the toothpaste and the trash bag and place them into the blue storage container."
+  G1_Dex3_PickApple_Dataset: "Put the apple into the plate."
+  G1_Dex3_PickBottle_Dataset: "Put the bottle into the plate."
+  G1_Dex3_PickCharger_Dataset: "Put the charger into the plate."
+  G1_Dex3_PickDoll_Dataset: "Put the doll into the plate."
+  G1_Dex3_PickGum_Dataset: "Put the gum into the plate."
+  G1_Dex3_PickSnack_Dataset: "Put the snack into the plate."
+  G1_Dex3_PickTissue_Dataset: "Put the tissue paper into the plate."
+  G1_Dex3_Pouring_Dataset: "Take the water bottle and pour water into the transparent glass cup."
+  G1_Dex3_ToastedBread_Dataset: "Place the bread from the serving tray into the toaster, then hand the toast to the human."
