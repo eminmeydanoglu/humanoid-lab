@@ -134,23 +134,83 @@ class ObjectSpec:
     size_m: tuple[float, float, float]
     mass_kg: float
     position_m: tuple[float, float, float]
-    diffuse_rgb: tuple[float, float, float]
+    diffuse_rgb: tuple[float, float, float] | None
+    #: ``mesh`` objects only: a USD asset whose root carries the rigid body,
+    #: collider and visual material; ``size_m`` is its axis-aligned bounding
+    #: box around a centred origin.
+    asset_reference: str | None = None
+    #: Contact and damping overrides; ``None`` keeps the shared plate-task
+    #: defaults in ``object_physics``.
+    static_friction: float | None = None
+    dynamic_friction: float | None = None
+    restitution: float | None = None
+    friction_combine_mode: str | None = None
+    angular_damping_1_s: float | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any], surface_height_m: float) -> "ObjectSpec":
         name = str(data["name"])
         shape = str(data["shape"])
-        if (name, shape) not in {("apple", "sphere"), ("gum", "cuboid")}:
-            raise ContractError("scene.object requires an apple sphere or gum cuboid")
+        if (name, shape) not in {("apple", "sphere"), ("apple", "mesh"), ("gum", "cuboid")}:
+            raise ContractError("scene.object requires an apple sphere or mesh, or a gum cuboid")
         size = _tuple(data["size_m"], 3, "object.size_m")
         position = _tuple(data["position_m"], 3, "object.position_m")
-        rgb = _tuple(data["diffuse_rgb"], 3, "object.diffuse_rgb")
+        asset_reference = data.get("asset_reference")
+        if shape == "mesh":
+            if not isinstance(asset_reference, str) or not asset_reference.startswith("/"):
+                raise ContractError("a mesh scene.object needs an absolute asset_reference")
+        elif asset_reference is not None:
+            raise ContractError("scene.object asset_reference is only valid for a mesh")
+        rgb = _tuple(data["diffuse_rgb"], 3, "object.diffuse_rgb") if data.get("diffuse_rgb") is not None else None
+        if rgb is None and shape != "mesh":
+            raise ContractError("a primitive scene.object needs diffuse_rgb")
         mass = float(data["mass_kg"])
-        if not all(value > 0 for value in size) or not all(0 <= value <= 1 for value in rgb) or not math.isfinite(mass) or mass <= 0:
+        if not all(value > 0 for value in size) or not all(0 <= value <= 1 for value in rgb or ()) or not math.isfinite(mass) or mass <= 0:
             raise ContractError("scene.object size, mass or color is invalid")
         if abs(position[2] - surface_height_m - size[2] / 2) > 1e-3:
             raise ContractError("scene.object must rest on the declared table surface")
-        return cls(name, shape, size, mass, position, rgb)
+
+        def optional_non_negative(key: str) -> float | None:
+            if data.get(key) is None:
+                return None
+            value = float(data[key])
+            if not math.isfinite(value) or value < 0.0:
+                raise ContractError(f"scene.object.{key} must be finite and non-negative")
+            return value
+
+        combine = data.get("friction_combine_mode")
+        if combine is not None and combine not in {"average", "min", "multiply", "max"}:
+            raise ContractError("scene.object.friction_combine_mode must be average, min, multiply or max")
+        return cls(name, shape, size, mass, position, rgb,
+                   asset_reference=asset_reference,
+                   static_friction=optional_non_negative("static_friction"),
+                   dynamic_friction=optional_non_negative("dynamic_friction"),
+                   restitution=optional_non_negative("restitution"),
+                   friction_combine_mode=combine,
+                   angular_damping_1_s=optional_non_negative("angular_damping_1_s"))
+
+
+@dataclass(frozen=True)
+class EnvironmentSpec:
+    """A static visual environment (floor, backdrop, lights) as one USD asset.
+
+    When declared, it replaces the grid ground's visuals (the ground collider
+    stays, invisible) and the default dome and key lights: the asset carries
+    its own lights.
+    """
+
+    asset_reference: str
+    provenance: str
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "EnvironmentSpec":
+        asset_reference = str(data["asset_reference"])
+        if not asset_reference.startswith("/"):
+            raise ContractError("scene.environment.asset_reference must be an absolute container path")
+        provenance = str(data.get("provenance", "")).strip()
+        if not provenance:
+            raise ContractError("scene.environment.provenance must state where the asset comes from")
+        return cls(asset_reference=asset_reference, provenance=provenance)
 
 
 @dataclass(frozen=True)
@@ -258,6 +318,9 @@ class TargetSpec:
     size_m: tuple[float, float, float]
     position_m: tuple[float, float, float]
     rotation_wxyz: tuple[float, float, float, float]
+    #: Plate only: a static USD mesh (visual material and collider authored in
+    #: the asset) replacing the primitive disc; ``size_m`` is its bounding box.
+    asset_reference: str | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any], surface_height_m: float) -> "TargetSpec":
@@ -282,7 +345,11 @@ class TargetSpec:
                 f"target rests at z={position[2]} but the declared table surface "
                 f"{surface_height_m} puts a {size[2]} m marker center at {expected_z}"
             )
-        return cls(kind=kind, color=color, size_m=size, position_m=position, rotation_wxyz=rotation)
+        asset_reference = data.get("asset_reference")
+        if asset_reference is not None and (kind != "plate" or not str(asset_reference).startswith("/")):
+            raise ContractError("target.asset_reference must be an absolute path and is only valid for a plate")
+        return cls(kind=kind, color=color, size_m=size, position_m=position, rotation_wxyz=rotation,
+                   asset_reference=None if asset_reference is None else str(asset_reference))
 
 
 @dataclass(frozen=True)
@@ -299,6 +366,7 @@ class SceneSpec:
     target: TargetSpec
     camera_enabled: bool
     ground_plane: bool
+    environment: EnvironmentSpec | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "SceneSpec":
@@ -323,6 +391,8 @@ class SceneSpec:
             target=target,
             camera_enabled=bool(data.get("camera_enabled", False)),
             ground_plane=bool(data.get("ground_plane", True)),
+            environment=(EnvironmentSpec.from_dict(data["environment"])
+                         if data.get("environment") is not None else None),
         )
 
 

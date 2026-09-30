@@ -72,6 +72,23 @@ def align_fixed_base_rotation(stage: Any, robot: Any, robot_path: str) -> None:
     joint.GetLocalRot0Attr().Set(Gf.Quatf(*rotation))
 
 
+def _or_default(value: float | None, default: float) -> float:
+    return default if value is None else float(value)
+
+
+def task_object_material(scene_object: Any) -> Any:
+    """Physics material of the plate-task object, profile overrides first."""
+    import isaaclab.sim as sim_utils
+
+    static = _or_default(getattr(scene_object, "static_friction", None), TASK_OBJECT_FRICTION)
+    return sim_utils.RigidBodyMaterialCfg(
+        static_friction=static,
+        dynamic_friction=_or_default(getattr(scene_object, "dynamic_friction", None), static),
+        restitution=_or_default(getattr(scene_object, "restitution", None), TASK_OBJECT_RESTITUTION),
+        friction_combine_mode=getattr(scene_object, "friction_combine_mode", None) or "max",
+        restitution_combine_mode="min")
+
+
 def cube_diffuse_rgb(cube: Any) -> tuple[float, float, float]:
     """The rendered material of one cube.
 
@@ -430,7 +447,9 @@ class SimulatorService:
             # reset or render rather than after the scene has been drawn once.
             material = flatten_tape_specular(self._sim.stage)
             print(json.dumps({"event": "isaac_g1_target_tape_material", **material}), flush=True)
-        elif self.profile.scene is not None and self.profile.scene.target.kind == "plate":
+        # An authored plate asset keeps its own glazed ceramic material.
+        elif self.profile.scene is not None and self.profile.scene.target.kind == "plate" \
+                and self.profile.scene.target.asset_reference is None:
             # The intense evaluation lights otherwise wash dark plastic into
             # pale cyan and navy into light blue in the policy camera.
             paths = ["/World/envs/env_0/TargetPlate"]
@@ -439,6 +458,25 @@ class SimulatorService:
             for path in paths:
                 material = flatten_tape_specular(self._sim.stage, path)
                 print(json.dumps({"event": "isaac_g1_plate_scene_material", "prim_path": path, **material}), flush=True)
+        scene_object = None if self.profile.scene is None else self.profile.scene.object
+        if scene_object is not None and scene_object.shape == "mesh":
+            material_path = "/World/Materials/TaskObjectPhysics"
+            material_cfg = task_object_material(scene_object)
+            material_cfg.func(material_path, material_cfg)
+            sim_utils.bind_physics_material("/World/envs/env_0/TaskObject", material_path)
+            from pxr import Usd, UsdPhysics, UsdShade
+
+            colliders = [prim for prim in Usd.PrimRange(self._sim.stage.GetPrimAtPath("/World/envs/env_0/TaskObject"))
+                         if prim.HasAPI(UsdPhysics.CollisionAPI)]
+            bound = [prim for prim in colliders
+                     if UsdShade.MaterialBindingAPI(prim).GetDirectBinding("physics").GetMaterialPath() == material_path]
+            if not colliders or len(bound) != len(colliders):
+                raise RuntimeError("the mesh task object's colliders did not take its physics material")
+            print(json.dumps({"event": "isaac_g1_task_object_physics_material", "material": material_path,
+                              "static_friction": material_cfg.static_friction,
+                              "dynamic_friction": material_cfg.dynamic_friction,
+                              "restitution": material_cfg.restitution,
+                              "friction_combine_mode": material_cfg.friction_combine_mode}), flush=True)
         # Mirror DirectRLEnv: rendering is only needed for a GUI or an RTX sensor.
         self._is_rendering = self._sim.has_gui() or self._sim.has_rtx_sensors()
         print('{"event":"isaac_g1_start","stage":"free_base"}', flush=True)
@@ -1236,15 +1274,19 @@ class SimulatorService:
         scene_object = None if scene_spec is None else scene_spec.object
         # Angular damping approximates rolling resistance absent from PhysX.
         object_rigid_props = sim_utils.RigidBodyPropertiesCfg(
-            angular_damping=TASK_OBJECT_ANGULAR_DAMPING_1_S)
-        object_material = sim_utils.RigidBodyMaterialCfg(
-            static_friction=TASK_OBJECT_FRICTION,
-            dynamic_friction=TASK_OBJECT_FRICTION,
-            restitution=TASK_OBJECT_RESTITUTION,
-            friction_combine_mode="max",
-            restitution_combine_mode="min")
+            angular_damping=_or_default(getattr(scene_object, "angular_damping_1_s", None),
+                                        TASK_OBJECT_ANGULAR_DAMPING_1_S))
+        object_material = task_object_material(scene_object)
         if scene_object is not None:
-            if scene_object.shape == "sphere":
+            if scene_object.shape == "mesh":
+                # The asset authors the rigid body, collider and visual
+                # material; the physics material is bound after spawning
+                # (UsdFileCfg has no physics_material field).
+                object_spawn = sim_utils.UsdFileCfg(usd_path=scene_object.asset_reference,
+                    rigid_props=object_rigid_props,
+                    mass_props=sim_utils.MassPropertiesCfg(mass=scene_object.mass_kg),
+                    collision_props=sim_utils.CollisionPropertiesCfg())
+            elif scene_object.shape == "sphere":
                 object_spawn = sim_utils.SphereCfg(radius=scene_object.size_m[0] / 2,
                     rigid_props=object_rigid_props,
                     mass_props=sim_utils.MassPropertiesCfg(mass=scene_object.mass_kg),
@@ -1262,21 +1304,33 @@ class SimulatorService:
                 init_state=RigidObjectCfg.InitialStateCfg(pos=scene_object.position_m),
                 spawn=object_spawn)
 
+        environment = None if scene_spec is None else scene_spec.environment
+        plate_asset = None if scene_spec is None else scene_spec.target.asset_reference
+
         @configclass
         class IsaacG1BaseSceneCfg(InteractiveSceneCfg):
             ground = (
-                AssetBaseCfg(prim_path="/World/ground", spawn=sim_utils.GroundPlaneCfg())
+                # A declared environment draws its own floor; the ground
+                # collider stays so a dropped object still lands.
+                AssetBaseCfg(prim_path="/World/ground",
+                             spawn=sim_utils.GroundPlaneCfg(visible=environment is None))
                 if scene_spec is None or scene_spec.ground_plane
                 else None
             )
-            dome_light = AssetBaseCfg(
-                prim_path="/World/DomeLight",
-                spawn=sim_utils.DomeLightCfg(intensity=1400.0, color=(0.82, 0.86, 0.92)),
-            )
-            key_light = AssetBaseCfg(
-                prim_path="/World/KeyLight",
-                spawn=sim_utils.DistantLightCfg(intensity=2800.0, color=(1.0, 0.95, 0.88)),
-            )
+            if environment is None:
+                dome_light = AssetBaseCfg(
+                    prim_path="/World/DomeLight",
+                    spawn=sim_utils.DomeLightCfg(intensity=1400.0, color=(0.82, 0.86, 0.92)),
+                )
+                key_light = AssetBaseCfg(
+                    prim_path="/World/KeyLight",
+                    spawn=sim_utils.DistantLightCfg(intensity=2800.0, color=(1.0, 0.95, 0.88)),
+                )
+            else:
+                environment_asset = AssetBaseCfg(
+                    prim_path="/World/Environment",
+                    spawn=sim_utils.UsdFileCfg(usd_path=environment.asset_reference),
+                )
             if scene_spec is not None:
                 table = AssetBaseCfg(
                     prim_path="{ENV_REGEX_NS}/Table",
@@ -1303,7 +1357,8 @@ class SimulatorService:
                     ),
                     # A flat marker with no collider: it labels the goal without
                     # perturbing the cubes or the robot that reach for it.
-                    spawn=(sim_utils.CuboidCfg(size=scene_spec.target.size_m,
+                    spawn=(sim_utils.UsdFileCfg(usd_path=plate_asset) if plate_asset is not None else
+                        sim_utils.CuboidCfg(size=scene_spec.target.size_m,
                         visual_material=sim_utils.PreviewSurfaceCfg(
                             diffuse_color=_TARGET_DIFFUSE_RGB, metallic=_TARGET_METALLIC, roughness=0.9))
                         if scene_spec.target.kind == "tape" else
@@ -2371,7 +2426,18 @@ class SimulatorService:
                                    camera.focal_length_mm, camera.horizontal_aperture_mm,
                                    camera.distortion.k1, camera.distortion.k2)
             self._distorter = Distorter(lens)
-            sensor = self._scene["head_camera"].data
+            self._distorted_frames = 0
+        self._distorted_frames += 1
+        if self._distorted_frames == 30:
+            # The sensor pose is only populated once frames flow; the world
+            # pose is what the projected backdrop in the environment asset uses.
+            lens = self._distorter.lens
+            from pxr import UsdGeom
+
+            camera = self.profile.camera
+            sensor_prim = self._sim.stage.GetPrimAtPath(
+                f"/World/envs/env_0/Robot/{camera.parent_link}/{camera.name}")
+            world = UsdGeom.Xformable(sensor_prim).ComputeLocalToWorldTransform(0)
             print(json.dumps({
                 "event": "isaac_g1_head_camera_lens",
                 "render_resolution": [lens.render_width, lens.render_height],
@@ -2379,8 +2445,8 @@ class SimulatorService:
                 "render_focal_px": lens.render_focal_px,
                 "output_focal_px": lens.output_focal_px,
                 "k1": lens.k1, "k2": lens.k2,
-                "camera_pos_w": [float(v) for v in sensor.pos_w[0].tolist()],
-                "camera_quat_w_world": [float(v) for v in sensor.quat_w_world[0].tolist()],
+                # USD camera prim (looks along -Z); position is what matters here.
+                "camera_pos_w": [float(v) for v in world.ExtractTranslation()],
             }), flush=True)
         return self._distorter(image)
 

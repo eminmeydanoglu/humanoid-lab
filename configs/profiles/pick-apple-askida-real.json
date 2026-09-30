@@ -2,6 +2,40 @@
   "schema_version": 1,
   "base_profile": "pick-apple-askida.json",
   "profile_id": "isaac-g1-29dof-dex3-flux-pickapple-real",
+  "robot": {
+    "name": "g1-29dof-dex3",
+    "body_dofs": 29,
+    "asset_kind": "usd",
+    "asset_reference": "/workspace/humanoid-lab/configs/assets/g1_29dof_with_hand_rev_1_0_appearance_real.usda",
+    "asset_provenance": "pinned SONIC gear_sonic G1 rev 1.0 Dex3 asset (sha256 a7a2bab7), materialized into the data root; same asset as the inherited plate task profile; rendered through the in-repo appearance-only overlay configs/assets/g1_29dof_with_hand_rev_1_0_appearance.usda (material inputs and dark-link bindings; no geometry, joints, masses or collisions); realistic scene variant renders through configs/assets/g1_29dof_with_hand_rev_1_0_appearance_real.usda (brighter shell, matte black Dex3; appearance only)",
+    "initial_position_m": [
+      0.08,
+      0.0,
+      0.792563
+    ],
+    "initial_rotation_wxyz": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "initial_joint_positions_rad": {
+      "left_elbow_joint": -0.3222726578,
+      "right_elbow_joint": -0.3222726578
+    },
+    "fixed_base": true,
+    "disable_gravity": true,
+    "hand": {
+      "kind": "dex3",
+      "dofs": 14,
+      "behavior": "passive",
+      "joint_name_patterns": [
+        "_hand_thumb_",
+        "_hand_middle_",
+        "_hand_index_"
+      ]
+    }
+  },
   "camera": {
     "name": "head_camera",
     "parent_link": "torso_link",
@@ -17,9 +51,9 @@
       0.41987
     ],
     "rotation_wxyz": [
-      0.9149596678,
+      0.8870108332,
       0.0,
-      0.4035452964,
+      0.4617486132,
       0.0
     ],
     "distortion": {
@@ -31,56 +65,62 @@
   "scene": {
     "camera_enabled": true,
     "ground_plane": true,
+    "environment": {
+      "asset_reference": "/data/models/realism/pickapple-v1/environment.usda",
+      "provenance": "scripts/build-realism-assets.py: floor projection-mapped from realizm/apple-unifolm/episode_000052_t2.87s.png (G1_Dex3_PickApple_Dataset cam_left_high) through this profile's head camera, table and robot inpainted; office dome + ceiling panel lights"
+    },
     "table": {
-      "asset_reference": "/data/models/unitree-sim-assets/assets/objects/PackingTable_2/PackingTable.usd",
-      "asset_provenance": "Same pinned packing table as BlockStacking; single-object plate placement approximates the Unitree demonstration table.",
+      "asset_reference": "/data/models/realism/pickapple-v1/desk.usda",
+      "asset_provenance": "scripts/build-realism-assets.py: white office desk 0.62 x 1.08 m (x 0.18-0.80, y -0.57-0.51), sized by projecting its outline through the head camera onto dataset frames",
       "position_m": [
-        0.6,
         0.0,
-        -0.1582904
+        0.0,
+        0.0
       ],
       "rotation_wxyz": [
-        0.7071067812,
+        1.0,
         0.0,
         0.0,
-        0.7071067812
+        0.0
       ],
       "surface_height_m": 0.8357609,
-      "surface_height_provenance": "Inherited from the measured BlockStacking profile; live scene probe verifies the same table asset and placement."
+      "surface_height_provenance": "Kept equal to the measured BlockStacking/PickApple worktop (see isaac-g1-sonic-blockstacking-dex3-green-third.json); the desk asset is authored with its top at this height and its origin on the floor."
     },
     "target": {
       "kind": "plate",
       "color": "pink",
       "size_m": [
-        0.18,
-        0.18,
-        0.012
+        0.19,
+        0.19,
+        0.02
       ],
       "position_m": [
-        0.47,
-        0.2,
-        0.8417609
-      ]
+        0.37,
+        -0.02,
+        0.8457609
+      ],
+      "asset_reference": "/data/models/realism/pickapple-v1/plate.usda"
     },
     "object": {
       "name": "apple",
-      "shape": "sphere",
+      "shape": "mesh",
+      "asset_reference": "/data/models/realism/pickapple-v1/apple.usda",
       "size_m": [
-        0.067,
-        0.067,
-        0.067
+        0.062,
+        0.0609,
+        0.0543
       ],
-      "mass_kg": 0.13,
+      "mass_kg": 0.09,
       "position_m": [
-        0.55,
-        -0.04,
-        0.8692609
+        0.49,
+        0.08,
+        0.8629109
       ],
-      "diffuse_rgb": [
-        0.3,
-        0.09,
-        0.048
-      ]
+      "static_friction": 0.8,
+      "dynamic_friction": 0.6,
+      "restitution": 0.1,
+      "friction_combine_mode": "average",
+      "angular_damping_1_s": 0.1
     }
   }
 }

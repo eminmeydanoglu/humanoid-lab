@@ -170,14 +170,23 @@ class IsaacG1SourceInvariantTests(unittest.TestCase):
         self.assertGreater(TASK_OBJECT_ANGULAR_DAMPING_1_S, 0.0)
         self.assertEqual(TASK_OBJECT_FRICTION, 1.0)
         self.assertEqual(TASK_OBJECT_RESTITUTION, 0.0)
-        spawn = SERVICE.read_text()
-        spawn = spawn[spawn.index("scene_object = None if scene_spec is None"):]
+        source = SERVICE.read_text()
+        spawn = source[source.index("scene_object = None if scene_spec is None"):]
         spawn = spawn[: spawn.index("@configclass")]
-        # Both shapes (apple sphere, gum cuboid) get the same contact physics.
-        self.assertEqual(spawn.count("rigid_props=object_rigid_props"), 2)
+        # Every shape (apple sphere or scanned mesh, gum cuboid) gets the same
+        # rigid-body props; the primitives take the material at spawn, the
+        # mesh has it bound after spawning (UsdFileCfg has no material field).
+        self.assertEqual(spawn.count("rigid_props=object_rigid_props"), 3)
         self.assertEqual(spawn.count("physics_material=object_material"), 2)
-        self.assertIn("angular_damping=TASK_OBJECT_ANGULAR_DAMPING_1_S", spawn)
-        self.assertIn('friction_combine_mode="max"', spawn)
+        self.assertIn("TASK_OBJECT_ANGULAR_DAMPING_1_S", spawn)
+        self.assertIn("task_object_material(scene_object)", spawn)
+        material = source[source.index("def task_object_material"):]
+        material = material[: material.index("\ndef ")]
+        # Profiles that declare nothing keep the shared defaults.
+        self.assertIn("TASK_OBJECT_FRICTION", material)
+        self.assertIn("TASK_OBJECT_RESTITUTION", material)
+        self.assertIn('or "max"', material)
+        self.assertIn('bind_physics_material("/World/envs/env_0/TaskObject"', source)
 
     def test_controller_override_can_only_disable_a_profile_controller(self) -> None:
         """Provider configuration belongs to the profile; a CLI override must
@@ -740,6 +749,98 @@ class IsaacG1BlockStackingSceneTests(unittest.TestCase):
         self.assertIn("on_shutdown=self._request_shutdown_from_service", source)
         self.assertIn("not self._pending_shutdown", source)
         self.assertIn('"shutdown_requested": self._pending_shutdown', source)
+
+
+
+
+class IsaacG1RealisticPickAppleSceneTests(unittest.TestCase):
+    REAL = ROOT / "configs/profiles/pick-apple-askida-real.json"
+    ASKIDA = ROOT / "configs/profiles/pick-apple-askida.json"
+
+    def test_realistic_variant_keeps_the_plant_and_changes_only_scene_camera_and_look(self) -> None:
+        real = RunProfile.load(self.REAL)
+        askida = RunProfile.load(self.ASKIDA)
+        self.assertEqual(real.controller, askida.controller)
+        self.assertEqual(real.physics_dt, askida.physics_dt)
+        self.assertEqual(real.robot.initial_position_m, askida.robot.initial_position_m)
+        self.assertEqual(real.robot.initial_joint_positions_rad, askida.robot.initial_joint_positions_rad)
+        self.assertEqual(real.scene.table.surface_height_m, askida.scene.table.surface_height_m)
+        self.assertEqual(real.camera.parent_link, askida.camera.parent_link)
+        self.assertEqual(real.camera.position_m, askida.camera.position_m)
+        self.assertEqual((real.camera.width, real.camera.height), (640, 480))
+        self.assertIsNotNone(real.camera.distortion)
+        self.assertEqual((real.camera.render_width, real.camera.render_height), (960, 720))
+        self.assertIsNone(askida.camera.distortion)
+        self.assertEqual(real.scene.object.shape, "mesh")
+        self.assertIsNotNone(real.scene.environment)
+        self.assertIsNotNone(real.scene.target.asset_reference)
+        self.assertIsNone(askida.scene.environment)
+        self.assertTrue(real.robot.asset_reference.endswith("_appearance_real.usda"))
+        self.assertTrue((ROOT / "configs/assets/g1_29dof_with_hand_rev_1_0_appearance_real.usda").exists())
+
+    def test_the_realistic_apple_is_not_the_rolling_sphere(self) -> None:
+        apple = RunProfile.load(self.REAL).scene.object
+        self.assertLess(apple.angular_damping_1_s, TASK_OBJECT_ANGULAR_DAMPING_1_S)
+        self.assertLess(apple.dynamic_friction, apple.static_friction)
+        self.assertEqual(apple.friction_combine_mode, "average")
+
+    def _variant(self, mutate) -> Path:
+        data = json.loads(self.REAL.read_text())
+        mutate(data)
+        handle = tempfile.NamedTemporaryFile("w", suffix=".json", dir=self.REAL.parent, delete=False)
+        self.addCleanup(Path(handle.name).unlink)
+        json.dump(data, handle)
+        handle.close()
+        return Path(handle.name)
+
+    def test_mesh_objects_and_distortion_are_validated(self) -> None:
+        def no_asset(data):
+            del data["scene"]["object"]["asset_reference"]
+
+        def asset_on_sphere(data):
+            data["scene"]["object"]["shape"] = "sphere"
+            data["scene"]["object"]["diffuse_rgb"] = [0.3, 0.1, 0.05]
+
+        def bad_combine(data):
+            data["scene"]["object"]["friction_combine_mode"] = "loudest"
+
+        def pincushion(data):
+            data["camera"]["distortion"]["k1"] = -0.1
+
+        def unprovenanced_environment(data):
+            data["scene"]["environment"]["provenance"] = " "
+
+        for mutate in (no_asset, asset_on_sphere, bad_combine, pincushion, unprovenanced_environment):
+            with self.subTest(mutate.__name__), self.assertRaises(ContractError):
+                RunProfile.load(self._variant(mutate))
+
+
+class LensModelTests(unittest.TestCase):
+    def test_corners_map_to_corners_and_centre_is_magnified(self) -> None:
+        from humanoid_lab.simulators.isaac.lens import LensModel
+
+        lens = LensModel.build(640, 480, 960, 720, 8.79, 20.955, 0.15, 0.0)
+        map_x, map_y = lens.maps()
+        self.assertAlmostEqual(float(map_x[0, 0]), 0.0, delta=1.0)
+        self.assertAlmostEqual(float(map_y[-1, -1]), 719.0, delta=1.0)
+        # Barrel: the output focal is above the rendered focal scaled to the output size.
+        self.assertGreater(lens.output_focal_px, lens.render_focal_px * 640 / 960)
+        u, v = lens.project(0.0, 0.0)
+        self.assertAlmostEqual(u, 320.0)
+        self.assertAlmostEqual(v, 240.0)
+
+    def test_numpy_fallback_matches_opencv_semantics(self) -> None:
+        import numpy as np
+
+        from humanoid_lab.simulators.isaac.lens import Distorter, LensModel
+
+        lens = LensModel.build(64, 48, 96, 72, 8.79, 20.955, 0.15, 0.0)
+        distorter = Distorter(lens)
+        distorter._cv2 = None
+        image = np.full((72, 96, 3), 200, np.uint8)
+        out = distorter(image)
+        self.assertEqual(out.shape, (48, 64, 3))
+        self.assertTrue(np.all(out == 200))
 
 
 if __name__ == "__main__":

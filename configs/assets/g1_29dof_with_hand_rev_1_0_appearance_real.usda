@@ -1,0 +1,66 @@
+#usda 1.0
+(
+    defaultPrim = "g1_29dof_with_hand_rev_1_0"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+# Appearance-only variant of g1_29dof_with_hand_rev_1_0_appearance.usda for the
+# realistic PickApple scene (configs/profiles/pick-apple-askida-real.json).
+#
+# In the Unitree G1_Dex3_PickApple_Dataset head-camera frames the arm shells
+# read as bright pearl-silver and the Dex3 hands as matte black. The base
+# overlay's values (0.55 albedo at metallic 0.85 for the shell, 0.07 at
+# metallic 0.3 for the dark parts) mirror the office lights and render both as
+# mid grey, so this layer lightens the shell and takes the metal lobe off the
+# dark polymer. The chest top (logo_link), dark in the source asset, is light
+# grey on the dataset robot and is rebound to the shell material. The head's
+# lower visor sits inside the widened head-camera view of this scene but is
+# never seen by the dataset's head camera, so its visual mesh is hidden (its
+# collider is untouched). Nothing but material inputs, that one binding and
+# that one visibility is authored.
+over "g1_29dof_with_hand_rev_1_0" (
+    prepend references = @./g1_29dof_with_hand_rev_1_0_appearance.usda@
+)
+{
+    over "Looks"
+    {
+        over "material_DefaultMaterial"
+        {
+            over "Shader"
+            {
+                color3f inputs:diffuse_color_constant = (0.6, 0.6, 0.61)
+                float inputs:metallic_constant = 0.5
+                float inputs:reflection_roughness_constant = 0.3
+            }
+        }
+
+        over "material_DefaultMaterial_1"
+        {
+            over "Shader"
+            {
+                color3f inputs:diffuse_color_constant = (0.025, 0.025, 0.027)
+                float inputs:metallic_constant = 0.0
+                float inputs:reflection_roughness_constant = 0.6
+            }
+        }
+    }
+
+    over "logo_link"
+    {
+        over "visuals" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            rel material:binding = </g1_29dof_with_hand_rev_1_0/Looks/material_DefaultMaterial>
+        }
+    }
+
+    over "head_link"
+    {
+        over "visuals"
+        {
+            token visibility = "invisible"
+        }
+    }
+}

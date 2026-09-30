@@ -78,7 +78,7 @@ async function loadCatalog(selected) {
 }
 async function refreshHistory() {
   try {
-    const runs = await api('/api/runs');
+    const runs = (await api('/api/runs')).filter(run => (run.task_mode || 'vae_roundtrip') === 'vae_roundtrip');
     $('history').replaceChildren();
     if (!runs.length) { $('history').textContent = 'Henüz bir koşu yok.'; return; }
     runs.forEach(run => {
