@@ -43,6 +43,8 @@ services:
     volumes:
       - ${HUMANOID_SOURCE_ROOT:?set HUMANOID_SOURCE_ROOT in .env}:/workspace/humanoid-lab
       - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/datasets:/data/datasets
+      # GRAIL lives outside the data root; the in-container path stays the same.
+      - ${HUMANOID_GRAIL_ROOT:-${HUMANOID_DATA_ROOT}/datasets/grail}:/data/datasets/grail
       - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/checkpoints:/data/checkpoints
       - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/models:/data/models
       - ${HUMANOID_DATA_ROOT:?set HUMANOID_DATA_ROOT in .env}/hf-cache:/cache/huggingface

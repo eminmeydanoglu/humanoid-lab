@@ -182,13 +182,14 @@ Unit tests: `PYTHONPATH=src python3 -m unittest tests.simulator.test_grail_repla
 
 Every GRAIL source trajectory gets exactly one English instruction, derived from its file stem
 (`<task_family>__<object_asset_id>__<motion_variant>`, e.g. `pickup_table__apple_17__003`). The
-stems under `data/datasets/grail/data/pickup_table/robot/` are the only source of truth; nothing
+stems under `$HUMANOID_GRAIL_ROOT/data/pickup_table/robot/` (`/data/datasets/grail/...` in the
+container) are the only source of truth; nothing
 in the GRAIL release is read or modified.
 
 ```bash
 python3 scripts/generate-grail-prompt-manifest.py \
   --output data/outputs/grail/pickup_table_prompt_manifest.jsonl
-# --robot-dir defaults to data/datasets/grail/data/pickup_table/robot
+# --robot-dir defaults to $HUMANOID_GRAIL_ROOT/data/pickup_table/robot
 ```
 
 The manifest is JSONL, sorted by `source_motion_id`, and each row carries `schema_version`,

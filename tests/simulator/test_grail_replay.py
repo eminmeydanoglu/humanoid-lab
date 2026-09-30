@@ -11,6 +11,7 @@ the container:
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -44,7 +45,8 @@ try:  # The dataset checks need the GRAIL conversion dependencies.
 except ImportError:  # pragma: no cover - host interpreters without numpy
     HAVE_DEPS = False
 
-DATA_ROOT = ROOT / "data/datasets/grail/data/pickup_table"
+GRAIL_ROOT = Path(os.environ.get("HUMANOID_GRAIL_ROOT", ROOT / "data/datasets/grail"))
+DATA_ROOT = GRAIL_ROOT / "data/pickup_table"
 APPLE_KEY = "pickup_table__apple_0__000"
 # MuJoCo -> IsaacLab body order that prepare_vis_shard applies, written out here
 # so the test does not mirror the implementation.

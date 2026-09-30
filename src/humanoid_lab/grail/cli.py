@@ -26,9 +26,8 @@ from humanoid_lab.grail.prompts import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_ROBOT_DIR = (
-    REPO_ROOT / "data" / "datasets" / "grail" / "data" / "pickup_table" / "robot"
-)
+GRAIL_ROOT = Path(os.environ.get("HUMANOID_GRAIL_ROOT", REPO_ROOT / "data" / "datasets" / "grail"))
+DEFAULT_ROBOT_DIR = GRAIL_ROOT / "data" / "pickup_table" / "robot"
 
 
 def read_robot_stems(robot_dir: Path) -> list[str]:
