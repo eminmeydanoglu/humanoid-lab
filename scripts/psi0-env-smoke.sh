@@ -10,6 +10,7 @@ readonly PYTHON_BIN="${PSI0_PYTHON:-/opt/venvs/psi0/bin/python}"
 readonly PSI_HOME_DIR="${PSI_HOME:-/hfm}"
 readonly CKPT_DIR="${PSI0_CKPT_DIR:-$PSI_HOME_DIR/cache/checkpoints/psi0/postpre.sonic1.0.unifolm.2609092156.40k}"
 readonly DREAM_DIR="${PSI0_DREAM_DIR:-$PSI_HOME_DIR/cache/checkpoints/psi0/sonic-checkpoints/multi-task.psi-dream.2609092156}"
+readonly V1_1_DIR="${PSI0_V1_1_DIR:-$PSI_HOME_DIR/cache/checkpoints/psi0/postpre.sonic1.1.unifolm.2609181726.40k}"
 readonly LOG_DIR="${PSI0_SMOKE_LOG_DIR:-/outputs/psi0-env-smoke}"
 readonly CONFIG_MODULE="${PSI0_CONFIG_MODULE:-finetune_real_psi0_config}"
 
@@ -96,11 +97,12 @@ EOF
 }
 
 check_checkpoint() {
+  local root="${1:-$CKPT_DIR}"
   local f
   for f in config.json model.safetensors action_header.safetensors; do
-    require_file "$CKPT_DIR/$f" "warm-start checkpoint file"
+    require_file "$root/$f" "warm-start checkpoint file"
   done
-  "$PYTHON_BIN" - "$CKPT_DIR" "${PSI0_SKIP_HASHES:-0}" <<'PY'
+  "$PYTHON_BIN" - "$root" "${PSI0_SKIP_HASHES:-0}" <<'PY'
 import hashlib
 import json
 import os
@@ -135,7 +137,7 @@ else:
         assert digest.hexdigest() == entry["sha256"], f"sha256 mismatch: {entry['path']}"
     print(f"[ok] hashes   {len(entries)} files match MODEL_PROVENANCE.json")
 PY
-  echo "[ok] ckpt     $CKPT_DIR"
+  echo "[ok] ckpt     $root"
 }
 
 # The released multi-task checkpoint the unified evaluation UI can serve as its
@@ -181,5 +183,10 @@ check_interpreter
 check_stack
 check_config_cli
 check_checkpoint
+if [[ -d "$V1_1_DIR" ]]; then
+  check_checkpoint "$V1_1_DIR"
+else
+  echo "[--] sonic1.1 not downloaded (./dev.sh fetch-psi0-ckpt psi0_sonic1_1_warmstart)"
+fi
 check_dream_checkpoint
 echo "PASS: psi0 environment and released checkpoints are usable"

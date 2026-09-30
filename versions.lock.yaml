@@ -66,6 +66,15 @@ repositories:
     # `git submodule update --init third_party/Psi0`.
     url: https://github.com/physical-superintelligence-lab/Psi0.git
     commit: 4f3720d45e102b36d7c3e9465ab8062274170518
+    # Upstream main is one commit ahead (2830f9367 "release sonic 1.1
+    # checkpoint") but that commit adds a commented-out Hugging Face token in
+    # src/psi/utils/utils.py. Materializing it would replicate an
+    # apparently-live credential into every checkout, and `git submodule
+    # update` would restore it after any local edit. The 1.1 checkpoint loads
+    # on this pin (config.json is byte-identical to 1.0 and the one extra
+    # action-header tensor is dropped by the strict=False header load), so only
+    # the new upstream training scripts are deferred. Bump only once upstream
+    # removes the token.
     placement: third_party/Psi0
     submodules: []           # third_party/{SIMPLE,GR00T-WholeBodyControl} are SSH-only and unused by the psi0 fine-tuning path
   isaac_groot:
@@ -170,6 +179,17 @@ models:
     gated: false
     # Data-root relative. PSI_HOME (/hfm) reaches the same tree through the
     # /hfm/cache/checkpoints symlink described in the Dockerfile.
+    local_dir: checkpoints
+    required_files: [config.json, model.safetensors, action_header.safetensors]
+  psi0_sonic1_1_warmstart:
+    # Released Psi-0 SONIC-v1.1 post-train (VLM + action header), the successor
+    # of psi0_sonic_warmstart. Same PSI_HOME convention and per-file provenance
+    # as its v1.0 sibling; the pinned Psi0 code loads it unchanged (see the
+    # repositories.psi0 note below).
+    repo: USC-PSI-Lab/psi-model
+    revision: cb1480f50d9764ab2f6261bc2e651a67ad54da17
+    variant: psi0/postpre.sonic1.1.unifolm.2609181726.40k
+    gated: false
     local_dir: checkpoints
     required_files: [config.json, model.safetensors, action_header.safetensors]
   psi0_sonic_dream:

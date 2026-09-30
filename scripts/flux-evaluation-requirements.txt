@@ -1,0 +1,6 @@
+# Install into the existing pinned FLUX model environment.
+fastapi==0.115.12
+uvicorn==0.34.2
+python-multipart==0.0.20
+pydantic==2.13.5
+starlette==0.46.2

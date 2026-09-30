@@ -13,6 +13,7 @@ Checks (``--check``, repeatable):
   contract   the pack's meta/stats satisfy the loader contract (plan §7/§9)   Kapı 2
   config     the resolved argv matches the contract and the frozen-VLM plan   Kapı 2-4
   ckpt       the warm-start header matches this action/state contract         Kapı 3
+  hand-order the pack's declared hand order matches --right-hand-map          Kapı 2
   transform  the real repack+field transforms on a synthetic frame            Kapı 2
   model      VLM frozen, action expert trainable, optimizer set               Kapı 4
   forward    one real no_grad BF16 forward on a real batch (loss, VRAM)       Kapı 3
@@ -20,9 +21,13 @@ Checks (``--check``, repeatable):
 
 ``contract``/``config``/``ckpt``/``transform`` need no dataset: with the pack
 absent, ``transform`` synthesises a stats file at the configured widths so the
-padding/validity logic is still exercised.  ``loader`` needs the pack and is the
-check that must pass before any forward pass is attempted; ``forward`` needs the
-pack, the warm-start checkpoint and a GPU, and builds no optimizer.
+padding/validity logic is still exercised.  ``hand-order`` reads the pack's
+``meta/info.json`` names; it is the check that refuses to train the v1.1 init on
+a pack whose right hand is in a different joint order (the default
+``--right-hand-map=none`` keeps the historical v1.0 argv untouched).  ``loader``
+needs the pack and is the check that must pass before any forward pass is
+attempted; ``forward`` needs the pack, the warm-start checkpoint and a GPU, and
+builds no optimizer.
 """
 
 from __future__ import annotations
@@ -39,7 +44,7 @@ from typing import Any, Callable, Sequence
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from humanoid_lab.datasets.psi0 import contract  # noqa: E402
+from humanoid_lab.datasets.psi0 import contract, hand_order  # noqa: E402
 
 
 class CheckError(RuntimeError):
@@ -55,6 +60,13 @@ class Context:
     stats_path: Path
     mask_key: str
     instruction_key: str
+    #: Right-hand mapping mode the run was launched with; ``none`` is the
+    #: historical v1.0 behaviour and keeps every existing check unchanged.
+    right_hand_map: str = hand_order.MAP_NONE
+    #: When the wrapper pins the pack directory name (needed once the upcoming
+    #: pack gets a versioned root), that exact name replaces the strict default
+    #: set.  ``None`` keeps the v1.0 behaviour.
+    dataset_dir_name: str | None = None
 
     def flag(self, name: str) -> str | None:
         """Value of ``--name=value`` in the resolved argv, or None."""
@@ -143,6 +155,64 @@ def check_contract(ctx: Context) -> list[str]:
     ]
 
 
+# --------------------------------------------------------------------------- Kapı 2
+def check_hand_order(ctx: Context) -> list[str]:
+    """Reconcile the pack's declared right-hand order with the mapping in the argv.
+
+    The v1.1 init was post-trained with the right hand mirroring the left
+    (thumb, middle, index); the Unitree hardware order is (thumb, index,
+    middle).  The pack must declare its names; ``--right-hand-map`` must state
+    explicitly whether the run keeps the pack's order (``none``) or permutes it
+    to the init order (``hardware2checkpoint``).  A hardware-order pack with
+    ``none`` fails here instead of training two swapped channels silently, and
+    a checkpoint-order pack with ``hardware2checkpoint`` fails instead of
+    double-swapping.  The resolved repack/statistics keys are then checked
+    against the mapping so the argv and the data cannot drift apart.
+    """
+    if not ctx.dataset_root.is_dir():
+        raise CheckError(
+            f"the pack does not exist yet: {ctx.dataset_root}\n"
+            "       the right-hand order cannot be read before the dataset owner produces it"
+        )
+    readings: dict[str, hand_order.SplitHandOrder] = {}
+    for split in (contract.TRAIN_REPO_ID, contract.VAL_REPO_ID):
+        try:
+            readings[split] = hand_order.read_split_hand_order(ctx.dataset_root / split)
+        except hand_order.HandOrderError as error:
+            raise CheckError(str(error)) from error
+    orders = {(reading.state, reading.action) for reading in readings.values()}
+    if len(orders) != 1:
+        detail = ", ".join(f"{split}=({reading.state}, {reading.action})" for split, reading in readings.items())
+        raise CheckError(f"train and val declare different right-hand orders: {detail}")
+    state_order, action_order = orders.pop()
+    try:
+        mapping = hand_order.plan_mapping(state_order, action_order, ctx.right_hand_map)
+    except hand_order.HandOrderError as error:
+        raise CheckError(str(error)) from error
+
+    expected_action = hand_order.action_keys(mapping)
+    expected_state = hand_order.state_keys(mapping)
+    repack, field = ctx.cfg.data.transform.repack, ctx.cfg.data.transform.field
+    for label, got, want in (
+        ("repack.action_keys", list(repack.action_keys), expected_action),
+        ("field.stat_action_keys", list(field.stat_action_keys), expected_action),
+        ("repack.state_keys", list(repack.state_keys), expected_state),
+        ("field.stat_state_keys", list(field.stat_state_keys), expected_state),
+    ):
+        if got != want:
+            raise CheckError(
+                f"{label} resolves to {got} but the pack's declared right-hand order "
+                f"needs {want} with RIGHT_HAND_MAP={ctx.right_hand_map}; the wrapper is the "
+                "single place these flags are written"
+            )
+    return [
+        f"train/val right hand: {state_order} (state and action agree)",
+        f"mapping = {mapping} (RIGHT_HAND_MAP={ctx.right_hand_map}); repack and statistics keys match",
+        "checkpoint right hand: " + ", ".join(hand_order.CHECKPOINT_RIGHT_HAND_ORDER)
+        + " (v1.1 init mirrors the left hand)",
+    ]
+
+
 # --------------------------------------------------------------------------- Kapı 2-4
 def check_config(ctx: Context) -> list[str]:
     cfg, repack, field, model = ctx.cfg, ctx.cfg.data.transform.repack, ctx.cfg.data.transform.field, ctx.cfg.model
@@ -183,8 +253,8 @@ def check_config(ctx: Context) -> list[str]:
     expect("repack.action_chunk_size", repack.action_chunk_size, contract.ACTION_CHUNK)
 
     expect("repack.image_keys", list(repack.image_keys), [contract.IMAGE_KEY])
-    expect("repack.state_keys", list(repack.state_keys), [contract.STATE_KEY])
-    expect("repack.action_keys", list(repack.action_keys), [contract.BODY_TOKEN_KEY, contract.HAND_KEY])
+    expect("repack.state_keys", list(repack.state_keys), hand_order.state_keys(ctx.right_hand_map))
+    expect("repack.action_keys", list(repack.action_keys), hand_order.action_keys(ctx.right_hand_map))
     if ctx.mask_key not in (contract.MASK_KEY, *contract.MASK_KEY_ALIASES):
         raise CheckError(
             f"action mask key {ctx.mask_key!r} is not one of "
@@ -196,18 +266,18 @@ def check_config(ctx: Context) -> list[str]:
             f"{(contract.INSTRUCTION_KEY, *contract.INSTRUCTION_KEY_ALIASES)}"
         )
     notes.append(f"action mask key = {ctx.mask_key}, instruction key = {ctx.instruction_key}")
-    expect("field.stat_action_keys", list(field.stat_action_keys), [contract.BODY_TOKEN_KEY, contract.HAND_KEY])
-    expect("field.stat_state_keys", list(field.stat_state_keys), [contract.STATE_KEY])
+    expect("field.stat_action_keys", list(field.stat_action_keys), hand_order.action_keys(ctx.right_hand_map))
+    expect("field.stat_state_keys", list(field.stat_state_keys), hand_order.state_keys(ctx.right_hand_map))
     expect("field.normalize_state", field.normalize_state, True)
     expect("field.action_norm_type", field.action_norm_type, "bounds")
 
-    if not ctx.dataset_root.is_absolute() or ctx.dataset_root.name not in (
-        contract.DATASET_DIR,
-        *contract.DATASET_DIR_ALIASES,
-    ):
+    allowed_roots = (contract.DATASET_DIR, *contract.DATASET_DIR_ALIASES)
+    if ctx.dataset_dir_name is not None:
+        allowed_roots = (ctx.dataset_dir_name,)
+        notes.append(f"pack directory name pinned by the wrapper: {ctx.dataset_dir_name}")
+    if not ctx.dataset_root.is_absolute() or ctx.dataset_root.name not in allowed_roots:
         raise CheckError(
-            f"data.root_dir {ctx.dataset_root} must be an absolute .../{contract.DATASET_DIR} "
-            f"or .../{contract.GATE_DATASET_DIR}"
+            f"data.root_dir {ctx.dataset_root} must be an absolute .../{' or .../'.join(allowed_roots)}"
         )
     notes.append(f"data.root_dir = {ctx.dataset_root}")
     expect("data.train_repo_ids", list(ctx.cfg.data.train_repo_ids), [contract.TRAIN_REPO_ID])
@@ -293,16 +363,24 @@ def _synthetic_stats(path: Path) -> None:
     path.write_text(json.dumps(stats), encoding="utf-8")
 
 
-def _synthetic_frame(ctx: Context) -> tuple[dict[str, Any], dict[str, Any]]:
-    """One raw frame shaped like a LeRobot item, plus the expected repacked blocks."""
+def _synthetic_frame(ctx: Context, *, jitter: int = 0) -> tuple[dict[str, Any], dict[str, Any]]:
+    """One raw frame shaped like a LeRobot item, plus the expected repacked blocks.
+
+    ``jitter`` must be the configured ``state_temporal_jitter``: when it is
+    positive the dataset hands the transform a ``(1 + 2*jitter)``-frame state
+    window and the transform selects one row from it, so the synthetic frame
+    repeats its state row over the whole window (every row identical, which
+    makes the random offset a no-op).
+    """
     import numpy as np
     import torch
 
     chunk, token_dim, hand_dim = contract.ACTION_CHUNK, contract.BODY_TOKEN_DIM, contract.HAND_DIM
     rng = np.random.default_rng(20260917)
+    state_row = rng.normal(size=(1, contract.STATE_DIM)).astype(np.float32)
     frame = {
         contract.IMAGE_KEY: torch.zeros(3, 240, 320, dtype=torch.uint8),
-        contract.STATE_KEY: rng.normal(size=(1, contract.STATE_DIM)).astype(np.float32),
+        contract.STATE_KEY: np.repeat(state_row, 1 + 2 * jitter, axis=0) if jitter > 0 else state_row,
         contract.BODY_TOKEN_KEY: rng.normal(size=(chunk, token_dim)).astype(np.float32),
         contract.HAND_KEY: rng.normal(size=(chunk, hand_dim)).astype(np.float32),
         ctx.instruction_key: "pick the doll up",
@@ -315,7 +393,7 @@ def _synthetic_frame(ctx: Context) -> tuple[dict[str, Any], dict[str, Any]]:
     expected = {
         "token": frame[contract.BODY_TOKEN_KEY].copy(),
         "hand": frame[contract.HAND_KEY].copy(),
-        "state": frame[contract.STATE_KEY].copy(),
+        "state": state_row.copy(),
         "mask": mask.copy(),
     }
     return frame, expected
@@ -336,7 +414,12 @@ def check_transform(ctx: Context) -> list[str]:
         field.stat_path = str(stats_path)
         field.populate_stats(json.loads(stats_path.read_text(encoding="utf-8")))
 
-        frame, expected = _synthetic_frame(ctx)
+        frame, expected = _synthetic_frame(ctx, jitter=int(repack.state_temporal_jitter))
+        # The synthetic frame is written in the pack's declared order (the
+        # hardware order of the frozen Unitree data); the expected repacked
+        # blocks follow the run's right-hand mapping.
+        expected["hand"] = hand_order.apply_hand14(expected["hand"], ctx.right_hand_map)
+        expected["state"] = hand_order.apply_state43(expected["state"], ctx.right_hand_map)
         repacked = repack(dict(frame))
         states = np.asarray(repacked["states"])
         actions = np.asarray(repacked["actions"])
@@ -437,16 +520,22 @@ def check_model(ctx: Context) -> list[str]:
 
 # --------------------------------------------------------------------------- Kapı 3
 def _select_available_attention_backend() -> None:
-    """Install the shared fallback; see ``humanoid_lab.psi0_compat``.
+    """Install the shared fallbacks; see ``humanoid_lab.psi0_compat``.
 
     Psi0's trainer hardcodes ``flash_attention_2`` and raises before the
     checkpoint loads, while its own model loader already picks ``sdpa`` when
-    flash-attn is absent.  The real training launch installs the same patch
-    through ``scripts/psi0_shim``; this call covers a standalone verifier run.
+    flash-attn is absent.  The real training launch installs the same patches
+    through ``scripts/psi0_shim``; this call covers a standalone verifier run,
+    and the sliced state-key delta fallback is what lets a mapped
+    ``observation.state[...]`` key open the real LeRobot dataset at all.
     """
-    from humanoid_lab.psi0_compat import install_sdpa_fallback
+    from humanoid_lab.psi0_compat import (
+        install_sdpa_fallback,
+        install_sliced_state_delta_fallback,
+    )
 
     install_sdpa_fallback()
+    install_sliced_state_delta_fallback()
 
 
 def check_forward(ctx: Context) -> list[str]:
@@ -631,8 +720,9 @@ def check_loader(ctx: Context) -> list[str]:
                 anchors_valid += int(bool(np.asarray(anchor).reshape(-1)[0]))
 
             raw_actions = np.asarray(item["raw_actions"])
+            expected_hand = hand_order.apply_hand14(np.asarray(raw[contract.HAND_KEY]), ctx.right_hand_map)
             expected = np.concatenate(
-                [np.asarray(raw[contract.BODY_TOKEN_KEY]), np.asarray(raw[contract.HAND_KEY])], axis=-1
+                [np.asarray(raw[contract.BODY_TOKEN_KEY]), expected_hand], axis=-1
             )
             if not np.allclose(raw_actions[:, : contract.ACTION_DIM], expected):
                 raise CheckError(f"[{split}#{position}] raw_actions do not match the pack's token+hand fields")
@@ -656,6 +746,7 @@ CHECKS: dict[str, Callable[[Context], list[str]]] = {
     "contract": check_contract,
     "config": check_config,
     "ckpt": check_ckpt,
+    "hand-order": check_hand_order,
     "transform": check_transform,
     "model": check_model,
     "forward": check_forward,
@@ -667,6 +758,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--args-file", required=True, type=Path, help="Psi0 argv written by the wrapper")
     parser.add_argument("--check", nargs="+", choices=sorted(CHECKS), default=["contract", "ckpt", "config"])
+    parser.add_argument(
+        "--right-hand-map",
+        choices=hand_order.MAP_MODES,
+        default=hand_order.MAP_NONE,
+        help="none keeps the resolved argv as-is (v1.0 behaviour); hardware2checkpoint expects "
+        "the mapped repack/statistics keys and the pack's declared hardware order",
+    )
+    parser.add_argument(
+        "--dataset-dir-name",
+        default=None,
+        help="pin data.root_dir's directory name (the v1.1 wrapper passes its DATASET_ROOT "
+        "basename so a versioned future pack root stays reproducible); omitted keeps the "
+        "strict .../psi0-unitree-dex3-sonic-v1 check",
+    )
     options = parser.parse_args(argv)
 
     try:
@@ -675,6 +780,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except CheckError as error:
         print(f"FAIL: {error}", file=sys.stderr)
         return 2
+    ctx.right_hand_map = options.right_hand_map
+    ctx.dataset_dir_name = options.dataset_dir_name
 
     print(f"resolved argv: {tokens[0]} ({len(tokens) - 1} flags)")
     # Any check that builds the model needs the shared fallback; applying it once

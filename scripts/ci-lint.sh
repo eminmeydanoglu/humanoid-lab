@@ -36,8 +36,10 @@ python3 -m py_compile scripts/render-lock-env.py scripts/doctor-report.py \
   scripts/psi0-token-match.py scripts/blockstacking-rollout.py \
   scripts/analyze-blockstacking-rollout.py \
   src/humanoid_lab/psi0_bridge/*.py \
-  src/humanoid_lab/datasets/psi0/contract.py src/humanoid_lab/datasets/psi0/__init__.py \
+  src/humanoid_lab/datasets/psi0/contract.py src/humanoid_lab/datasets/psi0/hand_order.py \
+  src/humanoid_lab/datasets/psi0/__init__.py \
   tests/test_psi0_training_contract.py tests/test_psi0_loader_fixture.py \
+  tests/test_psi0_hand_order.py \
   tests/test_psi0_bridge_actions.py tests/test_psi0_bridge_camera.py \
   tests/test_psi0_bridge_wire.py tests/test_psi0_isaac_eval_launcher.py \
   tests/test_psi0_bridge_telemetry.py tests/test_blockstacking_analysis.py \

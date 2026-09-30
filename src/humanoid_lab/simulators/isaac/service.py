@@ -285,6 +285,7 @@ class SimulatorService:
         self._pending_shutdown = False
         self._reset_source: str | None = None
         self._head_camera: HeadCameraEndpoint | None = None
+        self._distorter: Any = None
         self._reset_control: ResetControlEndpoint | None = None
         self._camera_service_final: dict[str, Any] | None = None
         self._palm_body_ids: dict[str, int] = {}
@@ -1320,8 +1321,8 @@ class SimulatorService:
             head_camera = CameraCfg(
                 prim_path=camera_path,
                 update_period=self.profile.camera_update_period,
-                width=camera.width,
-                height=camera.height,
+                width=camera.render_width,
+                height=camera.render_height,
                 data_types=["rgb"],
                 spawn=sim_utils.PinholeCameraCfg(
                     focal_length=camera.focal_length_mm,
@@ -2353,9 +2354,35 @@ class SimulatorService:
                 image = image[0]
             if image.ndim != 3 or image.shape[-1] not in (3, 4):
                 return None
-            return np.ascontiguousarray(image[..., :3].astype(np.uint8, copy=False))
+            image = np.ascontiguousarray(image[..., :3].astype(np.uint8, copy=False))
+            if self.profile.camera.distortion is not None:
+                image = self._distort(image)
+            return image
         except (TypeError, ValueError):
             return None
+
+    def _distort(self, image: Any) -> Any:
+        """Resample the wide pinhole render into the declared barrel-distorted frame."""
+        if self._distorter is None:
+            from .lens import Distorter, LensModel
+
+            camera = self.profile.camera
+            lens = LensModel.build(camera.width, camera.height, camera.render_width, camera.render_height,
+                                   camera.focal_length_mm, camera.horizontal_aperture_mm,
+                                   camera.distortion.k1, camera.distortion.k2)
+            self._distorter = Distorter(lens)
+            sensor = self._scene["head_camera"].data
+            print(json.dumps({
+                "event": "isaac_g1_head_camera_lens",
+                "render_resolution": [lens.render_width, lens.render_height],
+                "output_resolution": [lens.width, lens.height],
+                "render_focal_px": lens.render_focal_px,
+                "output_focal_px": lens.output_focal_px,
+                "k1": lens.k1, "k2": lens.k2,
+                "camera_pos_w": [float(v) for v in sensor.pos_w[0].tolist()],
+                "camera_quat_w_world": [float(v) for v in sensor.quat_w_world[0].tolist()],
+            }), flush=True)
+        return self._distorter(image)
 
     def _consume_head_camera_frame(self) -> None:
         """Read a frame only when the explicit acceptance test needs evidence."""

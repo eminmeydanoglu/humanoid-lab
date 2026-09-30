@@ -45,6 +45,33 @@ def _tuple(values: Sequence[Any], length: int, name: str) -> tuple[float, ...]:
 
 
 @dataclass(frozen=True)
+class CameraDistortionSpec:
+    """Radial barrel distortion applied to the rendered pinhole frame.
+
+    The pinhole is rendered at ``render_scale`` times the output resolution
+    and resampled to the output resolution with ``r_u = r_d (1 + k1 r_d^2 +
+    k2 r_d^4)``.  The output focal length is fitted so that the output corners
+    land exactly on the rendered corners: the pinhole's diagonal field of view
+    is kept and the frame has no empty border.
+    """
+
+    k1: float
+    k2: float
+    render_scale: float
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "CameraDistortionSpec":
+        k1 = float(data["k1"])
+        k2 = float(data.get("k2", 0.0))
+        render_scale = float(data.get("render_scale", 1.0))
+        if not all(math.isfinite(value) for value in (k1, k2)) or k1 < 0.0 or k2 < 0.0:
+            raise ContractError("camera.distortion k1/k2 must be finite and non-negative (barrel)")
+        if not math.isfinite(render_scale) or not 1.0 <= render_scale <= 4.0:
+            raise ContractError("camera.distortion.render_scale must be in [1, 4]")
+        return cls(k1=k1, k2=k2, render_scale=render_scale)
+
+
+@dataclass(frozen=True)
 class CameraSpec:
     name: str
     parent_link: str
@@ -54,6 +81,17 @@ class CameraSpec:
     horizontal_aperture_mm: float
     position_m: tuple[float, float, float]
     rotation_wxyz: tuple[float, float, float, float]
+    distortion: CameraDistortionSpec | None = None
+
+    @property
+    def render_width(self) -> int:
+        scale = self.distortion.render_scale if self.distortion else 1.0
+        return int(round(self.width * scale))
+
+    @property
+    def render_height(self) -> int:
+        scale = self.distortion.render_scale if self.distortion else 1.0
+        return int(round(self.height * scale))
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "CameraSpec":
@@ -75,6 +113,10 @@ class CameraSpec:
             horizontal_aperture_mm=float(data["horizontal_aperture_mm"]),
             position_m=_tuple(data["position_m"], 3, "camera position_m"),
             rotation_wxyz=rotation,
+            distortion=(
+                CameraDistortionSpec.from_dict(data["distortion"])
+                if data.get("distortion") is not None else None
+            ),
         )
 
 
@@ -536,6 +578,11 @@ class RunProfile:
                 "horizontal_aperture_mm": self.camera.horizontal_aperture_mm,
                 "position_m": list(self.camera.position_m),
                 "rotation_wxyz": list(self.camera.rotation_wxyz),
+                **(
+                    {"distortion": {"k1": self.camera.distortion.k1, "k2": self.camera.distortion.k2,
+                                    "render_scale": self.camera.distortion.render_scale}}
+                    if self.camera.distortion is not None else {}
+                ),
             },
             "simulation": {
                 "physics_dt": self.physics_dt,

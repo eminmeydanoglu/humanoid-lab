@@ -102,3 +102,43 @@ def report_cuda_peak_at_exit() -> None:
             pass
 
     atexit.register(_report)
+
+
+def install_sliced_state_delta_fallback() -> bool:
+    """Let ``SonicRepackTransform`` address state columns by slice.
+
+    The pinned ``SonicRepackTransform.__call__`` parses ``observation.state``
+    slice keys (through ``parse_modality_key``) but its ``delta_timestamps``
+    hands the raw key strings to LeRobot as column names, so a sliced state key
+    raises ``KeyError: Column observation.state[0:36] not in the dataset`` before
+    the transform ever runs.  The right-hand mapping of the v1.1 entrypoint uses
+    exactly such keys; this shim collapses every state key to its base field
+    (duplicates collapse harmlessly) while leaving non-sliced keys and all other
+    delta entries untouched.  Behaviour for the historical one-key layout is
+    bit-identical, so it is safe to install unconditionally.
+
+    Returns True when this call owns the patch, False when it was already
+    installed.
+    """
+    from psi.config.transform_psi0_sonic import SonicRepackTransform, parse_modality_key
+
+    original = SonicRepackTransform.delta_timestamps
+    if getattr(original, "_humanoid_lab_sliced_state_keys", False):
+        return False
+
+    def delta_timestamps(self, fps):
+        delta = original(self, fps)
+        for state_key in self.state_keys:
+            base_key, _ = parse_modality_key(state_key)
+            if base_key == state_key:
+                continue
+            delta.pop(state_key, None)
+            delta[base_key] = [
+                t / fps for t in range(-(self.num_past_frames + self.state_temporal_jitter),
+                                       self.state_temporal_jitter + 1)
+            ]
+        return delta
+
+    delta_timestamps._humanoid_lab_sliced_state_keys = True
+    SonicRepackTransform.delta_timestamps = delta_timestamps
+    return True

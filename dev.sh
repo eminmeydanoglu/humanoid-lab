@@ -119,7 +119,7 @@ psi0_forward_env() {
     STATE_DROP_PROB STATE_JITTER STATE_JITTER_PROB STATE_NOISE_STD \
     RESUME EXP SEED DATASET_ROOT STATS INIT_DIR OUTPUT_DIR \
     INSTRUCTION_KEY MASK_KEY WANDB_PROJECT WANDB_MODE CUDA_VISIBLE_DEVICES \
-    OMP_NUM_THREADS PSI0_PYTHON; do
+    OMP_NUM_THREADS PSI0_PYTHON RIGHT_HAND_MAP; do
     if [ -n "${!name:-}" ]; then
       PSI0_FORWARD+=(-e "$name=${!name}")
     fi
@@ -1307,6 +1307,22 @@ case "${1:-}" in
     psi0_forward_env
     DC exec -T "${PSI0_FORWARD[@]}" dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-psi0 && cd /workspace/humanoid-lab && exec bash scripts/psi0-unitree-dex3-sonic-v1.sh "$@"' psi0-dex3-run "${@:2}"
     ;;
+  psi0-dex3-v1.1-check)
+    # Kapı 2 dataset + v1.1 warm-start preflight, including the explicit
+    # right-hand joint-order contract (RIGHT_HAND_MAP). No dataset -> it reports
+    # the missing pack instead of running a forward.
+    up_once
+    psi0_forward_env
+    DC exec -T "${PSI0_FORWARD[@]}" dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-psi0 && cd /workspace/humanoid-lab && exec bash scripts/psi0-unitree-dex3-sonic-v1.1.sh --check-only' psi0-dex3-v1.1-check
+    ;;
+  psi0-dex3-v1.1-run)
+    # The v1.1-init sibling of psi0-dex3-run: same gate ladder, warm start from
+    # postpre.sonic1.1.unifolm.2609181726.40k and the memory-proven b2 x accum16
+    # default. RIGHT_HAND_MAP is forwarded like the other knobs.
+    up_once
+    psi0_forward_env
+    DC exec -T "${PSI0_FORWARD[@]}" dev bash -lc 'source /opt/humanoid-lab/entrypoint.sh && use-psi0 && cd /workspace/humanoid-lab && exec bash scripts/psi0-unitree-dex3-sonic-v1.1.sh "$@"' psi0-dex3-v1.1-run "${@:2}"
+    ;;
   psi0-tests)
     # Contract tests plus the fixture checks against Psi0's real config and
     # transforms.  Runs with the psi0 interpreter; pytest is not installed there.
@@ -1427,7 +1443,7 @@ case "${1:-}" in
     exit 2
     ;;
   *)
-    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-direct-reference dex3|isaac-g1-sonic-fixed-base dex3|isaac-g1-sonic {dex3|inspire-ftp}|sonic-controller|flux-isaac PROFILE|flux-model-env {--plan|--check}|flux-ros|flux-ros-build|flux-checkpoint|flux-model-server|psi0-isaac-eval --checkpoint-dir RUN_DIR --checkpoint-step STEP|sonic-dataset-validate|sonic-pilot|sonic-encode|sonic-review|sonic-review-serve|sonic-convert|sonic-convert-unitree|sonic-tests|sonic-verify|doctor|smoke|groot-finetune-smoke|psi0-smoke|psi0-dex3-check|psi0-dex3-run|psi0-tests|psi0-dex3-dataset-split|psi0-dex3-dataset-convert|psi0-dex3-dataset-validate|sync|fetch-models|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
+    echo "usage: $0 [isaac|isaac-demo|isaac-stream|webrtc-client|sonic-sim|groot|psi0|isaac-g1 {no_hands|inspire-ftp|dex3}|isaac-g1-test-controller dex3|isaac-g1-direct-reference dex3|isaac-g1-sonic-fixed-base dex3|isaac-g1-sonic {dex3|inspire-ftp}|sonic-controller|flux-isaac PROFILE|flux-model-env {--plan|--check}|flux-ros|flux-ros-build|flux-checkpoint|flux-model-server|psi0-isaac-eval --checkpoint-dir RUN_DIR --checkpoint-step STEP|sonic-dataset-validate|sonic-pilot|sonic-encode|sonic-review|sonic-review-serve|sonic-convert|sonic-convert-unitree|sonic-tests|sonic-verify|doctor|smoke|groot-finetune-smoke|psi0-smoke|psi0-dex3-check|psi0-dex3-run|psi0-dex3-v1.1-check|psi0-dex3-v1.1-run|psi0-tests|psi0-dex3-dataset-split|psi0-dex3-dataset-convert|psi0-dex3-dataset-validate|sync|fetch-models|fetch-psi0-ckpt|fetch-groot-demo-data|hf-login|stop|rebuild|foxy]" >&2
     exit 2
     ;;
 esac

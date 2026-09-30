@@ -36,6 +36,12 @@ for name, m in models.items():
     if 'repo' not in m:
         # A pinned local artifact verified by content hash, not a download.
         continue
+    if m.get('local_dir'):
+        # PSI_HOME checkpoints (psi0_*) are owned by fetch-psi0-checkpoint.sh
+        # and resolve under PSI_HOME; downloading them here would duplicate
+        # tens of GB under MODEL_ROOT for no consumer.
+        print(f"[skip] {name}: PSI_HOME checkpoint (./dev.sh fetch-psi0-ckpt)")
+        continue
     repo, rev = m['repo'], m['revision']
     variant = m.get('variant', '')
     if not rev:
