@@ -40,7 +40,7 @@ Overrides:
 | `FLUX_EVAL_OUTPUT` | Run, upload, and preview storage root |
 
 Default weights are reused from
-`/home/aksoy-lab/code/flux-3-action/flux-action/outputs/weights/video_vae.safetensors`.
+`/home/aksoy-lab/code/flux-training/flux-action/outputs/weights/video_vae.safetensors`.
 The model is loaded once, lazily, and remains on the GPU. Restart the service
 to release GPU memory or change weights. The GPU worker serializes inference;
 the queue accepts at most four outstanding jobs. Preview preparation uses a

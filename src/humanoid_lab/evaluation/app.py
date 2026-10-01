@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[3]
 DATA = Path(os.environ.get("HUMANOID_DATA_ROOT", ROOT / "data"))
 STORE = Path(os.environ.get("FLUX_EVAL_OUTPUT", DATA / "outputs/flux-evaluation"))
 DATASET = Path(os.environ.get("FLUX_EVAL_DATASET", DATA / "datasets/sonic/unifolm_sonic_lerobot_train"))
-WEIGHTS = Path(os.environ.get("FLUX_EVAL_WEIGHTS", "/home/aksoy-lab/code/flux-3-action/flux-action/outputs/weights/video_vae.safetensors"))
+WEIGHTS = Path(os.environ.get("FLUX_EVAL_WEIGHTS", "/home/aksoy-lab/code/flux-training/flux-action/outputs/weights/video_vae.safetensors"))
 for name in ("runs", "previews", "uploads"):
     (STORE / name).mkdir(parents=True, exist_ok=True)
 BACKENDS = registry(WEIGHTS)
