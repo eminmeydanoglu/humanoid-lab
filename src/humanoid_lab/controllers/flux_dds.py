@@ -300,6 +300,27 @@ def _take_newest(reader: Any) -> Any:
     return valid[-1] if valid else None
 
 
+def _initialize_sdk_channel(domain_id: int, interface: str) -> None:
+    import importlib
+
+    channel = importlib.import_module("unitree_sdk2py.core.channel")
+    if interface not in ("lo", "127.0.0.1"):
+        channel.ChannelFactoryInitialize(domain_id, interface)
+        return
+    original = channel.ChannelConfigHasInterface
+    if original.count("</Domain>") != 1:
+        raise CommandError("SDK loopback DDS config must contain one Domain")
+    # Well-known unicast ports let later ROS participants discover the simulator.
+    discovery = ("<Discovery><ParticipantIndex>auto</ParticipantIndex>"
+                 "<MaxAutoParticipantIndex>99</MaxAutoParticipantIndex>"
+                 '<Peers><Peer address="127.0.0.1"/></Peers></Discovery>')
+    channel.ChannelConfigHasInterface = original.replace("</Domain>", discovery + "</Domain>")
+    try:
+        channel.ChannelFactoryInitialize(domain_id, interface)
+    finally:
+        channel.ChannelConfigHasInterface = original
+
+
 class FluxDdsController:
     """Apply the Foxy Flux node's arm and hand commands to the Isaac simulator."""
 
@@ -319,7 +340,7 @@ class FluxDdsController:
     ) -> None:
         # Imported lazily: the DDS bindings only exist in the runtime image, and
         # only this controller needs them.
-        from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher
+        from unitree_sdk2py.core.channel import ChannelPublisher
         from unitree_sdk2py.idl.default import (
             unitree_hg_msg_dds__HandState_ as HandStateDefault,
             unitree_hg_msg_dds__LowState_ as LowStateDefault,
@@ -362,7 +383,7 @@ class FluxDdsController:
         self._left_hand_state = HandStateDefault()
         self._right_hand_state = HandStateDefault()
 
-        ChannelFactoryInitialize(self._domain_id, self._interface)
+        _initialize_sdk_channel(self._domain_id, self._interface)
         self._low_state_publisher = ChannelPublisher(self.topics["low_state"], LowState_)
         self._low_state_publisher.Init()
         self._left_hand_state_publisher = ChannelPublisher(self.topics["left_hand_state"], HandState_)

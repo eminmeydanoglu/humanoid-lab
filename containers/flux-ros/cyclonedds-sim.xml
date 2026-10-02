@@ -16,5 +16,12 @@
       <AllowMulticast>false</AllowMulticast>
       <DontRoute>true</DontRoute>
     </General>
+    <Discovery>
+      <ParticipantIndex>auto</ParticipantIndex>
+      <MaxAutoParticipantIndex>99</MaxAutoParticipantIndex>
+      <Peers>
+        <Peer address="127.0.0.1" />
+      </Peers>
+    </Discovery>
   </Domain>
 </CycloneDDS>

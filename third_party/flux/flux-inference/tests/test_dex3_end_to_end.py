@@ -15,6 +15,8 @@ from examples.dex3.zmq_server import Dex3Server
 
 
 class FakeModel:
+    image_hw = (192, 256)
+
     def reset(self):
         pass
 

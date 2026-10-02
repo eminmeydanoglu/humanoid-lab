@@ -116,7 +116,7 @@ class Dex3Server:
                                          merge_adapter=self.merge_adapter)
             else:
                 model = self.model_loader(self.checkpoint, device=self.device)
-            image = np.zeros((192, 256, 3), dtype=np.uint8)
+            image = np.zeros((*model.image_hw, 3), dtype=np.uint8)
             state = np.zeros(28, dtype=np.float32)
             protocol.encode_predict_reply("warmup", 0, model.predict(image, state, "stack three block"), 0)
             model.reset()

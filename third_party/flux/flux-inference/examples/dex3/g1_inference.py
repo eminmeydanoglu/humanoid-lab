@@ -67,10 +67,14 @@ class G1Inference:
             or cfg.action_dim != 28
             or cfg.chunk_size != 32
             or cfg.n_obs_steps != 1
-            or tuple(cfg.canvas_hw) != (192, 256)
             or cfg.action_representation != "absolute"
         ):
             raise ValueError("checkpoint is not the G1/Dex3 single-camera 28D policy")
+        canvas = cfg.canvas_hw
+        if (not isinstance(canvas, (list, tuple)) or len(canvas) != 2
+                or any(type(size) is not int or size <= 0 for size in canvas)):
+            raise ValueError("checkpoint canvas_hw must contain two positive integer dimensions")
+        self.image_hw = tuple(canvas)
         self.policy, self.pre, self.post = policy, pre, post
         self.device = torch.device(device)
         self.policy.eval()
@@ -114,18 +118,19 @@ class G1Inference:
     def predict(self, image: np.ndarray, state: np.ndarray, task: str) -> np.ndarray:
         """RGB HWC uint8 + 28 measured joints -> 32x28 absolute commands."""
         image = np.asarray(image)
-        if image.dtype != np.uint8 or image.shape not in ((480, 640, 3), (192, 256, 3)):
-            raise ValueError("image must be RGB uint8 HWC at 480x640 or 192x256")
+        if (image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3
+                or any(size <= 0 for size in image.shape[:2])):
+            raise ValueError("image must be nonempty RGB uint8 HWC")
         state = np.asarray(state, dtype=np.float32)
         if state.shape != (28,) or not np.isfinite(state).all():
             raise ValueError("state must be 28 finite values in Dex3 joint order")
         if not isinstance(task, str) or not task.strip():
             raise ValueError("task must be a nonempty instruction")
-        if image.shape[:2] == (480, 640):
+        if image.shape[:2] != self.image_hw:
             import av
 
             image = av.VideoFrame.from_ndarray(np.ascontiguousarray(image), format="rgb24").to_ndarray(
-                format="rgb24", width=256, height=192
+                format="rgb24", width=self.image_hw[1], height=self.image_hw[0]
             )
         observation = {
             CAMERA: torch.from_numpy(np.array(image, copy=True, order="C")).permute(2, 0, 1).float() / 255,

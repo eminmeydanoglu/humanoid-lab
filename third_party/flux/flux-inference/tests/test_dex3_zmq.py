@@ -50,6 +50,8 @@ def port():
 
 
 class FakeModel:
+    image_hw = (192, 256)
+
     def __init__(self):
         self.resets = 0
         self.calls = []
@@ -321,3 +323,21 @@ def test_worker_passes_merge_adapter_to_inference(checkpoint, monkeypatch):
     server._worker()
     assert server.results.get_nowait()[0] == "loaded"
     assert seen["merge_adapter"] is True
+
+
+def test_worker_warmup_uses_model_resolution(checkpoint):
+    seen = []
+
+    class ResolutionModel(FakeModel):
+        image_hw = (480, 640)
+
+        def predict(self, image, state, task):
+            seen.append(image.shape)
+            return super().predict(image, state, task)
+
+    server = Dex3Server(str(checkpoint), port=port(),
+                        model_loader=lambda path, device: ResolutionModel())
+    server.stop_event.set()
+    server._worker()
+    assert server.results.get_nowait()[0] == "loaded"
+    assert seen == [(480, 640, 3)]

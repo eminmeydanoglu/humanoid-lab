@@ -119,7 +119,7 @@ services:
     environment:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-42}
       - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}
-      - CYCLONEDDS_URI=file:///opt/humanoid-lab/flux-ros/cyclonedds-sim.xml
+      - CYCLONEDDS_URI=file:///workspace/humanoid-lab/containers/flux-ros/cyclonedds-sim.xml
       - HUMANOID_SIM_DDS_DOMAIN_ID=42
       - PYTHONDONTWRITEBYTECODE=1
       # RViz draws on the host display; the rest of the stack is headless.

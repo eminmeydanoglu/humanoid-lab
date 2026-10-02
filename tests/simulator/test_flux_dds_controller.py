@@ -212,6 +212,7 @@ class FakeDds:
     def _channel_module(self):
         channel = type(sys)("unitree_sdk2py.core.channel")
         channel.ChannelFactoryInitialize = self._initialize
+        channel.ChannelConfigHasInterface = "<CycloneDDS><Domain id='any'></Domain></CycloneDDS>"
         channel.ChannelPublisher = self._publisher
         return channel
 
@@ -687,6 +688,44 @@ class ControllerTests(unittest.TestCase):
                 controller.close()
         # The existing provider registry is untouched by the addition.
         self.assertEqual(PROVIDERS[:4], ("none", "scripted", "sonic_dds", "flux_dds"))
+
+
+
+
+class TestLoopbackDiscovery(unittest.TestCase):
+    def test_sdk_uses_well_known_ports_and_restores_config(self):
+        module = type(sys)("unitree_sdk2py.core.channel")
+        original = "<CycloneDDS><Domain id='any'></Domain></CycloneDDS>"
+        module.ChannelConfigHasInterface = original
+        seen = []
+        module.ChannelFactoryInitialize = lambda domain, interface: seen.append(
+            (domain, interface, module.ChannelConfigHasInterface))
+        with unittest.mock.patch.dict(sys.modules, {module.__name__: module}):
+            flux_dds._initialize_sdk_channel(42, "lo")
+        self.assertEqual(seen[0][:2], (42, "lo"))
+        self.assertIn("<ParticipantIndex>auto</ParticipantIndex>", seen[0][2])
+        self.assertIn("<MaxAutoParticipantIndex>99</MaxAutoParticipantIndex>", seen[0][2])
+        self.assertIn('address="127.0.0.1"', seen[0][2])
+        self.assertEqual(module.ChannelConfigHasInterface, original)
+
+    def test_nonloopback_interface_retains_sdk_config(self):
+        module = type(sys)("unitree_sdk2py.core.channel")
+        module.ChannelConfigHasInterface = "unchanged"
+        module.ChannelFactoryInitialize = unittest.mock.Mock()
+        with unittest.mock.patch.dict(sys.modules, {module.__name__: module}):
+            flux_dds._initialize_sdk_channel(42, "eth0")
+        module.ChannelFactoryInitialize.assert_called_once_with(42, "eth0")
+        self.assertEqual(module.ChannelConfigHasInterface, "unchanged")
+
+    def test_config_restored_when_sdk_initialization_fails(self):
+        module = type(sys)("unitree_sdk2py.core.channel")
+        original = "<CycloneDDS><Domain id='any'></Domain></CycloneDDS>"
+        module.ChannelConfigHasInterface = original
+        module.ChannelFactoryInitialize = unittest.mock.Mock(side_effect=RuntimeError("DDS failed"))
+        with unittest.mock.patch.dict(sys.modules, {module.__name__: module}):
+            with self.assertRaisesRegex(RuntimeError, "DDS failed"):
+                flux_dds._initialize_sdk_channel(42, "lo")
+        self.assertEqual(module.ChannelConfigHasInterface, original)
 
 
 if __name__ == "__main__":

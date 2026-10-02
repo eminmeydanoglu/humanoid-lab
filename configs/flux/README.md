@@ -56,13 +56,30 @@ The shipped `g1_29dof_with_hand_rev_1_0.usd` was read directly with usd-core
 model's ranges, arms and hands included.  So the adapter's clamp is the asset's
 own range, and "physical" means the same numbers on both sides.
 
-## Not verified here
+## Live simulation verification (2026-10-01)
 
-- Live endpoint matching between the node's ROS topics and the simulator's raw
-  DDS topics (`/lowcmd` <-> `rt/lowcmd`, `/lowstate` <-> `rt/lowstate`,
-  `/dex3/*/cmd|state` <-> `rt/dex3/*/cmd|state`). The raw names follow the
-  `rmw_cyclonedds_cpp` mapping and the Unitree SDK examples; check live topic
-  traffic with ROS 2 while the simulator and launch are running.
-- End-to-end model runs with the restarted node and simulator using this
-  configuration; the offline tests cover clipping and task continuity.
-- Physical command acceptance, CRC handling and hardware stop/hold behaviour.
+The realistic apple profile on `aksoyy` was tested with V2 raw checkpoint 6000,
+3-second model-network and returned-observation age budgets, and motor output
+enabled. The simulation launch remaps `/lowcmd` to `/arm_sdk`, matching the
+controller's `rt/arm_sdk` reader. Body and both hand states arrived; a late ROS
+reader discovered them using the default configuration. Model predictions
+produced arm and hand motion. Start, pause, resume, and stop passed; stop ceased
+command publication. Camera, body/hand feedback, and all three command topics
+were received through the Tailscale Foxglove WebSocket in a real browser.
+
+Run evidence: `/home/aksoyy/code/data/outputs/flux-e2e-aksoyy/control-3s-e2e.json`.
+
+## Physical deployment verification
+
+Physical command acceptance, CRC handling, and hardware stop/hold behaviour
+require separate verification on the physical robot.
+
+## Low-latency Foxglove preview
+
+Use `foxglove-live.yaml` for the Tailscale bridge and choose
+`/camera/color/image_raw/compressed` in the Image panel. The JPEG preview keeps
+one latest frame, uses depth-1 best-effort QoS, drops frames older than 0.5 s,
+and publishes at most 15 FPS with quality 75. Capture headers remain unchanged.
+The raw image remains available to local inference and is excluded only from
+this remote bridge. The shared WebSocket backlog is 32 messages; overflow drops
+oldest data. TCP and viewer buffering remain outside that queue limit.

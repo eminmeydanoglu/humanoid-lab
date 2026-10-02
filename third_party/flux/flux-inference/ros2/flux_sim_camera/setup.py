@@ -13,5 +13,8 @@ setup(
     ],
     install_requires=["setuptools", "numpy", "pyzmq", "msgpack", "Pillow"],
     zip_safe=True,
-    entry_points={"console_scripts": ["camera_bridge = flux_sim_camera.camera_bridge:main"]},
+    entry_points={"console_scripts": [
+        "camera_bridge = flux_sim_camera.camera_bridge:main",
+        "camera_jpeg = flux_sim_camera.camera_jpeg:main",
+    ]},
 )

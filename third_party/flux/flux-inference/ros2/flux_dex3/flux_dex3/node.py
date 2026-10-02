@@ -75,8 +75,8 @@ class Dex3Node(Node):
         self.network = NetworkWorker(endpoint, self.events,
                                      float(self.get_parameter("network_timeout_s").value), public, secret, server)
         max_chunk_age_s = float(self.get_parameter("max_chunk_age_s").value)
-        if not 0 < max_chunk_age_s <= 2.0:
-            raise ValueError("max_chunk_age_s must be in (0, 2.0]")
+        if not 0 < max_chunk_age_s <= 3.0:
+            raise ValueError("max_chunk_age_s must be in (0, 3.0]")
         self.chunk_executor = ChunkExecutor(max_chunk_age_s=max_chunk_age_s)
         self.command_output = None
         if self.get_parameter("enable_motor_commands").value:

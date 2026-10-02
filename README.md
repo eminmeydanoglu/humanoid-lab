@@ -187,7 +187,9 @@ Terminals:
   model_endpoint:=tcp://127.0.0.1:5561 \
   camera_endpoint:=tcp://127.0.0.1:5555 \
   motor_output_config:=/workspace/humanoid-lab/configs/flux/flux-dex3-sim-motor-config.json \
-  enable_motor_commands:=true
+  enable_motor_commands:=true \
+  network_timeout_s:=3.0 \
+  max_chunk_age_s:=3.0
 
 # 4 — operator service calls
 ./dev.sh flux-ros ros2 service call /flux_dex3/get_status flux_dex3_interfaces/srv/GetStatus '{}'
@@ -199,14 +201,39 @@ Terminals:
   `Put the gum into the plate.`
 - `accepted: true` only queues the task. Confirm `state: RUNNING` and a nonempty
   `session_id` with `get_status`.
+- The simulation launch remaps `/lowcmd` to `/arm_sdk`, matching the profile's
+  `rt/arm_sdk` reader. Network timeout and maximum returned-observation age default
+  to 3 seconds. The DDS command freshness limit remains 0.25 seconds.
+- Realistic apple scene: use `pick-apple-askida-real.json` for Isaac and pass
+  `profile:=configs/profiles/pick-apple-askida-real.json` to the ROS launch. Keep
+  the profile's `flux_dds` controller enabled so body and hand states are published.
 - Stop the task before stopping ROS or Isaac.
 - The motor config is simulation-only and must not be copied to a real robot.
 - The ROS launch publishes the robot and camera TF tree. For the gum scene, add
   `profile:=configs/profiles/pick-gum-askida.json` to the ROS launch so its TF
   matches the simulator profile.
+- Loopback DDS uses automatic participant indices and explicit localhost discovery
+  on both the simulator and ROS sides, so later ROS clients can discover state.
 - RViz: `./dev.sh flux-ros ros2 launch flux_sim_viz flux_rviz.launch.py`.
 - Foxglove Bridge listens on loopback `8765`; expose it with
-  `tailscale serve --bg --https=8443 8765`.
+  `tailscale serve --bg --https=8443 8765`. Alternatively, start a separate read-only bridge
+  bound to the host's Tailscale IP:
+
+  ```bash
+  ./dev.sh flux-ros ros2 run foxglove_bridge foxglove_bridge --ros-args \
+    -r __node:=foxglove_tailscale -p address:="$(tailscale ip -4)" -p port:=8765 \
+    --params-file /workspace/humanoid-lab/configs/flux/foxglove-live.yaml
+  ```
+
+  Connect a current Foxglove client to `ws://<tailscale-ip>:8765`.
+  In the Image panel, select `/camera/color/image_raw/compressed`: the simulation
+  launch publishes a latest-only JPEG preview (quality 75, at most 15 FPS), while
+  inference keeps its raw RGB topic. The live bridge hides the raw camera and
+  limits the shared outgoing queue to 32 messages, dropping oldest queued data
+  on overflow. Reconnect after changing the bridge settings to discard old TCP
+  buffers. This bounds application buffering; network stalls can still delay TCP.
+
+
 - Optional recordings: add
   `--tracking-output /outputs/<run>/tracking.parquet --metrics-output /outputs/<run>/summary.json`
   to the simulator command.

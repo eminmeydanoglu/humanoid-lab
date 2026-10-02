@@ -33,6 +33,7 @@ def generate_launch_description():
     motor_output_config = LaunchConfiguration("motor_output_config")
     enable_motor_commands = LaunchConfiguration("enable_motor_commands")
     freshness_s = LaunchConfiguration("freshness_s")
+    network_timeout_s = LaunchConfiguration("network_timeout_s")
     max_chunk_age_s = LaunchConfiguration("max_chunk_age_s")
     pair_tolerance_s = LaunchConfiguration("pair_tolerance_s")
     camera_bridge = LaunchConfiguration("camera_bridge")
@@ -64,8 +65,9 @@ def generate_launch_description():
         # Isaac render contention occasionally delays a frame past 0.25 s;
         # this remains bounded and leaves the robot node's own default intact.
         DeclareLaunchArgument("freshness_s", default_value="0.5"),
-        # Observation age reached 1.5 s during the livestream run.
-        DeclareLaunchArgument("max_chunk_age_s", default_value="2.0"),
+        # V2 sampling takes about 2.4 seconds while Isaac renders.
+        DeclareLaunchArgument("network_timeout_s", default_value="3.0"),
+        DeclareLaunchArgument("max_chunk_age_s", default_value="3.0"),
         DeclareLaunchArgument("pair_tolerance_s", default_value="0.1"),
         DeclareLaunchArgument("camera_bridge", default_value="true"),
         IncludeLaunchDescription(
@@ -91,14 +93,23 @@ def generate_launch_description():
             }],
         ),
         Node(
+            package="flux_sim_camera",
+            executable="camera_jpeg",
+            name="flux_sim_camera_jpeg",
+            output="screen",
+            parameters=[{"raw_topic": camera_topic}],
+        ),
+        Node(
             package="flux_dex3",
             executable="dex3_node",
             name="flux_dex3",
             output="screen",
+            remappings=[("/lowcmd", "/arm_sdk")],
             parameters=[{
                 "endpoint": model_endpoint,
                 "camera_topic": camera_topic,
                 "freshness_s": freshness_s,
+                "network_timeout_s": network_timeout_s,
                 "max_chunk_age_s": max_chunk_age_s,
                 "pair_tolerance_s": pair_tolerance_s,
                 "enable_motor_commands": enable_motor_commands,

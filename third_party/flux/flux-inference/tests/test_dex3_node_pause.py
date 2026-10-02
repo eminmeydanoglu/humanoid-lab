@@ -76,6 +76,7 @@ class FakeNode:
 
 class FakeNetwork:
     def __init__(self, endpoint, events, timeout, public, secret, server):
+        self.timeout = timeout
         self.commands = []
 
     def start(self):
@@ -289,3 +290,27 @@ def test_resume_keeps_hold_until_fresh_chunk(robot_node):
     node._tick()
     np.testing.assert_array_equal(node.pause_target, np.full(28, 0.05, np.float32))
     node._stop(SimpleNamespace(), SimpleNamespace())
+
+
+def test_three_second_simulation_budget_accepts_v2_latency(robot_node, monkeypatch):
+    monkeypatch.setattr(FakeNode, "declare_parameter", lambda self, name, default:
+                        self.params.__setitem__(name, {"network_timeout_s": 3.0,
+                                                       "max_chunk_age_s": 3.0}.get(name, default)))
+    node = sys.modules["flux_dex3.node"].Dex3Node()
+    try:
+        assert node.network.timeout == 3.0
+        assert node.chunk_executor.max_chunk_age_s == 3.0
+        node.chunk_executor.start("v2")
+        node.chunk_executor.accept("v2", 0, 2.8, np.zeros((32, 28), np.float32), now=1.0)
+        with pytest.raises(ValueError, match="stale observation"):
+            node.chunk_executor.accept("v2", 1, 3.001, np.zeros((32, 28), np.float32), now=2.0)
+    finally:
+        node.destroy_node()
+
+
+@pytest.mark.parametrize("age", [0.0, -1.0, 3.001, float("nan"), float("inf")])
+def test_chunk_age_configuration_retains_bounded_validation(robot_node, monkeypatch, age):
+    monkeypatch.setattr(FakeNode, "declare_parameter", lambda self, name, default:
+                        self.params.__setitem__(name, age if name == "max_chunk_age_s" else default))
+    with pytest.raises(ValueError, match="max_chunk_age_s"):
+        sys.modules["flux_dex3.node"].Dex3Node()

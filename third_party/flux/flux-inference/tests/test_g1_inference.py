@@ -34,7 +34,7 @@ class FakePolicy:
         self.resets += 1
 
     def predict_action_chunk(self, batch):
-        assert batch[CAMERA].shape == (1, 3, 192, 256)
+        assert batch[CAMERA].shape == (1, 3, *self.config.canvas_hw)
         assert batch["observation.state"].shape == (1, 28)
         assert batch["task"] == ["stack three block"]
         assert not torch.is_grad_enabled()
@@ -99,9 +99,32 @@ def test_raw_camera_resizes_and_bad_inputs_fail():
             runner.predict(image, state, task)
 
 
+@pytest.mark.parametrize("canvas_hw", [(192, 256), (480, 640), (256, 256)])
+@pytest.mark.parametrize("source_hw", [(192, 256), (480, 640), (240, 320)])
+def test_image_resolution_follows_checkpoint(canvas_hw, source_hw, monkeypatch):
+    policy, pre = FakePolicy(), FakePre()
+    policy.config.canvas_hw = list(canvas_hw)
+    runner = G1Inference(policy, pre, FakePost(), device="cpu")
+    assert runner.image_hw == canvas_hw
+    if source_hw == canvas_hw:
+        monkeypatch.setitem(sys.modules, "av", None)
+    image = np.full((*source_hw, 3), 255, dtype=np.uint8)
+    actions = runner.predict(image, np.zeros(28, np.float32), "stack three block")
+    assert actions.shape == (32, 28)
+    torch.testing.assert_close(pre.last_image, torch.ones(3, *canvas_hw))
+
+
+@pytest.mark.parametrize("canvas_hw", [[], [192], [192, 256, 3], [192, -1], [192, 256.0], [True, 256], None])
+def test_invalid_canvas_dimensions_fail(canvas_hw):
+    policy = FakePolicy()
+    policy.config.canvas_hw = canvas_hw
+    with pytest.raises(ValueError, match="canvas_hw"):
+        G1Inference(policy, FakePre(), FakePost(), device="cpu")
+
+
 def test_invalid_checkpoint_geometry_or_actions_fail():
     policy = FakePolicy()
-    policy.config.canvas_hw = (256, 256)
+    policy.config.canvas_hw = (0, 256)
     with pytest.raises(ValueError, match="checkpoint"):
         G1Inference(policy, FakePre(), FakePost(), device="cpu")
     policy.config.canvas_hw = (192, 256)
